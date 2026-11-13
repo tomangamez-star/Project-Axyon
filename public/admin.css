@@ -36,3 +36,7 @@
 .log-line b{color:var(--cyan);font-weight:600}
 .log-line span{color:var(--muted)}
 @media(max-width:640px){.admin-table th:nth-child(n+5),.admin-table td:nth-child(n+5){display:none}}
+.admin-error{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 16px;padding:12px 14px;border:1px solid rgba(255,83,109,.45);background:rgba(255,83,109,.09);border-radius:10px;color:#ffd7de;font-size:13px;line-height:1.5}
+.admin-error b{color:var(--danger);letter-spacing:.06em;text-transform:uppercase;font-size:11px}
+.admin-error span{flex:1;min-width:180px}
+.admin-error button{background:transparent;border:0;color:var(--danger);font-size:18px;line-height:1;cursor:pointer;padding:0 4px}

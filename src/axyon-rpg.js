@@ -10,6 +10,7 @@
  * anywhere in this file — every outcome is Math.random() plus fixed tables.
  */
 const store = require('./axyon-store')
+const greetings = require('./greetings')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -172,13 +173,26 @@ function battleCard (b, p, note = '') {
 
 function createAxyon ({ economy, logger, sendButtons } = {}) {
   const send = (s, j, m, t) => s.sendMessage(j, { text: t }, { quoted: m })
-  const buttons = (s, j, m, body, footer, defs, owner) => {
+
+  /*
+   * BUTTON POLICY
+   * -------------
+   * Most of this bot is plain commands. Buttons are reserved for the two
+   * places where tapping genuinely beats typing: the six battle actions, and
+   * accepting or declining a duel (where the other player has to answer).
+   *
+   * `buttons()` therefore renders plain text and ignores any button defs it is
+   * handed, so no screen can quietly grow a button grid again. `tapButtons()`
+   * is the explicit opt-in used only by battle and duels.
+   */
+  const buttons = (s, j, m, body) => s.sendMessage(j, { text: body }, { quoted: m })
+  const tapButtons = (s, j, m, body, footer, defs, owner) => {
     if (sendButtons) return sendButtons(s, j, body, footer || WATERMARK, defs, owner)
     return s.sendMessage(j, { text: body }, { quoted: m })
   }
 
   /* ---------------------------------------------------------- media helper */
-  async function withVisual (sock, jid, m, mode, text, defs) {
+  async function withVisual (sock, jid, m, mode, text, defs, tappable = false) {
     const v = await store.visual(mode).catch(() => null)
     if (v && v.url) {
       try {
@@ -186,13 +200,21 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
         else payload.image = { url: v.url }
         await sock.sendMessage(jid, payload, { quoted: m })
-        if (defs && defs.length) return buttons(sock, jid, m, v.caption || '\u2728', WATERMARK, defs)
+        if (defs && defs.length) {
+          return tappable
+            ? tapButtons(sock, jid, m, v.caption || '\u2728', WATERMARK, defs)
+            : buttons(sock, jid, m, v.caption || '\u2728')
+        }
         return true
       } catch (e) {
         logger?.warn?.({ err: e, mode }, 'axyon visual send failed')
       }
     }
-    if (defs && defs.length) return buttons(sock, jid, m, text, WATERMARK, defs)
+    if (defs && defs.length) {
+      return tappable
+        ? tapButtons(sock, jid, m, text, WATERMARK, defs)
+        : buttons(sock, jid, m, text)
+    }
     return send(sock, jid, m, text)
   }
 
@@ -212,24 +234,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.log(userId, 'arise', userId, { created: r.created })
     const p = r.player
     const caption = r.created
-      ? [
-          `${WATERMARK}`, '', '\ud83c\udf00 *ARISE*', '',
-          `> \ud83d\udc64 *${p.name || 'Hunter'}*`, '',
-          'You have been recognised by the System.',
-          `\ud83c\udf96\ufe0f Rank *${p.rank}* \u2022 Grade *${p.grade}* \u2022 Lv. *${p.level}*`,
-          `\u2764\ufe0f ${p.maxHp} HP \u2022 \u2694\ufe0f ${p.atk} ATK \u2022 \ud83d\udee1\ufe0f ${p.def} DEF`,
-          `\u26a1 Power Energy *${p.maxPowerEnergy}*`, '',
-          `Type *${settings.prefix}help* to see everything you can do.`
-        ].join('\n')
-      : [
-          `${WATERMARK}`, '', '\ud83c\udf00 *WELCOME BACK*', '',
-          `> \ud83d\udc64 *${p.name || 'Hunter'}*`, '',
-          `\ud83c\udf96\ufe0f Rank *${p.rank}* \u2022 Grade *${p.grade}* \u2022 Lv. *${p.level}*`,
-          `\u2764\ufe0f ${p.hp}/${p.maxHp} \u2022 \u26a1 ${p.powerEnergy}/${p.maxPowerEnergy}`, '',
-          'Your progression is exactly where you left it.'
-        ].join('\n')
-    return withVisual(sock, jid, m, 'arise', caption,
-      [['\ud83d\udc64 Profile', 'ax_profile'], ['\u2694\ufe0f Battle', 'ax_stages'], ['\ud83d\udcda Help', 'ax_help']])
+      ? greetings.firstGreeting(p, settings.prefix)
+      : greetings.returnGreeting(p, settings.prefix)
+    return withVisual(sock, jid, m, 'arise', caption)
   }
 
   async function profile (sock, m, ctx) {
@@ -285,7 +292,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'battle_start', String(stage.ordinal), { enemy: enemy.name })
     return withVisual(sock, ctx.jid, m, enemy.boss ? 'boss' : 'battle',
-      battleCard(b, p, `You step into *${enemy.name}*.`), battleButtons())
+      battleCard(b, p, `You step into *${enemy.name}*.`), battleButtons(), true)
   }
 
   function battleButtons () {
@@ -412,7 +419,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
     await store.setBattle(ctx.userId, b)
 
-    return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons())
+    return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
   }
 
   async function finishBattle (sock, m, ctx, p, b, won) {
@@ -469,12 +476,66 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (!b) return send(sock, ctx.jid, m, '\ud83c\udf00 That player has not used `!arise` yet.')
     const d = await store.createDuel(ctx.jid, ctx.userId, opponentId)
     await store.log(ctx.userId, 'duel_challenge', opponentId, { id: d.id })
-    return buttons(sock, ctx.jid, m, [
+    return tapButtons(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '\ud83e\udd4a *DUEL CHALLENGE*', '',
       `> *${a.name}* \u2694\ufe0f *${b.name}*`, '',
       `Rank *${a.rank}* Lv.${a.level} vs Rank *${b.rank}* Lv.${b.level}`, '',
-      'Both fighters are granted temporary group admin for the duration of the duel, then demoted when it ends.'
+      'Both fighters are granted temporary group admin for the duration of the duel, then demoted when it ends.', '',
+      `*${ctx.settings.prefix}duel accept ${d.id}*  \u2022  *${ctx.settings.prefix}duel decline ${d.id}*`
     ].join('\n'), WATERMARK, [['\u2705 Accept', `ax_duel_accept_${d.id}`], ['\u274c Decline', `ax_duel_decline_${d.id}`]])
+  }
+
+  /**
+   * Answers a pending duel. Only the challenged player (or AXYON) may answer.
+   *
+   * On accept, both fighters are promoted to group admin for the duration of
+   * the duel and recorded in `promoted` so they can be demoted when it ends.
+   * Promotion is best-effort: if the bot is not a group admin itself, WhatsApp
+   * refuses and we say so instead of pretending it worked.
+   */
+  async function answerDuel (sock, m, ctx, id, accept) {
+    const d = await store.duel(Number(id))
+    if (!d || d.status !== 'pending') {
+      return send(sock, ctx.jid, m, '\u231b That challenge is no longer active.')
+    }
+    if (ctx.userId !== d.opponent && !ctx.auth.axyon) {
+      return send(sock, ctx.jid, m, '\ud83d\udd12 Only the challenged player can answer this duel.')
+    }
+    if (!accept) {
+      await store.updateDuel(d.id, { status: 'declined' })
+      await store.log(ctx.userId, 'duel_decline', String(d.id))
+      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\u274c *DUEL DECLINED*\n\nThe challenge was withdrawn.`)
+    }
+
+    const a = await store.player(d.challenger)
+    const b = await store.player(d.opponent)
+    if (!a || !b) return send(sock, ctx.jid, m, '\u274c One of the fighters no longer exists.')
+
+    let promoted = []
+    let promoteNote = ''
+    if (ctx.settings.duelAutoPromote && ctx.jid.endsWith('@g.us')) {
+      try {
+        const ids = [d.challenger, d.opponent].map(x => `${x}@s.whatsapp.net`)
+        await sock.groupParticipantsUpdate(ctx.jid, ids, 'promote')
+        promoted = [d.challenger, d.opponent]
+        promoteNote = '\ud83d\udee1\ufe0f Both fighters hold temporary group admin for this duel.'
+      } catch (e) {
+        logger?.warn?.({ err: e }, 'duel admin promotion failed')
+        promoteNote = '\u26a0\ufe0f Temporary admin could not be granted \u2014 Architect needs to be a group admin itself. The duel still runs.'
+      }
+    }
+
+    await store.updateDuel(d.id, { status: 'active', state: { turn: d.challenger, round: 1 }, promoted })
+    await store.log(ctx.userId, 'duel_accept', String(d.id), { promoted })
+
+    return send(sock, ctx.jid, m, [
+      `${WATERMARK}`, '', '\u2694\ufe0f *DUEL BEGINS*', '',
+      `> *${a.name || d.challenger}* vs *${b.name || d.opponent}*`, '',
+      `Rank *${a.rank}* Lv.${a.level} \u2022 ${a.hp} HP`,
+      `Rank *${b.rank}* Lv.${b.level} \u2022 ${b.hp} HP`, '',
+      promoteNote, '',
+      `Duel *#${d.id}* is live.`
+    ].filter(Boolean).join('\n'))
   }
 
   /* ------------------------------------------------------ daily / economy */
@@ -564,9 +625,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
-    cmd, send, buttons, withVisual,
+    cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
-    cardPanel, claimCard, beginDuel, daily, zenWallet,
+    cardPanel, claimCard, beginDuel, answerDuel, daily, zenWallet,
     helpPage, helpAll, helpButtons,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
   }

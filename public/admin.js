@@ -1,6 +1,18 @@
 /* AXYON ADMIN PANEL — moderation for the WhatsApp bot.
- * Reuses the dashboard's session + CSRF; every write goes through
- * /dashboard/api/admin/action and is audit-logged server-side.
+ *
+ * WHY THIS WAS REWRITTEN
+ * ----------------------
+ * The previous version mounted exactly once, on DOMContentLoaded. If you were
+ * not already signed in at that moment it returned early and never tried
+ * again — so after logging in, the panel stayed hidden and every button in it
+ * was unreachable. Worse, its CSRF token was captured at that same failed
+ * moment, so any POST that did fire came back 403 "Security token mismatch"
+ * and the error was swallowed by a toast that vanished in under three seconds.
+ *
+ * Now: mounting is idempotent and re-runs on the `architect:login` event the
+ * dashboard fires after a successful sign-in. Every request reports failure in
+ * a persistent banner as well as a toast, and every button is wired to a real
+ * endpoint with its own error path.
  */
 const A = (() => {
   const $ = s => document.querySelector(s)
@@ -11,33 +23,63 @@ const A = (() => {
   let csrf = ''
   let data = null
   let tab = 'groups'
+  let mounted = false
+  let loading = false
+
+  /* ------------------------------------------------------------- feedback */
 
   function toast (t) {
     const e = $('#toast')
     if (!e) return
     e.textContent = t
     e.classList.add('show')
-    setTimeout(() => e.classList.remove('show'), 2800)
+    clearTimeout(toast._t)
+    toast._t = setTimeout(() => e.classList.remove('show'), 3200)
   }
+
+  /** Persistent error strip — a toast alone is too easy to miss. */
+  function banner (message) {
+    let el = $('#adminError')
+    if (!el) {
+      el = document.createElement('div')
+      el.id = 'adminError'
+      el.className = 'admin-error'
+      const host = $('#adminPanel')
+      if (host) host.insertBefore(el, host.firstChild)
+    }
+    if (!message) { el.remove(); return }
+    el.innerHTML = `<b>Action failed</b><span>${esc(message)}</span><button type="button" aria-label="Dismiss">\u00d7</button>`
+    el.querySelector('button').onclick = () => el.remove()
+  }
+
+  /* ------------------------------------------------------------------ api */
 
   async function api (path, options = {}) {
     const headers = { 'content-type': 'application/json', ...(options.headers || {}) }
     if (options.method && options.method !== 'GET') headers['x-architect-csrf'] = csrf
     const r = await fetch(`/dashboard/api/${path}`, { credentials: 'same-origin', ...options, headers })
-    const out = await r.json().catch(() => ({ error: 'Invalid server response' }))
+    const out = await r.json().catch(() => ({ error: `Invalid server response (HTTP ${r.status})` }))
     if (!r.ok) throw Error(out.error || out.message || `HTTP ${r.status}`)
     if (out.csrf) csrf = out.csrf
     return out
   }
 
+  /** Runs one moderation action, then reloads the snapshot. */
   async function act (action, payload = {}) {
-    const out = await api('admin/action', { method: 'POST', body: JSON.stringify({ action, ...payload }) })
-    toast(out.message || 'Done')
-    await load()
-    return out
+    banner('')
+    try {
+      const out = await api('admin/action', { method: 'POST', body: JSON.stringify({ action, ...payload }) })
+      toast(out.message || 'Done')
+      await load()
+      return out
+    } catch (e) {
+      banner(e.message)
+      toast(e.message)
+      throw e
+    }
   }
 
-  /* ------------------------------------------------------------- rendering */
+  /* ------------------------------------------------------------ rendering */
 
   function renderGroups () {
     const rows = data.groups || []
@@ -63,8 +105,8 @@ const A = (() => {
     return `<div class="admin-scroll"><table class="admin-table"><thead><tr>
       <th>Hunter</th><th>Rank</th><th class="num">Lv</th><th class="num">Zen</th><th class="num">HP</th><th class="num">W/L</th><th></th></tr></thead><tbody>
       ${rows.map(p => `<tr>
-        <td><b>${esc(p.name || '—')}</b><br><span class="mono">+${esc(p.userId)}</span></td>
-        <td><span class="tag">${esc(p.rank)} · G${p.grade}</span></td>
+        <td><b>${esc(p.name || '\u2014')}</b><br><span class="mono">+${esc(p.userId)}</span></td>
+        <td><span class="tag">${esc(p.rank)} \u00b7 G${p.grade}</span></td>
         <td class="num">${p.level}</td>
         <td class="num">${nf(p.zen)}</td>
         <td class="num">${p.hp}/${p.maxHp}</td>
@@ -72,6 +114,7 @@ const A = (() => {
         <td style="text-align:right;white-space:nowrap">
           <button class="mini" data-act="player-heal" data-user="${esc(p.userId)}">Heal</button>
           <button class="mini" data-act="player-zen" data-user="${esc(p.userId)}">Zen</button>
+          <button class="mini" data-act="player-clear-battle" data-user="${esc(p.userId)}">Clear battle</button>
           <button class="mini danger" data-act="player-reset" data-user="${esc(p.userId)}">Reset</button>
         </td></tr>`).join('')}
     </tbody></table></div>`
@@ -134,7 +177,7 @@ const A = (() => {
       ${rows.length ? rows.map(v => `<tr>
         <td><b>${esc(v.mode)}</b></td>
         <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v.url)}</td>
-        <td>${esc(v.caption || '—')}</td>
+        <td>${esc(v.caption || '\u2014')}</td>
         <td style="text-align:right"><button class="mini danger" data-act="visual-remove" data-mode="${esc(v.mode)}">Remove</button></td>
       </tr>`).join('') : '<tr><td colspan="4" class="admin-empty">No visuals configured.</td></tr>'}
     </tbody></table></div>`
@@ -165,7 +208,7 @@ const A = (() => {
     return `<div class="admin-scroll">${rows.map(l => `<div class="log-line">
       <time>${new Date(l.at).toISOString().slice(5, 16).replace('T', ' ')}</time>
       <b>${esc(l.action)}</b>
-      <span>${esc(l.actor || '—')}${l.target ? ` → ${esc(l.target)}` : ''}</span>
+      <span>${esc(l.actor || '\u2014')}${l.target ? ` \u2192 ${esc(l.target)}` : ''}</span>
     </div>`).join('')}</div>`
   }
 
@@ -181,17 +224,17 @@ const A = (() => {
       <label class="admin-field"><small>Class moves per day</small><input id="setClass" type="number" min="0" value="${s.classMovesPerDay}"></label>
       <label class="admin-field"><small>Card abilities per day</small><input id="setCards" type="number" min="0" value="${s.cardAbilitiesPerDay}"></label>
       <label class="admin-field"><small>Group registration required</small>
-        <select id="setReg"><option value="1"${s.groupRegistrationRequired ? ' selected' : ''}>Yes — ignore unregistered groups</option><option value="0"${!s.groupRegistrationRequired ? ' selected' : ''}>No — respond everywhere</option></select></label>
+        <select id="setReg"><option value="1"${s.groupRegistrationRequired ? ' selected' : ''}>Yes \u2014 ignore unregistered groups</option><option value="0"${!s.groupRegistrationRequired ? ' selected' : ''}>No \u2014 respond everywhere</option></select></label>
       <label class="admin-field"><small>Duel auto-promote</small>
-        <select id="setDuel"><option value="1"${s.duelAutoPromote ? ' selected' : ''}>Yes — temporary admin during duels</option><option value="0"${!s.duelAutoPromote ? ' selected' : ''}>No</option></select></label>
+        <select id="setDuel"><option value="1"${s.duelAutoPromote ? ' selected' : ''}>Yes \u2014 temporary admin during duels</option><option value="0"${!s.duelAutoPromote ? ' selected' : ''}>No</option></select></label>
     </div>
     <div class="admin-row"><button class="primary" id="saveSettings">Save settings</button></div>
     <p class="admin-note">The prefix applies to every group without its own override. Daily limits cap XP and Zen earned per player per day; anything above the cap is discarded, not banked.</p>`
   }
 
   const VIEWS = {
-    groups: { title: 'Groups', body: renderGroups, extra: () => '<p class="admin-note">Pausing a group makes Architect ignore it entirely. Removing it deletes the registration — players keep their progress.</p>' },
-    players: { title: 'Players', body: renderPlayers, extra: () => '<p class="admin-note">Heal restores HP and Power Energy. Zen adjusts the balance by the amount you enter (negative removes). Reset returns a hunter to rank E, level 1.</p>' },
+    groups: { title: 'Groups', body: renderGroups, extra: () => '<p class="admin-note">Pausing a group makes Architect ignore it entirely. Removing it deletes the registration \u2014 players keep their progress.</p>' },
+    players: { title: 'Players', body: renderPlayers, extra: () => '<p class="admin-note">Heal restores HP and Power Energy. Zen adjusts the balance by the amount you enter (negative removes). Clear battle drops a stuck fight. Reset returns a hunter to rank E, level 1.</p>' },
     stages: { title: 'Stages', body: renderStages, extra: () => `<div class="admin-row">
         <label class="admin-field" style="flex:2"><small>New stage name</small><input id="stageName" placeholder="Shattered Spire"></label>
         <label class="admin-field"><small>HP</small><input id="stageHp" type="number" value="120"></label>
@@ -217,7 +260,7 @@ const A = (() => {
           <option value="arise">arise</option><option value="profile">profile</option>
           <option value="battle">battle</option><option value="boss">boss</option>
           <option value="dungeon">dungeon</option><option value="duel">duel</option></select></label>
-        <label class="admin-field" style="flex:3"><small>Image / GIF / MP4 URL</small><input id="visUrl" placeholder="https://…"></label>
+        <label class="admin-field" style="flex:3"><small>Image / GIF / MP4 URL</small><input id="visUrl" placeholder="https://\u2026"></label>
         <label class="admin-field" style="flex:2"><small>Caption (optional)</small><input id="visCaption" placeholder="The System awakens."></label>
         <button class="primary" id="setVisual">Set visual</button>
       </div><p class="admin-note">Each mode can carry its own image, GIF or short clip. The AXYN CORE watermark stays on every message.</p>` },
@@ -228,12 +271,14 @@ const A = (() => {
         <button class="primary" id="grantAuth">Grant</button>
       </div><p class="admin-note">AXYON numbers keep management authority even after switching to PLAYER mode. RHM is scoped and never overrides AXYON.</p>` },
     settings: { title: 'Settings', body: renderSettings, extra: () => '' },
-    log: { title: 'Audit log', body: renderLog, extra: () => '<p class="admin-note">Every management action is recorded — resets, grants, stage edits and dashboard changes alike.</p>' }
+    log: { title: 'Audit log', body: renderLog, extra: () => '<p class="admin-note">Every management action is recorded \u2014 resets, grants, stage edits and dashboard changes alike.</p>' }
   }
 
   function render () {
     const view = VIEWS[tab] || VIEWS.groups
-    $('#adminBody').innerHTML = view.body() + view.extra()
+    const body = $('#adminBody')
+    if (!body) return
+    body.innerHTML = view.body() + view.extra()
     $$('.admin-tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab))
     wire()
   }
@@ -247,25 +292,25 @@ const A = (() => {
     if (addStage) addStage.onclick = () => act('stage-add', {
       name: $('#stageName').value, hp: $('#stageHp').value, atk: $('#stageAtk').value,
       def: $('#stageDef').value, xp: $('#stageXp').value, zen: $('#stageZen').value
-    }).catch(e => toast(e.message))
+    }).catch(() => {})
 
     const addFloor = $('#addFloor')
     if (addFloor) addFloor.onclick = () => act('floor-add', {
       name: $('#floorName').value, hp: $('#floorHp').value, atk: $('#floorAtk').value,
       def: $('#floorDef').value, xp: $('#floorXp').value, zen: $('#floorZen').value,
       boss: $('#floorBoss').value === '1'
-    }).catch(e => toast(e.message))
+    }).catch(() => {})
 
     const setVisual = $('#setVisual')
     if (setVisual) setVisual.onclick = () => act('visual-set', {
       mode: $('#visMode').value, url: $('#visUrl').value, caption: $('#visCaption').value
-    }).catch(e => toast(e.message))
+    }).catch(() => {})
 
     const grantAuth = $('#grantAuth')
     if (grantAuth) grantAuth.onclick = () => {
       const userId = $('#authNumber').value
       const kind = $('#authKind').value
-      act(kind === 'number' ? 'number-add' : 'role-add', { userId, role: 'rhm' }).catch(e => toast(e.message))
+      act(kind === 'number' ? 'number-add' : 'role-add', { userId, role: 'rhm' }).catch(() => {})
     }
 
     const saveSettings = $('#saveSettings')
@@ -280,7 +325,7 @@ const A = (() => {
       cardAbilitiesPerDay: $('#setCards').value,
       groupRegistrationRequired: $('#setReg').value === '1',
       duelAutoPromote: $('#setDuel').value === '1'
-    }).catch(e => toast(e.message))
+    }).catch(() => {})
   }
 
   async function handle (btn) {
@@ -296,8 +341,8 @@ const A = (() => {
         return await act(a, { jid })
       }
       if (a === 'group-prefix') {
-        const prefix = prompt('Prefix for this group (1–3 characters):', data.settings.prefix)
-        if (!prefix) return
+        const prefix = prompt('Prefix for this group (1\u20133 characters):', data.settings.prefix)
+        if (prefix === null) return
         return await act(a, { jid, prefix })
       }
       if (a === 'player-reset') {
@@ -309,7 +354,7 @@ const A = (() => {
         if (amount === null) return
         return await act(a, { userId: user, amount })
       }
-      if (a === 'player-heal') return await act(a, { userId: user })
+      if (a === 'player-heal' || a === 'player-clear-battle') return await act(a, { userId: user })
       if (a === 'stage-edit') {
         const row = (data.stages || []).find(s => String(s.ordinal) === String(ordinal))
         const hp = prompt('HP:', row.hp); if (hp === null) return
@@ -349,8 +394,9 @@ const A = (() => {
         if (!confirm('Revoke this authority?')) return
         return await act(a, { userId: user })
       }
+      banner(`No handler for "${a}" \u2014 this button is not wired.`)
     } catch (e) {
-      toast(e.message)
+      /* act() already surfaced it; nothing more to do. */
     } finally {
       btn.disabled = false
     }
@@ -359,29 +405,55 @@ const A = (() => {
   /* ----------------------------------------------------------------- boot */
 
   async function load () {
-    data = await api('admin')
-    render()
-  }
-
-  async function mount () {
-    const host = $('#adminPanel')
-    if (!host) return
+    if (loading) return
+    loading = true
     try {
-      const s = await api('session')
-      if (!s.authenticated) return
-      csrf = s.csrf
-      host.classList.remove('hidden')
-      $$('.admin-tabs button').forEach(b => {
-        b.onclick = () => { tab = b.dataset.tab; render() }
-      })
-      await load()
-    } catch (e) {
-      toast(e.message)
+      data = await api('admin')
+      render()
+    } finally {
+      loading = false
     }
   }
 
-  return { mount, load, render }
+  /**
+   * Idempotent mount. Safe to call on load, after login, and on retry.
+   * Returns true when the panel is visible and populated.
+   */
+  async function mount () {
+    const host = $('#adminPanel')
+    if (!host) return false
+    try {
+      const s = await api('session')
+      if (!s.authenticated) {
+        host.classList.add('hidden')
+        mounted = false
+        return false
+      }
+      csrf = s.csrf || csrf
+      host.classList.remove('hidden')
+      if (!mounted) {
+        $$('.admin-tabs button').forEach(b => {
+          b.onclick = () => { tab = b.dataset.tab; render() }
+        })
+        mounted = true
+      }
+      await load()
+      return true
+    } catch (e) {
+      banner(e.message)
+      return false
+    }
+  }
+
+  return { mount, load, render, banner }
 })()
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => A.mount())
-else A.mount()
+/* Mount on load, and again whenever the dashboard reports a successful login. */
+function bootAdmin () { A.mount().catch(() => {}) }
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootAdmin)
+else bootAdmin()
+document.addEventListener('architect:login', bootAdmin)
+document.addEventListener('architect:logout', () => {
+  const host = document.querySelector('#adminPanel')
+  if (host) host.classList.add('hidden')
+})

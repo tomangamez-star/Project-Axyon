@@ -5,12 +5,19 @@
  *
  * Prefix is ! by default (store.DEFAULT_SETTINGS.prefix) and AXYON can change
  * it with !prefix.
+ *
+ * This module has no dependency on the old economy/casino command system. It
+ * reads identity from ./identity and authority from ./access + the store.
  */
 const store = require('./axyon-store')
+const greetings = require('./greetings')
 const { norm, isOwner } = require('./access')
-const { canonicalUserId, displayName } = require('./economy-router')
+const { canonicalUserId, displayName, mentionedId } = require('./identity')
 
 const WATERMARK = '\u232c AXYN CORE'
+
+/* Commands that must work before a player has registered. */
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'top'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -22,12 +29,6 @@ const MODE_LIST = {
 function parseNum (v) {
   const n = Number(String(v ?? '').replace(/,/g, ''))
   return Number.isFinite(n) ? Math.floor(n) : null
-}
-
-function mentionedId (content = {}) {
-  const ci = content?.extendedTextMessage?.contextInfo || content?.imageMessage?.contextInfo || {}
-  const jid = (ci.mentionedJid || [])[0] || ci.participant
-  return jid ? String(jid).split(':')[0].split('@')[0] : null
 }
 
 function createCommands ({ axyon, economy, logger }) {
@@ -62,10 +63,7 @@ function createCommands ({ axyon, economy, logger }) {
     if (section && section !== 'all') {
       return axyon.send(s, ctx.jid, m, `${W}\n\nNo section named *${section}*.\nSections: ${Object.keys(axyon.SECTIONS).join(', ')}`)
     }
-    return axyon.buttons(s, ctx.jid, m, axyon.helpAll(ctx.prefix), W, [
-      ...axyon.helpButtons(),
-      ['\ud83d\udc64 Profile', 'ax_profile']
-    ])
+    return axyon.send(s, ctx.jid, m, axyon.helpAll(ctx.prefix))
   })
   cmd('ping', 'core', '{p}ping', 'Check that Architect is awake.', async (s, m, ctx) => axyon.send(s, ctx.jid, m, `\ud83c\udfd3 *Pong* \u2014 ${W}`), { hidden: true })
   cmd('top', 'core', '{p}top', 'The strongest hunters by level and XP.', async (s, m, ctx) => {
@@ -101,7 +99,7 @@ function createCommands ({ axyon, economy, logger }) {
     const b = await store.getBattle(ctx.userId)
     const p = await store.player(ctx.userId)
     if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
-    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), axyon.battleButtons())
+    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), axyon.battleButtons(), true)
   }, { hidden: true })
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
@@ -123,13 +121,10 @@ function createCommands ({ axyon, economy, logger }) {
       '*FLOORS*',
       floors.length ? floors.map(f => `${f.locked ? '\ud83d\udd12' : '\u25ab\ufe0f'} *${f.ordinal}. ${f.name}* ${f.boss ? '\ud83d\udc80' : ''}\n   \u2764\ufe0f ${f.hp} \u2022 \u2694\ufe0f ${f.atk} \u2022 \u2728 ${f.xp} XP`).join('\n') : 'No floors configured.',
       '',
+      `Enter a floor with *${ctx.prefix}floor <n>*.`,
       'Gates control progression. Fillers are a separate system and never merged with gates.'
     ]
-    return axyon.buttons(s, ctx.jid, m, lines.join('\n'), W, [
-      ['\ud83c\udff9 Solo Gate', 'ax_dungeon_solo'],
-      ['\ud83d\udd25 Party Gate', 'ax_party_view'],
-      ['\u2694\ufe0f Stages', 'ax_stages']
-    ])
+    return axyon.send(s, ctx.jid, m, lines.join('\n'))
   })
 
   cmd('floor', 'dungeon', '{p}floor <n>', 'Enter a dungeon floor.', async (s, m, ctx, args) => {
@@ -145,7 +140,7 @@ function createCommands ({ axyon, economy, logger }) {
     const b = { mode: 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
-    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p, `You descend into *${f.name}*.`), axyon.battleButtons())
+    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p, `You descend into *${f.name}*.`), axyon.battleButtons(), true)
   })
 
   /* ----------------------------------------------------------------- party */
@@ -158,13 +153,13 @@ function createCommands ({ axyon, economy, logger }) {
       if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
       const party = await store.createParty(ctx.jid, ctx.userId, [ctx.userId])
       await store.log(ctx.userId, 'party_create', String(party.id))
-      return axyon.buttons(s, ctx.jid, m, [
+      return axyon.send(s, ctx.jid, m, [
         `${W}`, '', '\ud83d\udd25 *PARTY FORMED*', '',
         `Leader: *${p.name || ctx.userId}*`,
         `Members: *1/${settings.partyMax}*`, '',
         `Minimum *${settings.partyMin}* players to enter a gate.`,
         `Others join with *${ctx.prefix}party join*.`
-      ].join('\n'), W, [['\ud83d\udd25 View Party', 'ax_party_view'], ['\ud83c\udff9 Dungeon', 'ax_dungeon']])
+      ].join('\n'))
     }
     if (sub === 'join') {
       const open = await store.openParty(ctx.jid)
@@ -190,16 +185,23 @@ function createCommands ({ axyon, economy, logger }) {
       const p = await store.player(id)
       names.push(`\u2022 *${p?.name || `+${id}`}*${id === open.leader ? ' \ud83d\udc51' : ''}`)
     }
-    return axyon.buttons(s, ctx.jid, m, [
+    return axyon.send(s, ctx.jid, m, [
       `${W}`, '', '\ud83d\udd25 *PARTY*', '',
       names.join('\n'), '',
-      `Members: *${(open.members || []).length}/${settings.partyMax}* \u2022 minimum *${settings.partyMin}*`
-    ].join('\n'), W, [['\u2705 Join', 'ax_party_join'], ['\ud83d\udc4b Leave', 'ax_party_leave'], ['\ud83c\udff9 Dungeon', 'ax_dungeon']])
+      `Members: *${(open.members || []).length}/${settings.partyMax}* \u2022 minimum *${settings.partyMin}*`, '',
+      `*${ctx.prefix}party join* \u2022 *${ctx.prefix}party leave*`
+    ].join('\n'))
   })
 
   /* ----------------------------------------------------------------- duels */
 
-  cmd('duel', 'dungeon', '{p}duel @player', 'Challenge a player. Both get temporary admin.', async (s, m, ctx, args, content) => {
+  cmd('duel', 'dungeon', '{p}duel @player | {p}duel accept <id>', 'Challenge a player, or answer a challenge.', async (s, m, ctx, args, content) => {
+    const sub = String(args[0] || '').toLowerCase()
+    if (['accept', 'decline'].includes(sub)) {
+      const id = parseNum(args[1])
+      if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}duel ${sub} <id>*`)
+      return axyon.answerDuel(s, m, ctx, id, sub === 'accept')
+    }
     const opponent = mentionedId(content) || norm(args[0] || '')
     return axyon.beginDuel(s, m, ctx, opponent || null)
   })
@@ -226,12 +228,13 @@ function createCommands ({ axyon, economy, logger }) {
     const r = await store.socialRequest(ctx.userId, target, 'marriage')
     if (!r.ok) return axyon.send(s, ctx.jid, m, `\u274c ${r.message}`)
     await store.log(ctx.userId, 'social_request', target)
-    return axyon.buttons(s, ctx.jid, m, [
+    return axyon.send(s, ctx.jid, m, [
       `${W}`, '', '\ud83d\udc9e *BINDING REQUEST*', '',
       `> *${a.name || ctx.userId}* \u2192 *${b.name || target}*`, '',
       `${b.name || target}, this requires your approval.`,
-      `Request *#${r.request.id}*`
-    ].join('\n'), W, [['\u2705 Accept', `ax_social_yes_${r.request.id}`], ['\u274c Decline', `ax_social_no_${r.request.id}`]])
+      `Request *#${r.request.id}*`, '',
+      `Accept with *${ctx.prefix}accept ${r.request.id}* \u2022 decline with *${ctx.prefix}decline ${r.request.id}*`
+    ].join('\n'))
   })
 
   cmd('requests', 'social', '{p}requests', 'Pending social requests waiting for you.', async (s, m, ctx) => {
@@ -593,6 +596,22 @@ function createCommands ({ axyon, economy, logger }) {
 
     const command = BY_NAME.get(parsed.command)
     if (!command) return false
+
+    /*
+     * REGISTRATION GATE
+     * -----------------
+     * `!arise` is the only command that works before registration. Everything
+     * else tells the player to run it, rather than failing silently or
+     * throwing a null-player error deep inside a handler.
+     */
+    if (parsed.command !== 'arise' && !OPEN_BEFORE_ARISE.has(parsed.command)) {
+      const p = await store.player(ctx.userId).catch(() => null)
+      if (!p) {
+        await axyon.send(sock, ctx.jid, m, greetings.notRegistered(ctx.prefix))
+        return true
+      }
+    }
+
     try {
       await command.handler(sock, m, ctx, parsed.args, content)
     } catch (e) {
@@ -608,10 +627,7 @@ function createCommands ({ axyon, economy, logger }) {
     const ctx = await buildContext(sock, m, {})
 
     if (id === 'ax_profile') { await axyon.profile(sock, m, ctx); return true }
-    if (id === 'ax_help') {
-      await axyon.buttons(sock, ctx.jid, m, axyon.helpAll(ctx.prefix), W, [...axyon.helpButtons()])
-      return true
-    }
+    if (id === 'ax_help') { await axyon.send(sock, ctx.jid, m, axyon.helpAll(ctx.prefix)); return true }
     if (id.startsWith('ax_help_')) { await axyon.send(sock, ctx.jid, m, axyon.helpPage(id.slice(8), ctx.prefix)); return true }
     if (id === 'ax_stages') { await axyon.listStages(sock, m, ctx); return true }
     if (id.startsWith('ax_fight_')) { await axyon.beginBattle(sock, m, ctx, parseNum(id.slice(9))); return true }
@@ -632,18 +648,7 @@ function createCommands ({ axyon, economy, logger }) {
     if (id.startsWith('ax_duel_')) {
       const bits = id.match(/^ax_duel_(accept|decline)_(\d+)$/)
       if (!bits) return false
-      const d = await store.duel(Number(bits[2]))
-      if (!d || d.status !== 'pending') { await axyon.send(sock, ctx.jid, m, '\u231b That challenge is no longer active.'); return true }
-      if (ctx.userId !== d.opponent && !ctx.auth.axyon) { await axyon.send(sock, ctx.jid, m, '\ud83d\udd12 Only the challenged player can answer.'); return true }
-      if (bits[1] === 'decline') {
-        await store.updateDuel(d.id, { status: 'declined' })
-        await axyon.send(sock, ctx.jid, m, `${W}\n\n\u274c *DUEL DECLINED*`)
-        return true
-      }
-      await store.updateDuel(d.id, { status: 'active', state: { turn: d.challenger, round: 1 } })
-      await store.log(ctx.userId, 'duel_accept', String(d.id))
-      const a = await store.player(d.challenger); const b = await store.player(d.opponent)
-      await axyon.send(sock, ctx.jid, m, [W, '', '\u2694\ufe0f *DUEL BEGINS*', '', `*${a?.name || d.challenger}* vs *${b?.name || d.opponent}*`, '', 'Temporary admin promotion is applied for the duration of the duel and removed when it ends.'].join('\n'))
+      await axyon.answerDuel(sock, m, ctx, Number(bits[2]), bits[1] === 'accept')
       return true
     }
     return false

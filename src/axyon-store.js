@@ -2,8 +2,9 @@
 /*
  * AXYON STORE — persistence for the Architect RPG.
  *
- * Every table is prefixed axyon_ so it never collides with the legacy
- * rimuru_* economy tables that the casino and wallet still use.
+ * Every table is prefixed axyon_ so it never collides with the pairing and
+ * session tables (rimuru_wa_auth, rimuru_wa_accounts) that auth-store and
+ * account-config own.
  */
 const { database } = require('./auth-store')
 

@@ -1,29 +1,154 @@
 'use strict'
-const {MASTERS:MASTER_LIST}=require('./rpg-store')
-const PREFIX=['menu_','casino_','start_','rpg_','owner_','mines_','duel_']
-const IDS=new Set(['ryuden_enter','mines_a1','mines_b2','mines_cashout'])
-function clean(t){return String(t||'').replace(/[\u200b-\u200f\u2060\ufeff\ufe0f]/g,'').trim().replace(/\s+/g,' ').toLowerCase()}
-const MAP=new Map([['🎰 casino','menu_casino'],['💰 balance','menu_balance'],['🏆 leaderboard','menu_leaderboard'],['🏆 leaderboards','menu_leaderboard'],['💎 wealth','menu_lb_wealth'],['⚔️ odyssey rank','menu_lb_rpg'],['🎮 games','menu_games'],['🛠️ utilities','menu_utilities'],['❓ help','menu_help'],['⬅️ menu','menu_main'],['🎰 slots','casino_slots_help'],['🪙 coin flip','casino_cf_help'],['🎲 dice','casino_dice_help'],['🎡 roulette','casino_roulette_help'],['⚔️ enter odyssey','start_rpg'],['🎰 enter casino','start_casino'],['📜 main menu','menu_main'],['🗺️ explore','rpg_explore'],['🗺️ explore again','rpg_explore'],['🗺️ continue','rpg_explore'],['➡️ continue','rpg_explore'],['🧙 master','rpg_master'],['🎒 inventory','rpg_inventory'],['🏰 guild','rpg_guild'],['📖 odyssey','rpg_story'],['🎁 daily','rpg_daily'],['⚔️ rpg home','rpg_home'],['💬 talk to master','rpg_talk_master'],['💬 talk','rpg_talk_master'],['🥋 train','rpg_train'],['🥋 train again','rpg_train'],['📚 techniques','rpg_techniques'],['❤️ bond','rpg_bond'],['⚔️ combat','rpg_combat'],['🛒 shop','rpg_shop'],['📖 story','rpg_story'],['🗺️ begin odyssey','rpg_explore'],['🗺️ try again','rpg_explore'],['🔎 explore more masters','rpg_masters_page_1'],['⭐ featured','rpg_master']].map(x=>[clean(x[0]),x[1]]))
-const MASTERS=new Map(MASTER_LIST.map(x=>[clean(x.name),x.key]))
-function visibleText(c={}){return String(c.conversation||c.extendedTextMessage?.text||c.buttonsResponseMessage?.selectedDisplayText||c.templateButtonReplyMessage?.selectedDisplayText||c.listResponseMessage?.title||'').trim()}
-function native(c={}){const x=c.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;if(!x)return{id:'',text:''};try{const v=JSON.parse(x);return{id:String(v.id||v.button_id||v.selected_id||''),text:String(v.display_text||v.title||v.text||'')}}catch{return{id:'',text:''}}}
-function valid(x){return typeof x==='string'&&(IDS.has(x)||PREFIX.some(p=>x.startsWith(p)))}
-function resolveButtonId(c={}){const n=native(c);for(const x of[n.id,c.buttonsResponseMessage?.selectedButtonId,c.templateButtonReplyMessage?.selectedId,c.listResponseMessage?.singleSelectReply?.selectedRowId])if(valid(x))return x;for(const t of[visibleText(c),n.text,c.interactiveResponseMessage?.body?.text]){const z=clean(t);if(MAP.has(z))return MAP.get(z);if(MASTERS.has(z))return `rpg_master_${MASTERS.get(z)}`}return null}
-function isKnownButtonInteraction(c={}){return !!resolveButtonId(c)}
-const CMDS=new Set(['/start','/menu','/help','/p','/profile','/balance','/bal','/bank','/leaderboard','/lb','/casino','/games','/utilities','/dep','/deposit','/wd','/withdraw','/donate','/transfer','/addcoin','/setbal','/setbalance','/slots','/cf','/coinflip','/dice','/roulette','/ping','/test','/dbping','/image','/api','/mines','/cursedsticker','/rpg','/masters','/master','/daily','/explore','/inventory','/rlb','/rpgleaderboard','/guild','/train','/techniques','/skills','/shop','/combat','/fight','/story','/wealthlb','/wlb','/owner','/ownerpanel','/duel','/duels','/challenge','/cardbattle','/hybridbattle','/npc','/setzone','/zone','/zones','/cards','/collection','/card','/cardinfo','/cardstats','/deck','/grant','/grantcard','/rerollcardstats','/setcardstats','/spawncard'])
-function isReplyTrigger(c={}){return isKnownButtonInteraction(c)||CMDS.has(visibleText(c).toLowerCase().split(/\s+/)[0].split('@')[0])}
 /*
- * A command sent manually by the linked WhatsApp account is marked fromMe.
- * Previously every fromMe text was discarded, making the connected number
- * unable to use its own player commands. Only recognized Architect commands
- * and known interactive buttons are admitted; ordinary outgoing messages
- * remain ignored, and downstream registration/owner/zone checks still apply.
+ * MESSAGE GUARD — decides whether an upsert is worth routing at all.
+ *
+ * THE BUG THIS FIXES
+ * ------------------
+ * The previous guard admitted a `fromMe` message only when it matched a
+ * hardcoded list of legacy slash commands (`/start`, `/balance`, ...) or a
+ * legacy button id. The new RPG uses `!` and `!arise`, neither of which was in
+ * that list — so every command sent from the connected account was dropped
+ * before the router ever saw it. That is why `!arise` "did nothing".
+ *
+ * The rule is now prefix-driven instead of list-driven: if the text starts
+ * with the active prefix, it is a command, whoever sent it. Ordinary outgoing
+ * chatter is still ignored, so the bot never answers its own conversation.
  */
-function shouldHandleUpsert(c={},o={}){
- const b=isKnownButtonInteraction(c),command=isReplyTrigger(c)
- if(o.fromMe&&!b&&!command)return false
- if(o.type==='append'&&!b&&!command)return false
- return o.type==='notify'||o.type==='append'
+
+/** Button ids this build can emit. Kept in one place so the guard and the
+ *  router cannot disagree about what counts as a tap. */
+const BUTTON_PREFIXES = ['ax_', 'adm_']
+
+function clean (t) {
+  return String(t || '')
+    .replace(/[\u200b-\u200f\u2060\ufeff\ufe0f]/g, '')
+    .trim()
+    .replace(/\s+/g, ' ')
 }
-class ReplyRateLimiter{constructor(){this.users=new Map();this.maxReplies=3;this.windowMs=5000;this.minMuteMs=5000;this.maxMuteMs=10000}key(m){const k=m?.key||{};return String(k.participantAlt||k.participant||k.remoteJidAlt||k.remoteJid||'unknown').split(':')[0].split('@')[0]}check(m){const now=Date.now(),k=this.key(m);let s=this.users.get(k)||{times:[],mutedUntil:0};if(s.mutedUntil>now)return{allowed:false,warn:false,remainingMs:s.mutedUntil-now};if(s.mutedUntil)s={times:[],mutedUntil:0};s.times=s.times.filter(t=>now-t<=this.windowMs);if(s.times.length>=this.maxReplies){const d=this.minMuteMs+Math.floor(Math.random()*(this.maxMuteMs-this.minMuteMs+1));s.mutedUntil=now+d;this.users.set(k,s);return{allowed:false,warn:true,durationMs:d}}s.times.push(now);this.users.set(k,s);return{allowed:true}}}
-module.exports={resolveButtonId,isKnownButtonInteraction,isReplyTrigger,shouldHandleUpsert,visibleText,ReplyRateLimiter}
+
+function visibleText (c = {}) {
+  return String(
+    c.conversation ||
+    c.extendedTextMessage?.text ||
+    c.buttonsResponseMessage?.selectedDisplayText ||
+    c.templateButtonReplyMessage?.selectedDisplayText ||
+    c.listResponseMessage?.title ||
+    ''
+  ).trim()
+}
+
+/** Reads the id out of a native-flow (interactive) button tap. */
+function nativeButton (c = {}) {
+  const raw = c.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
+  if (!raw) return { id: '', text: '' }
+  try {
+    const v = JSON.parse(raw)
+    return {
+      id: String(v.id || v.button_id || v.selected_id || ''),
+      text: String(v.display_text || v.title || v.text || '')
+    }
+  } catch { return { id: '', text: '' } }
+}
+
+function isButtonId (id) {
+  return typeof id === 'string' && BUTTON_PREFIXES.some(p => id.startsWith(p))
+}
+
+/**
+ * Resolves a button tap to its id, or null.
+ * Accepts native-flow taps, quick-reply taps and list selections.
+ */
+function resolveButtonId (c = {}) {
+  const n = nativeButton(c)
+  const candidates = [
+    n.id,
+    c.buttonsResponseMessage?.selectedButtonId,
+    c.templateButtonReplyMessage?.selectedId,
+    c.listResponseMessage?.singleSelectReply?.selectedRowId
+  ]
+  for (const x of candidates) if (isButtonId(x)) return x
+  return null
+}
+
+function isKnownButtonInteraction (c = {}) { return !!resolveButtonId(c) }
+
+/**
+ * True when the text is a command under the given prefix.
+ * `!arise`, `!help battle`, `!arise@12345` all qualify.
+ */
+function isCommandText (c = {}, prefix = '!') {
+  const raw = visibleText(c)
+  if (!raw || !prefix) return false
+  if (!raw.startsWith(prefix)) return false
+  const rest = raw.slice(prefix.length).trim()
+  return rest.length > 0
+}
+
+/**
+ * The gate.
+ *
+ * @param content  normalised message content
+ * @param opts.fromMe  the message came from the connected account itself
+ * @param opts.type    'notify' (live) or 'append' (history sync)
+ * @param opts.prefix  the active command prefix
+ */
+function shouldHandleUpsert (content = {}, opts = {}) {
+  const { fromMe = false, type = 'notify', prefix = '!' } = opts
+  const button = isKnownButtonInteraction(content)
+  const command = isCommandText(content, prefix)
+
+  // A command or a button tap is always worth routing — including from the
+  // connected account, which is the whole point of this fix.
+  if (button || command) return type === 'notify' || type === 'append'
+
+  // Anything else: only live incoming messages, never our own chatter and
+  // never replayed history.
+  if (fromMe) return false
+  return type === 'notify'
+}
+
+/** Per-sender flood control. Three commands in five seconds, then a pause. */
+class ReplyRateLimiter {
+  constructor () {
+    this.users = new Map()
+    this.maxReplies = 3
+    this.windowMs = 5000
+    this.minMuteMs = 5000
+    this.maxMuteMs = 10000
+  }
+
+  key (m) {
+    const k = m?.key || {}
+    return String(k.participantAlt || k.participant || k.remoteJidAlt || k.remoteJid || 'unknown')
+      .split(':')[0].split('@')[0]
+  }
+
+  check (m) {
+    const now = Date.now()
+    const k = this.key(m)
+    let s = this.users.get(k) || { times: [], mutedUntil: 0 }
+    if (s.mutedUntil > now) return { allowed: false, warn: false, remainingMs: s.mutedUntil - now }
+    if (s.mutedUntil) s = { times: [], mutedUntil: 0 }
+    s.times = s.times.filter(t => now - t <= this.windowMs)
+    if (s.times.length >= this.maxReplies) {
+      const d = this.minMuteMs + Math.floor(Math.random() * (this.maxMuteMs - this.minMuteMs + 1))
+      s.mutedUntil = now + d
+      this.users.set(k, s)
+      return { allowed: false, warn: true, durationMs: d }
+    }
+    s.times.push(now)
+    this.users.set(k, s)
+    return { allowed: true }
+  }
+}
+
+module.exports = {
+  resolveButtonId,
+  isKnownButtonInteraction,
+  isCommandText,
+  shouldHandleUpsert,
+  visibleText,
+  clean,
+  ReplyRateLimiter,
+  BUTTON_PREFIXES
+}
