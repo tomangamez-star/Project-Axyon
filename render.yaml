@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: architect-wa-rpg
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.18.0
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: WA_SESSION_ID
+        value: architect-primary
+      - key: WA_MAX_SESSIONS
+        value: 5
