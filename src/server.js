@@ -26,9 +26,11 @@ const { createDashboard } = require('./dashboard')
 const { createInstanceLease } = require('./instance-lease')
 const { createAxyon } = require('./axyon-rpg')
 const { createCommands } = require('./axyon-commands')
+const { createAI } = require('./ai')
 const { resolveMessageUserId } = require('./identity')
 const { shouldHandleUpsert, resolveButtonId, isCommandText, ReplyRateLimiter } = require('./message-guard')
 const accountConfig = require('./account-config')
+const store = require('./axyon-store')
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 const port = Number(process.env.PORT || 3000)
@@ -37,7 +39,26 @@ const axyon = createAxyon({
   logger,
   sendButtons: (s, j, b, f, d, o) => s.__sendNativeButtons?.(s, j, b, f, d, o)
 })
-const axyonCommands = createCommands({ axyon, logger })
+
+/*
+ * THE ASSISTANT
+ * -------------
+ * It reads its settings (creators, model, timeout) from the store, so the
+ * dashboard can change them without a redeploy. It is handed the command
+ * catalogue only — never a handler — so it can explain but not execute.
+ */
+const ai = createAI({
+  logger,
+  getConfig: () => aiConfig
+})
+let aiConfig = { creators: ['Lil Clutch', 'Montai'], botName: 'Architect', aiEnabled: true }
+function refreshAIConfig () {
+  store.settings().then(s => { aiConfig = s }).catch(() => {})
+}
+refreshAIConfig()
+setInterval(refreshAIConfig, 30000).unref?.()
+
+const axyonCommands = createCommands({ axyon, logger, ai })
 
 /* ------------------------------------------------------------------ output */
 
@@ -357,7 +378,64 @@ class WhatsAppConnection {
     if (button && await axyonCommands.section(sock, m, button)) return
 
     if (await axyonCommands.handle(sock, m, content)) return
+
+    /*
+     * THE ASSISTANT
+     * -------------
+     * Reached only when the message is NOT a command and NOT a button tap.
+     * Two ways in, exactly as specified:
+     *   1. the bot is @-mentioned in the text
+     *   2. the message is a reply to one of the bot's own messages
+     *
+     * It is fire-and-forget: the message path returns immediately, so a slow
+     * AI provider can never stall the bot for anyone else.
+     */
+    if (this.isAITrigger(sock, m, content)) {
+      const question = this.aiQuestion(content)
+      if (question) {
+        void this.answerWithAI(sock, m, question).catch(e => {
+          this.log.warn({ err: e?.message }, 'AI answer failed')
+        })
+      }
+      return
+    }
     // Nothing else. The old build fell through to a legacy router here.
+  }
+
+  /** True when this message is addressed to the assistant. */
+  isAITrigger (sock, m, content) {
+    if (aiConfig?.aiEnabled === false) return false
+    const self = String(sock?.user?.id || '').split(':')[0].split('@')[0]
+    if (!self) return false
+
+    const ci = content?.extendedTextMessage?.contextInfo ||
+      content?.imageMessage?.contextInfo ||
+      content?.videoMessage?.contextInfo || {}
+
+    /* 1. @-mention of the bot's own number. */
+    const mentioned = (ci.mentionedJid || []).map(x => String(x).split(':')[0].split('@')[0])
+    if (mentioned.includes(self)) return true
+
+    /* 2. A reply to a message the bot itself sent. */
+    const quotedAuthor = String(ci.participant || '').split(':')[0].split('@')[0]
+    if (quotedAuthor && quotedAuthor === self) return true
+
+    return false
+  }
+
+  /** Strips the @mention out of the text so the model gets a clean question. */
+  aiQuestion (content) {
+    const raw = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    if (!raw) return ''
+    return raw
+      .replace(/@\d{6,20}/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  async answerWithAI (sock, m, question) {
+    const ctx = await axyonCommands.buildContext(sock, m, {})
+    await axyonCommands.answerAI(sock, m, ctx, question)
   }
 
   /** Reads the active prefix without building a full command context. */

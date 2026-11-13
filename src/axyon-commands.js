@@ -11,6 +11,7 @@
  */
 const store = require('./axyon-store')
 const greetings = require('./greetings')
+const T = require('./theme')
 const { cache } = require('./cache')
 const { norm, isOwner } = require('./access')
 const { canonicalUserId, displayName, mentionedId } = require('./identity')
@@ -43,7 +44,7 @@ function parseNum (v) {
   return Number.isFinite(n) ? Math.floor(n) : null
 }
 
-function createCommands ({ axyon, economy, logger }) {
+function createCommands ({ axyon, economy, logger, ai }) {
   const cmd = axyon.cmd
   const W = WATERMARK
 
@@ -306,6 +307,65 @@ function createCommands ({ axyon, economy, logger }) {
     await store.setSetting(sub === 'xp' ? 'xpDailyLimit' : 'zenDailyLimit', value)
     await store.log(ctx.userId, 'economy_limit', sub, { value })
     return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *LIMIT UPDATED*\n\nDaily ${sub.toUpperCase()} limit: *${value}*`)
+  })
+
+  /* ----------------------------------------------------------------- media */
+
+  cmd('play', 'media', '{p}play <song>', 'Search a song, show its cover and send the audio.', async (s, m, ctx, args) => axyon.play(s, m, ctx, args))
+
+  /* ------------------------------------------------------------------- ai */
+
+  /**
+   * Answers a question about the bot.
+   *
+   * The assistant is given the command CATALOGUE (name / usage / description)
+   * and nothing else — no handlers, no store, no socket. It can describe a
+   * command but has no path to run one.
+   */
+  async function answerAI (sock, m, ctx, question) {
+    const q = String(question || '').trim()
+    if (!q) return false
+    if (!ai) return false
+
+    const catalogue = axyon.COMMANDS.filter(c => !c.hidden).map(c => ({
+      name: c.name, section: c.section, usage: c.usage, desc: c.desc
+    }))
+
+    const text = await ai.ask({ question: q, commands: catalogue, prefix: ctx.prefix })
+
+    /*
+     * NO ERRORS IN CHAT.
+     * If every provider failed, say one short line. Never a stack trace, never
+     * a provider name, never a retry loop that spams the group.
+     */
+    if (!text) {
+      await axyon.send(sock, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `🤖 ${T.i('I could not reach my knowledge base just now.')}`,
+        '',
+        `Try ${T.b(`${ctx.prefix}help`)} for the full command list.`
+      ].join('\n'))
+      return true
+    }
+
+    await axyon.send(sock, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `🤖 ${T.font('ARCHITECT', 'bold')}`,
+      '',
+      text,
+      '',
+      T.rule('', 'hair'),
+      T.i('I can explain commands. I cannot run them.')
+    ].join('\n'))
+    return true
+  }
+
+  cmd('ai', 'core', '{p}ai <question>', 'Ask the assistant about the bot. It explains, it cannot act.', async (s, m, ctx, args) => {
+    const q = args.join(' ').trim()
+    if (!q) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}ai how do I play a mode?*`)
+    return answerAI(s, m, ctx, q)
   })
 
   /* --------------------------------------------------------------- resets */
@@ -710,7 +770,7 @@ function createCommands ({ axyon, economy, logger }) {
     return false
   }
 
-  return { handle, section, parse, buildContext, BY_NAME, mentionedId }
+  return { handle, section, parse, buildContext, BY_NAME, mentionedId, answerAI }
 }
 
 module.exports = { createCommands, MODE_LIST, mentionedId }

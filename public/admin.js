@@ -263,7 +263,34 @@ const A = (() => {
 
   function renderSettings () {
     const s = data.settings || {}
-    return `<div class="admin-grid">
+    const creators = Array.isArray(s.creators) && s.creators.length ? s.creators : ['Lil Clutch', 'Montai']
+    return `
+    <div class="panel">
+      <div class="panel-head"><div><p class="eyebrow">IDENTITY</p><h3>Creators</h3><p class="muted">These two names appear in the credit line of every card the bot sends. They are stored exactly as you type them.</p></div></div>
+      <div class="admin-grid">
+        <label class="admin-field"><small>Creator one</small><input id="setCreator1" value="${esc(creators[0] || '')}" maxlength="40" placeholder="Lil Clutch"></label>
+        <label class="admin-field"><small>Creator two</small><input id="setCreator2" value="${esc(creators[1] || '')}" maxlength="40" placeholder="Montai"></label>
+        <label class="admin-field"><small>Bot name</small><input id="setBotName" value="${esc(s.botName || 'Architect')}" maxlength="40"></label>
+      </div>
+      <p class="admin-note"><b>AXYON</b> is the owner title of the bot &mdash; it is not a creator credit and is not edited here.</p>
+      <div class="admin-row"><button class="primary" id="saveCreators">Save creators</button></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div><p class="eyebrow">ASSISTANT</p><h3>AI helper</h3><p class="muted">Answers questions about the bot when it is @-mentioned or replied to. It explains commands; it cannot run them.</p></div></div>
+      <div class="admin-grid">
+        <label class="admin-field"><small>Assistant enabled</small>
+          <select id="setAi"><option value="1"${s.aiEnabled !== false ? ' selected' : ''}>Yes \u2014 answer mentions and replies</option><option value="0"${s.aiEnabled === false ? ' selected' : ''}>No \u2014 stay silent</option></select></label>
+        <label class="admin-field"><small>Model override (optional)</small><input id="setAiModel" value="${esc(s.aiModel || '')}" maxlength="60" placeholder="leave blank for default"></label>
+        <label class="admin-field"><small>Timeout (ms)</small><input id="setAiTimeout" type="number" min="3000" max="30000" step="500" value="${s.aiTimeoutMs || 12000}"></label>
+      </div>
+      <p class="admin-note">Public AI routes are tried first. If they fail, the bot uses <code>GROQ_API_KEY</code> from the environment. If nothing works it sends one short line &mdash; never an error.</p>
+      <div class="admin-row"><button class="primary" id="saveAi">Save assistant</button></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div><p class="eyebrow">GAMEPLAY</p><h3>Limits</h3></div></div>
+    <div class="admin-grid">
       <label class="admin-field"><small>Default prefix</small><input id="setPrefix" value="${esc(s.prefix)}" maxlength="3"></label>
       <label class="admin-field"><small>Daily XP limit</small><input id="setXp" type="number" min="0" value="${s.xpDailyLimit}"></label>
       <label class="admin-field"><small>Daily Zen limit</small><input id="setZen" type="number" min="0" value="${s.zenDailyLimit}"></label>
@@ -277,7 +304,8 @@ const A = (() => {
       <label class="admin-field"><small>Duel auto-promote</small>
         <select id="setDuel"><option value="1"${s.duelAutoPromote ? ' selected' : ''}>Yes \u2014 temporary admin during duels</option><option value="0"${!s.duelAutoPromote ? ' selected' : ''}>No</option></select></label>
     </div>
-    <div class="admin-row"><button class="primary" id="saveSettings">Save settings</button></div>`
+    <div class="admin-row"><button class="primary" id="saveSettings">Save settings</button></div>
+    </div>`
   }
 
   const VIEWS = {
@@ -362,6 +390,26 @@ const A = (() => {
       cardAbilitiesPerDay: host.querySelector('#setCards').value,
       groupRegistrationRequired: host.querySelector('#setReg').value === '1',
       duelAutoPromote: host.querySelector('#setDuel').value === '1'
+    }).catch(() => {})
+
+    /* Creators — saved exactly as typed, no casing or trimming of inner text. */
+    const saveCreators = host.querySelector('#saveCreators')
+    if (saveCreators) saveCreators.onclick = () => {
+      const one = host.querySelector('#setCreator1')
+      const two = host.querySelector('#setCreator2')
+      const names = [one.value, two.value].map(x => x.trim()).filter(Boolean)
+      if (!names.length) return requireField(one, 'Enter at least one creator name.')
+      return act('settings', {
+        creators: names,
+        botName: host.querySelector('#setBotName').value
+      }).catch(() => {})
+    }
+
+    const saveAi = host.querySelector('#saveAi')
+    if (saveAi) saveAi.onclick = () => act('settings', {
+      aiEnabled: host.querySelector('#setAi').value === '1',
+      aiModel: host.querySelector('#setAiModel').value,
+      aiTimeoutMs: host.querySelector('#setAiTimeout').value
     }).catch(() => {})
   }
 

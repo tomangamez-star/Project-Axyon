@@ -11,6 +11,9 @@
  */
 const store = require('./axyon-store')
 const greetings = require('./greetings')
+const T = require('./theme')
+const music = require('./music')
+const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -130,43 +133,91 @@ function bar (value, max, width = 10) {
   return '\u2588'.repeat(filled) + '\u2591'.repeat(width - filled)
 }
 
+/**
+ * The hunter's profile card.
+ *
+ * Rounded frame, small-caps section titles, monospace bars so the blocks line
+ * up, and the name in the display font. This is the card the reference images
+ * are modelled on: emoji + bold label + em-dash + value, one field per line.
+ */
 function profileCard (p, extra = {}) {
   const need = store.xpNeed(p.level)
+  const stats = T.frame([
+    T.field('\ud83d\udcc8', 'Level', T.m(p.level)),
+    T.field('\ud83c\udf96\ufe0f', 'Rank', T.b(p.rank)),
+    T.field('\ud83c\udf96\ufe0f', 'Grade', T.m(p.grade)),
+    T.field('\ud83c\udfad', 'Class', p.class || 'Fighter'),
+    '',
+    `\u2764\ufe0f ${T.b('HP')}`,
+    T.barLine(p.hp, p.maxHp),
+    '',
+    `\ud83d\udd0b ${T.b('POWER ENERGY')}`,
+    T.barLine(p.powerEnergy, p.maxPowerEnergy),
+    '',
+    `\ud83d\udca0 ${T.b('XP')}  ${T.m(`${p.xp}/${need}`)}`,
+    T.barLine(p.xp, need)
+  ], { kind: 'round', title: T.font('STATUS', 'smallcaps'), width: 24 })
+
+  const combat = T.frame([
+    T.field('\u2694\ufe0f', 'Attack', T.m(p.atk)),
+    T.field('\ud83d\udee1\ufe0f', 'Armor', T.m(p.def)),
+    T.field('\ud83d\udca8', 'Speed', T.m(p.spd)),
+    '',
+    T.field('\ud83e\ude99', 'Zen', T.m(fmt(p.zen))),
+    T.field('\ud83d\udc8e', 'Coins', T.m(fmt(p.coins))),
+    T.field('\ud83d\udeaa', 'Stage', T.m(p.stage)),
+    T.field('\ud83c\udfc6', 'Record', `${T.m(p.wins)}W / ${T.m(p.losses)}L`)
+  ], { kind: 'light', title: T.font('COMBAT', 'smallcaps'), width: 24 })
+
   return [
-    `${WATERMARK}`,
+    T.header({ creators: greetings.creatorsOf(extra.settings) }),
     '',
-    `> \ud83d\udc64 *${p.name || 'Unnamed Hunter'}*`,
-    `\ud83c\udf96\ufe0f *Rank ${p.rank}* \u2022 Grade *${p.grade}* \u2022 Lv. *${p.level}*`,
+    `\ud83d\udc64 ${T.hunterName(p.name)}`,
+    extra.partner ? `\ud83d\udc9e ${T.i('bound to')} ${T.b(extra.partner)}` : null,
     '',
-    `\u2764\ufe0f HP      ${p.hp}/${p.maxHp}  ${bar(p.hp, p.maxHp)}`,
-    `\u26a1 Energy  ${p.powerEnergy}/${p.maxPowerEnergy}  ${bar(p.powerEnergy, p.maxPowerEnergy)}`,
-    `\ud83d\udca0 XP      ${p.xp}/${need}`,
+    stats,
     '',
-    `\u2694\ufe0f ATK *${p.atk}*   \ud83d\udee1\ufe0f DEF *${p.def}*   \ud83d\udca8 SPD *${p.spd}*`,
-    `\ud83e\udde0 Class *${p.class}*`,
+    combat,
     '',
-    `\ud83e\ude99 Zen *${fmt(p.zen)}*   \ud83d\udc8e Coins *${fmt(p.coins)}*`,
-    `\ud83d\udeaa Stage *${p.stage}*   \ud83c\udfc6 ${p.wins}W / ${p.losses}L`,
-    extra.partner ? `\ud83d\udc9e Bound to *${extra.partner}*` : null
-  ].filter(Boolean).join('\n')
+    T.rule('', 'hair'),
+    `\ud83c\udf96\ufe0f ${T.b(p.rank)} \u2022 ${T.i(`grade ${p.grade}`)} \u2022 ${T.i(`level ${p.level}`)}`
+  ].filter(x => x !== null && x !== undefined).join('\n')
 }
 
+/**
+ * The battle card.
+ *
+ * Heavy frame, because a fight should not look like a profile. Enemy on top,
+ * hunter below, both with monospace bars, then the remaining uses.
+ */
 function battleCard (b, p, note = '') {
   const e = b.enemy
+  const enemy = T.frame([
+    `\ud83d\udc79 ${T.b(e.name)}`,
+    T.barLine(Math.max(0, b.enemyHp), e.hp),
+    T.field('\u2694\ufe0f', 'ATK', T.m(e.atk)),
+    T.field('\ud83d\udee1\ufe0f', 'DEF', T.m(e.def))
+  ], { kind: 'heavy', title: T.font('ENEMY', 'smallcaps'), width: 22 })
+
+  const hunter = T.frame([
+    `\ud83d\udc64 ${T.hunterName(p.name)}`,
+    T.barLine(Math.max(0, b.playerHp), p.maxHp),
+    `\ud83d\udd0b ${T.barLine(b.energy, p.maxPowerEnergy)}`
+  ], { kind: 'round', title: T.font('HUNTER', 'smallcaps'), width: 22 })
+
   return [
-    `${WATERMARK}`,
-    `\u2694\ufe0f *BATTLE \u2022 TURN ${b.turn}*`,
+    T.header({ creators: greetings.creatorsOf({}) }),
+    '',
+    `\u2694\ufe0f ${T.b('BATTLE')} \u2022 ${T.i(`turn ${b.turn}`)}`,
     '',
     note ? `${note}\n` : null,
-    `> \ud83d\udc79 *${e.name}*`,
-    `\u2764\ufe0f ${Math.max(0, b.enemyHp)}/${e.hp}  ${bar(Math.max(0, b.enemyHp), e.hp)}`,
+    enemy,
     '',
-    `> \ud83d\udc64 *${p.name || 'Hunter'}*`,
-    `\u2764\ufe0f ${Math.max(0, b.playerHp)}/${p.maxHp}  ${bar(Math.max(0, b.playerHp), p.maxHp)}`,
-    `\u26a1 ${b.energy}/${p.maxPowerEnergy}`,
+    hunter,
     '',
-    `Uses left \u2014 heal *${Math.max(0, b.healsLeft)}* \u2022 class *${Math.max(0, 3 - p.classMovesUsed)}* \u2022 card *${Math.max(0, 3 - p.cardUses)}*`
-  ].filter(Boolean).join('\n')
+    T.rule('', 'dotted'),
+    `Uses \u2014 heal ${T.m(Math.max(0, b.healsLeft))} \u2022 class ${T.m(Math.max(0, 3 - p.classMovesUsed))} \u2022 card ${T.m(Math.max(0, 3 - p.cardUses))}`
+  ].filter(x => x !== null && x !== undefined).join('\n')
 }
 
 /* ------------------------------------------------------------------ engine */
@@ -234,8 +285,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.log(userId, 'arise', userId, { created: r.created })
     const p = r.player
     const caption = r.created
-      ? greetings.firstGreeting(p, settings.prefix)
-      : greetings.returnGreeting(p, settings.prefix)
+      ? greetings.firstGreeting(p, settings.prefix, settings)
+      : greetings.returnGreeting(p, settings.prefix, settings)
     return withVisual(sock, jid, m, 'arise', caption)
   }
 
@@ -248,8 +299,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const otherId = partner.requester === ctx.userId ? partner.target : partner.requester
       partnerName = (await store.player(otherId))?.name || `+${otherId}`
     }
-    return withVisual(sock, ctx.jid, m, 'profile', profileCard(p, { partner: partnerName }),
-      [['\u2694\ufe0f Stages', 'ax_stages'], ['\ud83c\udff9 Dungeon', 'ax_dungeon'], ['\ud83c\udccf Cards', 'ax_cards'], ['\ud83d\udcda Help', 'ax_help']])
+    return withVisual(sock, ctx.jid, m, 'profile', profileCard(p, { partner: partnerName, settings: ctx.settings }))
   }
 
   /* ---------------------------------------------------------------- stages */
@@ -583,6 +633,87 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return send(sock, ctx.jid, m, lines.join('\n'))
   }
 
+  /* ------------------------------------------------------------------ play */
+
+  /**
+   * `!play <song>` — search, show artwork, send the audio.
+   *
+   * Deliberately small: one search, one download, one message. It never blocks
+   * the message path for other users because the caller does not await it
+   * before returning, and every step has its own timeout.
+   */
+  async function play (sock, m, ctx, args) {
+    const query = args.join(' ').trim()
+    if (!query) {
+      return send(sock, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `🎵 ${T.font('PLAY', 'bold')}`,
+        '',
+        `Usage: ${T.b(`${ctx.prefix}play <song or artist>`)}`,
+        '',
+        T.quote('Example: ' + `${ctx.prefix}play blinding lights`)
+      ].join('\n'))
+    }
+
+    const r = await music.resolve(query, { logger })
+    if (!r.ok) {
+      return send(sock, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `🎵 ${T.font('PLAY', 'bold')}`,
+        '',
+        `❌ ${r.message || 'Could not find that track.'}`,
+        '',
+        T.quote('Try the artist name and the song title together.')
+      ].join('\n'))
+    }
+
+    const t = r.track
+    const caption = [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `🎵 ${T.b(t.title)}`,
+      `👤 ${T.i(t.artist)}`,
+      t.album ? `💿 ${T.i(t.album)}` : null,
+      `⏱️ ${T.m(music.mmss(t.duration))}`,
+      '',
+      T.rule('', 'hair'),
+      r.full ? `✅ ${T.i('full track')}` : `⚠️ ${T.i('30-second preview — full track unavailable')}`
+    ].filter(Boolean).join('\n')
+
+    try {
+      /* Artwork first, so the chat shows the cover even if the audio is slow. */
+      if (t.artwork) {
+        await sock.sendMessage(ctx.jid, { image: { url: t.artwork }, caption }, { quoted: m }).catch(() => {})
+      }
+      /*
+       * The audio is a LOCAL file, so it must be sent as a Buffer.
+       * `{ audio: { url: '/tmp/...' } }` makes Baileys treat the path as an
+       * HTTP URL and the send fails — which is exactly what happened before.
+       */
+      const buf = await fs.readFile(r.file)
+      await sock.sendMessage(ctx.jid, {
+        audio: buf,
+        mimetype: music.mimeFor(r.file),
+        ptt: false
+      }, { quoted: m })
+      /*
+       * Logging is best-effort and deliberately OUTSIDE the try above: a failed
+       * audit write must never be reported to the user as "could not send the
+       * audio" when the audio did in fact send.
+       */
+      store.log(ctx.userId, 'play', t.title, { artist: t.artist, full: r.full })
+        .catch(e => logger?.debug?.({ err: e?.message }, 'play log failed'))
+      return true
+    } catch (e) {
+      logger?.warn?.({ err: e?.message }, 'play send failed')
+      return send(sock, ctx.jid, m, `⚠️ Found *${t.title}* but could not send the audio.`)
+    } finally {
+      await music.cleanup(r.dir)
+    }
+  }
+
   /* ------------------------------------------------------------------ help */
 
   const SECTIONS = {
@@ -592,6 +723,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     cards: { name: 'Cards', icon: '\ud83c\udccf' },
     social: { name: 'Social', icon: '\ud83d\udc9e' },
     economy: { name: 'Economy', icon: '\ud83e\ude99' },
+    media: { name: 'Media', icon: '\ud83c\udfb5' },
     management: { name: 'Management', icon: '\ud83d\udc51' }
   }
 
@@ -599,23 +731,37 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const meta = SECTIONS[section]
     const rows = COMMANDS.filter(c => c.section === section && !c.hidden)
     if (!meta || !rows.length) return null
+    const body = rows.map(c => `${T.b(c.usage.replace(/\{p\}/g, prefix))}\n${T.i(c.desc)}`).join('\n\n')
     return [
-      `${WATERMARK}`, '', `${meta.icon} *HELP \u2014 ${meta.name.toUpperCase()}*`, '',
-      rows.map(c => `*${c.usage.replace(/\{p\}/g, prefix)}*\n${c.desc}`).join('\n\n'), '',
-      `> Prefix: *${prefix}*  \u2022  ${prefix}help for all sections`
+      T.header({ creators: greetings.creatorsOf({}) }),
+      '',
+      `${meta.icon} ${T.font(`HELP \u2014 ${meta.name.toUpperCase()}`, 'bold')}`,
+      '',
+      T.rule('', 'thin'),
+      '',
+      body,
+      '',
+      T.rule('', 'hair'),
+      `Prefix ${T.b(prefix)} \u2022 ${T.b(`${prefix}help`)} for all sections`
     ].join('\n')
   }
 
   function helpAll (prefix) {
-    const out = [`${WATERMARK}`, '', '\ud83d\udcda *AXYON \u2014 COMMAND INDEX*', '']
+    const out = [
+      T.header({ creators: greetings.creatorsOf({}) }),
+      '',
+      `\ud83d\udcda ${T.font('COMMAND INDEX', 'bold')}`,
+      ''
+    ]
     for (const [key, meta] of Object.entries(SECTIONS)) {
       const rows = COMMANDS.filter(c => c.section === key && !c.hidden)
       if (!rows.length) continue
-      out.push(`${meta.icon} *${meta.name.toUpperCase()}*`)
-      out.push(rows.map(c => `\u2022 ${c.usage.replace(/\{p\}/g, prefix)}`).join('\n'))
+      out.push(T.rule(meta.name.toUpperCase(), 'thin'))
+      out.push(rows.map(c => `${meta.icon} ${T.m(c.usage.replace(/\{p\}/g, prefix))}`).join('\n'))
       out.push('')
     }
-    out.push(`> Prefix: *${prefix}* \u2022 ${prefix}help <section>`)
+    out.push(T.rule('', 'hair'))
+    out.push(`Prefix ${T.b(prefix)} \u2022 ${T.b(`${prefix}help <section>`)}`)
     return out.join('\n')
   }
 
@@ -627,7 +773,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
-    cardPanel, claimCard, beginDuel, answerDuel, daily, zenWallet,
+    cardPanel, claimCard, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
   }

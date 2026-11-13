@@ -2,14 +2,14 @@
 /*
  * GREETINGS — the words Architect uses when someone arrives.
  *
- * These are deliberately new. The old build greeted people with
- * "WELCOME TO RYUDEN" / "CHOOSE YOUR PATH" and a six-button menu; none of that
- * copy survives. Everything here is plain text, and the only thing a new
- * hunter is told to do is type a command.
+ * These are new. The old build greeted people with "WELCOME TO RYUDEN" and a
+ * six-button menu; none of that copy survives. Every greeting here is plain
+ * text, framed, and tells a new hunter exactly one thing to do next.
  *
- * A greeting is picked deterministically from the player id, so the same
- * hunter always gets the same line and it never feels like a slot machine.
+ * A greeting is picked deterministically from the player id, so the same hunter
+ * always gets the same line and it never feels like a slot machine.
  */
+const T = require('./theme')
 
 const FIRST_LIGHT = [
   'The gate did not open for you. It noticed you.',
@@ -47,54 +47,110 @@ function pick (list, seed) {
   return list[h % list.length]
 }
 
-function firstGreeting (player, prefix) {
+function creatorsOf (settings) {
+  const c = settings?.creators
+  return Array.isArray(c) && c.length ? c : ['Lil Clutch', 'Montai']
+}
+
+/**
+ * First arrival. This is the card a brand-new hunter sees after `!arise`.
+ *
+ * Layout follows the reference: header with credit line, a block banner, the
+ * hunter's name in the display font, a quote, then a framed stat card.
+ */
+function firstGreeting (player, prefix, settings) {
+  const stats = T.frame([
+    T.field('📈', 'Level', T.m(player.level)),
+    T.field('🏅', 'Rank', T.b(player.rank)),
+    T.field('🎖️', 'Grade', T.m(player.grade)),
+    T.field('🎭', 'Class', player.class || 'Fighter'),
+    '',
+    `❤️ ${T.b('HP')}`,
+    T.barLine(player.hp, player.maxHp),
+    '',
+    `🔋 ${T.b('POWER ENERGY')}`,
+    T.barLine(player.powerEnergy, player.maxPowerEnergy),
+    '',
+    T.field('⚔️', 'Attack', T.m(player.atk)),
+    T.field('🛡️', 'Armor', T.m(player.def)),
+    T.field('⭐', 'XP', T.m(player.xp)),
+    T.field('🪙', 'Coin', T.m(player.coins || 0)),
+    T.field('💎', 'Zen', T.m(player.zen || 0))
+  ], { kind: 'round', title: T.font('STATUS', 'smallcaps'), width: 24 })
+
   return [
-    '\u232c AXYN CORE',
+    T.header({ creators: creatorsOf(settings) }),
     '',
-    '\ud83c\udf00 *ARISE*',
+    T.banner('ARISE', { kind: 'block', note: 'the system has recognised you' }),
     '',
-    `> \ud83d\udc64 *${player.name || 'Unnamed Hunter'}*`,
+    `👤 ${T.hunterName(player.name)}`,
     '',
-    pick(FIRST_LIGHT, player.userId),
+    T.quote(pick(FIRST_LIGHT, player.userId)),
     '',
-    RANK_LINE[player.rank] || `Rank ${player.rank}.`,
+    T.rule('AWAKENING COMPLETE', 'thin'),
     '',
-    `\u2764\ufe0f ${player.maxHp} HP  \u2022  \u2694\ufe0f ${player.atk} ATK  \u2022  \ud83d\udee1\ufe0f ${player.def} DEF`,
-    `\u26a1 Power Energy *${player.maxPowerEnergy}*`,
+    stats,
     '',
-    `Type *${prefix}help* to see what you can do.`,
-    `Type *${prefix}stages* when you are ready to fight.`
+    T.rule('', 'hair'),
+    '',
+    T.field('🎴', 'Cards', 'ready to collect'),
+    T.field('🗡️', 'Weapons', 'ready to collect'),
+    T.field('⚡', 'Moves', 'from your class'),
+    '',
+    `${T.i('Train. Explore. Grow.')}`,
+    `${T.i('Your story starts here.')} ⚔️`,
+    '',
+    `Type ${T.b(`${prefix}help`)} to see everything you can do.`,
+    `Type ${T.b(`${prefix}stages`)} when you are ready to fight.`
   ].join('\n')
 }
 
-function returnGreeting (player, prefix) {
+/** A returning hunter. Different frame, different copy, same discipline. */
+function returnGreeting (player, prefix, settings) {
+  const stats = T.frame([
+    T.field('🏅', 'Rank', T.b(player.rank)),
+    T.field('🎖️', 'Grade', T.m(player.grade)),
+    T.field('📈', 'Level', T.m(player.level)),
+    '',
+    `❤️ ${T.b('HP')}  ${T.barLine(player.hp, player.maxHp)}`,
+    `🔋 ${T.b('ENERGY')}  ${T.barLine(player.powerEnergy, player.maxPowerEnergy)}`,
+    '',
+    T.field('💎', 'Zen', T.m(Number(player.zen || 0).toLocaleString('en-US'))),
+    T.field('🏆', 'Record', `${T.m(player.wins)}W / ${T.m(player.losses)}L`)
+  ], { kind: 'double', title: T.font('RECORD', 'smallcaps'), width: 24 })
+
   return [
-    '\u232c AXYN CORE',
+    T.header({ creators: creatorsOf(settings) }),
     '',
-    '\ud83c\udf00 *WELCOME BACK*',
+    T.banner('WELCOME BACK', { kind: 'heavy', note: 'your record held' }),
     '',
-    `> \ud83d\udc64 *${player.name || 'Unnamed Hunter'}*`,
+    `👤 ${T.hunterName(player.name)}`,
     '',
-    pick(RETURNING, player.userId),
+    T.quote(pick(RETURNING, player.userId)),
     '',
-    `\ud83c\udf96\ufe0f Rank *${player.rank}* \u2022 Grade *${player.grade}* \u2022 Lv. *${player.level}*`,
-    `\u2764\ufe0f ${player.hp}/${player.maxHp}  \u2022  \u26a1 ${player.powerEnergy}/${player.maxPowerEnergy}`,
-    `\ud83e\ude99 Zen *${Number(player.zen || 0).toLocaleString('en-US')}*`,
+    stats,
     '',
-    `*${prefix}profile* \u2022 *${prefix}stages* \u2022 *${prefix}help*`
+    T.rule('', 'dotted'),
+    '',
+    `${T.b(`${prefix}profile`)}  •  ${T.b(`${prefix}stages`)}  •  ${T.b(`${prefix}help`)}`
   ].join('\n')
 }
 
 /** Shown when someone uses a command before registering. */
-function notRegistered (prefix) {
+function notRegistered (prefix, settings) {
   return [
-    '\u232c AXYN CORE',
+    T.header({ creators: creatorsOf(settings) }),
     '',
-    '\ud83c\udf00 *THE SYSTEM DOES NOT KNOW YOU YET*',
+    T.frame([
+      T.font('THE SYSTEM', 'bold'),
+      T.font('DOES NOT KNOW YOU', 'bold'),
+      '',
+      T.i('yet')
+    ], { kind: 'light', width: 22 }),
     '',
-    `Register with *${prefix}arise* first.`,
+    `Register with ${T.b(`${prefix}arise`)} first.`,
     '',
-    '> One command. Then everything else opens.'
+    T.quote('One command. Then everything else opens.')
   ].join('\n')
 }
 
@@ -105,16 +161,22 @@ function notRegistered (prefix) {
  * broken. Ordinary chat is still ignored; only commands get this reply, so the
  * group is never spammed.
  */
-function groupNotRegistered (prefix) {
+function groupNotRegistered (prefix, settings) {
   return [
-    '\u232c AXYN CORE',
+    T.header({ creators: creatorsOf(settings) }),
     '',
-    '\ud83d\udd12 *THIS GROUP IS NOT REGISTERED*',
+    T.frame([
+      '🔒 ' + T.font('GROUP NOT', 'bold'),
+      '   ' + T.font('REGISTERED', 'bold')
+    ], { kind: 'heavy', width: 22 }),
     '',
-    `An admin needs to send *${prefix}register* here once.`,
+    `An admin needs to send ${T.b(`${prefix}register`)} here once.`,
     '',
-    '> Then every command works. Nothing else is required.'
+    T.quote('Then every command works. Nothing else is required.')
   ].join('\n')
 }
 
-module.exports = { firstGreeting, returnGreeting, notRegistered, groupNotRegistered, FIRST_LIGHT, RETURNING, RANK_LINE, pick }
+module.exports = {
+  firstGreeting, returnGreeting, notRegistered, groupNotRegistered,
+  FIRST_LIGHT, RETURNING, RANK_LINE, pick, creatorsOf
+}

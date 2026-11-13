@@ -151,6 +151,25 @@
       <p class="muted">Default prefix is <code>!</code>. AXYON can change it with <code>!prefix</code>, and each group can have its own.</p>
       <div id="helpCommands" class="cmd-grid"><p class="admin-empty">Loading commands&hellip;</p></div>
     </div>
+
+    <div class="panel">
+      <p class="eyebrow">ASSISTANT</p>
+      <h3>Asking the bot a question</h3>
+      <p class="muted">The bot has a helper that knows every command. It explains; it cannot run anything.</p>
+      <ol class="steps">
+        <li><b>@-mention the bot</b> in a group: <code>@Architect how do I play a mode?</code></li>
+        <li><b>Or reply to any message the bot sent</b> and just type your question.</li>
+        <li><b>Or use the command:</b> <code>!ai how do ranks work?</code></li>
+      </ol>
+      <p class="admin-note">It defers to <b>AXYON</b> above everyone, then RHM, then group admins. It will never claim to have reset, granted or changed anything &mdash; it tells you which command to type instead.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">MEDIA</p>
+      <h3>Playing a song</h3>
+      <p class="muted"><code>!play &lt;song or artist&gt;</code> searches a public catalogue, shows the cover art, then sends the audio.</p>
+      <p class="admin-note">If a full track cannot be fetched, the bot sends the catalogue preview and <b>says so in the caption</b> &mdash; it never presents a 30-second clip as the whole song.</p>
+    </div>
   </section>
 </main>
 

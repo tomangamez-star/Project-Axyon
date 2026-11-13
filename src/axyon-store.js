@@ -34,7 +34,16 @@ const DEFAULT_SETTINGS = {
   cardAbilitiesPerDay: 3,
   duelAutoPromote: true,
   groupRegistrationRequired: true,
-  watermark: '\u232c AXYN CORE'
+  watermark: '\u232c AXYN CORE',
+  /* The bot's creators, shown in every card header. AXYON is the OWNER TITLE
+   * of the bot, not a creator — these two are separate concepts and the
+   * dashboard edits them separately. */
+  creators: ['Lil Clutch', 'Montai'],
+  botName: 'Architect',
+  /* The in-bot assistant. It explains commands; it cannot run them. */
+  aiEnabled: true,
+  aiModel: '',
+  aiTimeoutMs: 12000
 }
 
 const ORIGINAL_STAGES = [

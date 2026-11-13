@@ -131,7 +131,14 @@ async function main () {
   ok('!arise from fromMe:true is routed', arose === true)
   ok('!arise produced a reply', sock.sent.length > 0, `${sock.sent.length} messages`)
   const ariseText = lastText(sock)
-  ok('reply is the new ARISE greeting', /ARISE/.test(ariseText), ariseText.slice(0, 60))
+  /* The banner is rendered in a Unicode display font now, so the literal
+   * ASCII "ARISE" is not present — the sigil, the credit line and the
+   * awakening line are what identify the new greeting. */
+  ok('reply is the new ARISE greeting',
+    ariseText.includes('⬡') && /AWAKENING COMPLETE/.test(ariseText), ariseText.slice(0, 60))
+  ok('greeting credits the configured creators',
+    /Lil Clutch/.test(ariseText) && /Montai/.test(ariseText))
+  ok('greeting does not credit the old creator', !/Chat Nova/i.test(ariseText))
   ok('greeting is NOT the old RYUDEN copy', !/RYUDEN|CHOOSE YOUR PATH/i.test(ariseText))
   ok('greeting has no button grid', !sock.sent.some(x => x.content?.buttons))
   const owner = await store.player(OWNER)

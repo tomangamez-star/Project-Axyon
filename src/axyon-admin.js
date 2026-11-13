@@ -166,6 +166,35 @@ function createAxyonAdmin ({ logger }) {
         }
         if (input.groupRegistrationRequired !== undefined) patch.groupRegistrationRequired = !!input.groupRegistrationRequired
         if (input.duelAutoPromote !== undefined) patch.duelAutoPromote = !!input.duelAutoPromote
+
+        /*
+         * CREATORS
+         * --------
+         * The two names shown in every card header. AXYON is the OWNER TITLE of
+         * the bot, not a creator, so it is deliberately not editable here.
+         * Stored exactly as typed — no trimming of inner spacing, no title
+         * casing, no reordering.
+         */
+        if (input.creators !== undefined) {
+          const list = Array.isArray(input.creators) ? input.creators : String(input.creators).split(',')
+          const clean = list.map(x => String(x ?? '').trim()).filter(Boolean)
+          if (clean.length < 1 || clean.length > 4) return { ok: false, message: 'Enter between 1 and 4 creator names.' }
+          if (clean.some(x => x.length > 40)) return { ok: false, message: 'Each creator name must be 40 characters or fewer.' }
+          patch.creators = clean
+        }
+        if (input.botName !== undefined) {
+          const name = String(input.botName).trim()
+          if (!name || name.length > 40) return { ok: false, message: 'Bot name must be 1–40 characters.' }
+          patch.botName = name
+        }
+        if (input.aiEnabled !== undefined) patch.aiEnabled = !!input.aiEnabled
+        if (input.aiModel !== undefined) patch.aiModel = String(input.aiModel).trim().slice(0, 60)
+        if (input.aiTimeoutMs !== undefined) {
+          const n = num(input.aiTimeoutMs)
+          if (n === null || n < 3000 || n > 30000) return { ok: false, message: 'AI timeout must be between 3000 and 30000 ms.' }
+          patch.aiTimeoutMs = n
+        }
+
         if (!Object.keys(patch).length) return { ok: false, message: 'Nothing to update.' }
         const next = await store.setSettings(patch)
         await store.log(actor, 'admin_settings', '', patch)
