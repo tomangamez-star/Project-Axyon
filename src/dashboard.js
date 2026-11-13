@@ -1,5 +1,6 @@
 'use strict'
 const crypto=require('crypto'),fs=require('fs/promises'),path=require('path')
+const {createAxyonAdmin}=require('./axyon-admin')
 const PUBLIC=path.join(__dirname,'..','public')
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8'}
 function json(res,status,data,headers={}){res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...headers});res.end(JSON.stringify(data))}
@@ -10,6 +11,7 @@ function maskPhone(value){const x=String(value||'').split(':')[0].split('@')[0].
 function formatPairingCode(value){const raw=String(value||'').replace(/[^a-z0-9]/gi,'');return raw.match(/.{1,4}/g)?.join('-')||raw}
 function createDashboard({sessions,database,lease,logger}){
  const webSessions=new Map(),failures=new Map(),password=String(process.env.DASHBOARD_PASSWORD||process.env.OWNER_DASHBOARD_PASSWORD||''),hours=Math.max(1,Math.min(168,Number(process.env.DASHBOARD_SESSION_HOURS)||24))
+ const axyonAdmin=createAxyonAdmin({logger})
  function prune(){const now=Date.now();for(const[token,s]of webSessions)if(s.expiresAt<=now)webSessions.delete(token);for(const[ip,s]of failures)if(now-s.startedAt>10*60*1000)failures.delete(ip)}
  function session(req){prune();const token=cookies(req).architect_session,s=webSessions.get(token);return s&&s.expiresAt>Date.now()?s:null}
  function requireAuth(req,res,csrf=false){const s=session(req);if(!s){json(res,401,{ok:false,error:'Sign in required'});return null}if(csrf&&!safeEqual(req.headers['x-architect-csrf'],s.csrf)){json(res,403,{ok:false,error:'Security token mismatch. Refresh the dashboard.'});return null}return s}
@@ -20,6 +22,10 @@ function createDashboard({sessions,database,lease,logger}){
   if(req.method==='GET'&&url.pathname==='/dashboard/app.css'){await asset(res,'dashboard.css');return true}
   if(req.method==='GET'&&url.pathname==='/dashboard/controls.css'){await asset(res,'controls.css');return true}
   if(req.method==='GET'&&url.pathname==='/dashboard/app.js'){await asset(res,'dashboard.js');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/admin.js'){await asset(res,'admin.js');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/admin.css'){await asset(res,'admin.css');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/api/admin'){const s=requireAuth(req,res);if(!s)return true;json(res,200,{ok:true,csrf:s.csrf,...await axyonAdmin.snapshot()});return true}
+  if(req.method==='POST'&&url.pathname==='/dashboard/api/admin/action'){if(!requireAuth(req,res,true))return true;const input=await body(req,65536);const result=await axyonAdmin.act(String(input.action||''),input);json(res,result.ok?200:400,result);return true}
   if(req.method==='GET'&&url.pathname==='/dashboard/api/session'){const s=session(req);json(res,200,{ok:true,authenticated:!!s,configured:!!password,csrf:s?.csrf||null});return true}
   if(req.method==='POST'&&url.pathname==='/dashboard/api/login'){if(!password){json(res,503,{ok:false,error:'Set DASHBOARD_PASSWORD in Render first.'});return true}const ip=String(req.headers['x-forwarded-for']||req.socket.remoteAddress||'unknown').split(',')[0].trim(),f=failures.get(ip)||{count:0,startedAt:Date.now()};if(f.count>=5&&Date.now()-f.startedAt<10*60*1000){json(res,429,{ok:false,error:'Too many attempts. Try again later.'});return true}const input=await body(req);if(!safeEqual(input.password,password)){f.count++;failures.set(ip,f);json(res,401,{ok:false,error:'Wrong password'});return true}failures.delete(ip);const token=crypto.randomBytes(32).toString('base64url'),csrf=crypto.randomBytes(24).toString('base64url');webSessions.set(token,{csrf,expiresAt:Date.now()+hours*3600000});json(res,200,{ok:true,csrf},{'set-cookie':`architect_session=${token}; Path=/dashboard; HttpOnly; Secure; SameSite=Strict; Max-Age=${hours*3600}`});return true}
   if(req.method==='POST'&&url.pathname==='/dashboard/api/logout'){if(!requireAuth(req,res,true))return true;const token=cookies(req).architect_session;webSessions.delete(token);json(res,200,{ok:true},{'set-cookie':'architect_session=; Path=/dashboard; HttpOnly; Secure; SameSite=Strict; Max-Age=0'});return true}

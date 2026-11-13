@@ -8,9 +8,11 @@ const {createEconomyStore}=require('./economy-store'),{createEconomyRouter}=requ
 const {createCursedSticker}=require('./cursed-sticker')
 const {resolveButtonId,isKnownButtonInteraction,shouldHandleUpsert,ReplyRateLimiter}=require('./message-guard')
 const {resolveMessageUserId}=require('./identity')
+const {createAxyon}=require('./axyon-rpg'),{createCommands}=require('./axyon-commands')
 const accountConfig=require('./account-config')
 const logger=pino({level:process.env.LOG_LEVEL||'info'}),port=Number(process.env.PORT||3000),TEST_IMAGE_PATH=path.join(__dirname,'..','assets','speed-test.jpg'),MENU_IMAGE_PATH=path.join(__dirname,'..','assets','ryuden-menu.jpg'),API_IMAGE_URL=process.env.TEST_IMAGE_URL||'https://picsum.photos/900/1200.jpg'
 const economy=createEconomyStore({database,logger}),routeEconomy=createEconomyRouter({economy,logger}),casino=createCasino({economy})
+const axyon=createAxyon({economy,logger,sendButtons:(s,j,b,f,d,o)=>sessions.sendNativeButtons?.(s,j,b,f,d,o)}),axyonCommands=createCommands({axyon,economy,logger})
 
 function actorId(m){const k=m?.key||{};return String(k.participantAlt||k.participant||k.remoteJidAlt||k.remoteJid||'').split(':')[0].split('@')[0]}
 function ownedButton(raw){const x=String(raw||''),m=x.match(/^(.*)~u:([0-9]+)$/);return m?{id:m[1],owner:m[2]}:{id:x,owner:null}}
@@ -36,6 +38,10 @@ class WhatsAppConnection{
  async handleMessage(sock,m,type='notify'){const jid=m?.key?.remoteJid,id=m?.key?.id;if(!jid||!id||jid==='status@broadcast'||this.seen.has(id))return;const content=this.baileys.normalizeMessageContent(m.message)||{};if(this.config?.enabled===false||this.paused)return;const button=resolveButtonId(content),known=isKnownButtonInteraction(content);if(!shouldHandleUpsert(content,{fromMe:!!m.key.fromMe,type}))return;this.lastMessageAt=new Date().toISOString();this.messagesHandled++;this.seen.set(id,Date.now());if(this.seen.size>2000)this.seen.clear();if(known)logger.info({jid,id,type,fromMe:!!m.key.fromMe,button,types:Object.keys(content)},'Architect button tap accepted');const ob=ownedButton(button),actor=await resolveMessageUserId(sock,m)||actorId(m);if(ob.owner&&ob.owner!==actor){await sock.sendMessage(jid,{text:'🔒 *NOT YOUR WINDOW*\n\nThis player interface belongs to someone else.\nUse */rpg* to open your own.'},{quoted:m});return}const actionButton=ob.id;
   if(!this.ui)this.ui=createUi({economy,casino,logger:this.log,accountId:this.sessionId,sendButtons:(s,j,b,f,d,o)=>this.sendNativeButtons(s,j,b,f,d,o),sendUrlButton:(s,j,b,f,l,u,q)=>this.sendUrlButton(s,j,b,f,l,u,q),})
   if(!this.cursedSticker)this.cursedSticker=createCursedSticker({baileys:this.baileys,logger})
+  // AXYON RPG runs before the legacy /start gate: !arise is the registration
+  // path for the RPG, so it must not require an economy account first.
+  if(actionButton&&actionButton.startsWith('ax_')){if(await axyonCommands.section(sock,m,actionButton))return}
+  if(await axyonCommands.handle(sock,m,content))return
   const rawText=String(content.conversation||content.extendedTextMessage?.text||'').trim(),isStart=/^\/start(?:\s|$)/i.test(rawText)
   if((actionButton||rawText.startsWith('/')||rawText.toLowerCase().startsWith('!claim'))&&!isStart){const account=await economy.findUser(actor);if(!account?.registeredAt){await sock.sendMessage(jid,{text:'🌸 *YOU HAVEN’T ENTERED ARCHITECT YET*\n\nUse */start* to register before using any Architect command or button.'},{quoted:m});return}}
   if(actionButton||rawText.startsWith('/')||rawText.toLowerCase().startsWith('!claim')){const limit=this.replyLimiter.check(m);if(!limit.allowed){if(limit.warn)await sock.sendMessage(jid,{text:`🤫 *EASY THERE*\n\nThree requests came in too quickly. Architect is ignoring commands for ${Math.ceil(limit.durationMs/1000)} seconds.`},{quoted:m});return}}
