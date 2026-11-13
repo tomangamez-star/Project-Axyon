@@ -73,6 +73,12 @@
     <div id="adminBody-players"></div>
   </section>
 
+  <!-- ------------------------------- SHOP ----------------------------- -->
+  <section class="screen" data-screen="shop">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; ECONOMY</p><h2>Shop &amp; inventory</h2><p class="muted">The catalogue the bot sells from, and the reward desk. Granting an item or an ability puts it straight into a player's inventory &mdash; the same stock <code>!use</code> consumes. Prices here are the live prices; change one and the bot charges the new amount.</p></div>
+    <div id="adminBody-shop"></div>
+  </section>
+
   <!-- ------------------------------ STAGES ---------------------------- -->
   <section class="screen" data-screen="stages">
     <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Stages</h2><p class="muted">The original three stages cannot be removed, only edited or locked.</p></div>
@@ -146,6 +152,20 @@
     </div>
 
     <div class="panel">
+      <p class="eyebrow">GAME MODES</p>
+      <h3>Four modes, and what runs in each</h3>
+      <p class="muted">A command that belongs to another mode will not run. It tells you which mode it belongs to and how to switch. Switch with <code>!mode &lt;name&gt;</code>.</p>
+      <div class="admin-scroll"><table class="admin-table"><thead><tr><th>Mode</th><th>Commands</th></tr></thead><tbody>
+        <tr><td><b>&#9876; Combat</b><br><span class="muted">Monsters, other characters, CPU opponents</span></td><td class="mono">!stages &middot; !fight &middot; !battle &middot; !attack &middot; !guard &middot; !heal &middot; !class &middot; !carduse &middot; !retreat</td></tr>
+        <tr><td><b>&#129354; Duels</b><br><span class="muted">PvP and card fighting &mdash; registered groups only</span></td><td class="mono">!duel &middot; !cards &middot; !claim</td></tr>
+        <tr><td><b>&#127961; Dungeon</b><br><span class="muted">Floors, parties, gates</span></td><td class="mono">!dungeon &middot; !floor &middot; !party</td></tr>
+        <tr><td><b>&#128172; General</b><br><span class="muted">Social, economy, media, management</span></td><td class="mono">!marry &middot; !requests &middot; !accept &middot; !decline &middot; !divorce &middot; !zen &middot; !daily &middot; !play &middot; !top &middot; !register &middot; !stage &middot; !flooradmin &middot; !modes &middot; !visual &middot; !rhm &middot; !numbers &middot; !prefix &middot; !reset &middot; !grantcard</td></tr>
+        <tr><td><b>&#128722; Every mode</b><br><span class="muted">Never gated</span></td><td class="mono">!shop &middot; !buy &middot; !inventory &middot; !use &middot; !mode &middot; !help &middot; !ping &middot; !arise &middot; !profile &middot; !ai</td></tr>
+      </tbody></table></div>
+      <p class="admin-note"><b>Duels need a registered group.</b> In a DM, or in a group that was never registered, <code>!duel</code> and <code>!cards</code> are refused with a reason rather than ignored.</p>
+    </div>
+
+    <div class="panel">
       <p class="eyebrow">REFERENCE</p>
       <h3>Command list</h3>
       <p class="muted">Default prefix is <code>!</code>. AXYON can change it with <code>!prefix</code>, and each group can have its own.</p>
@@ -168,7 +188,7 @@
       <p class="eyebrow">MEDIA</p>
       <h3>Playing a song</h3>
       <p class="muted"><code>!play &lt;song or artist&gt;</code> searches a public catalogue, shows the cover art, then sends the audio.</p>
-      <p class="admin-note">If a full track cannot be fetched, the bot sends the catalogue preview and <b>says so in the caption</b> &mdash; it never presents a 30-second clip as the whole song.</p>
+      <p class="admin-note">The audio is the <b>full track</b>, streamed from Audius. If Audius has no match the bot falls back to yt-dlp, and only as a last resort to a catalogue preview &mdash; and in that case it <b>says so in the caption</b>. It never presents a 30-second clip as the whole song.</p>
     </div>
   </section>
 </main>
@@ -185,6 +205,7 @@
     <button type="button" data-goto="pairing"><span class="ico" aria-hidden="true">&#128241;</span><span class="lbl">Pairing</span></button>
     <button type="button" data-goto="groups"><span class="ico" aria-hidden="true">&#128101;</span><span class="lbl">Groups</span></button>
     <button type="button" data-goto="players"><span class="ico" aria-hidden="true">&#127894;</span><span class="lbl">Players</span></button>
+    <button type="button" data-goto="shop"><span class="ico" aria-hidden="true">&#128722;</span><span class="lbl">Shop</span></button>
     <button type="button" data-goto="stages"><span class="ico" aria-hidden="true">&#9876;</span><span class="lbl">Stages</span></button>
     <button type="button" data-goto="floors"><span class="ico" aria-hidden="true">&#127961;</span><span class="lbl">Floors</span></button>
     <button type="button" data-goto="modes"><span class="ico" aria-hidden="true">&#9881;</span><span class="lbl">Modes</span></button>

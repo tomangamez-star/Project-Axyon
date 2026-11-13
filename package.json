@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "check": "node --check src/access.js && node --check src/account-config.js && node --check src/ai.js && node --check src/auth-store.js && node --check src/axyon-admin.js && node --check src/axyon-commands.js && node --check src/axyon-rpg.js && node --check src/axyon-store.js && node --check src/dashboard.js && node --check src/greetings.js && node --check src/identity.js && node --check src/instance-lease.js && node --check src/message-guard.js && node --check src/music.js && node --check src/server.js && node --check src/theme.js && node --check public/admin.js && node --check public/dashboard.js",
+    "check": "node --check src/access.js && node --check src/account-config.js && node --check src/ai.js && node --check src/auth-store.js && node --check src/axyon-admin.js && node --check src/axyon-commands.js && node --check src/axyon-items.js && node --check src/axyon-rpg.js && node --check src/axyon-store.js && node --check src/dashboard.js && node --check src/greetings.js && node --check src/identity.js && node --check src/instance-lease.js && node --check src/message-guard.js && node --check src/music.js && node --check src/server.js && node --check src/theme.js && node --check public/admin.js && node --check public/dashboard.js",
     "test": "node --test",
     "verify": "node tools/verify-theme.js"
   },

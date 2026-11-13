@@ -167,10 +167,11 @@ test('help exposes every section, including media', () => {
   const a = createAxyon({})
   createCommands({ axyon: a }) // registers the commands help renders from
   assert.deepStrictEqual(Object.keys(a.SECTIONS).sort(),
-    ['battle', 'cards', 'core', 'dungeon', 'economy', 'management', 'media', 'social'])
+    ['battle', 'cards', 'core', 'duel', 'dungeon', 'economy', 'management', 'media', 'shop', 'social'])
   assert.ok(a.helpPage('core', '!'))
   assert.ok(a.helpPage('media', '!'))
-  assert.strictEqual(a.helpButtons().length, 8)
+  assert.ok(a.helpPage('shop', '!'))
+  assert.strictEqual(a.helpButtons().length, 10)
 })
 
 test('the parser honours the prefix and ignores everything else', () => {

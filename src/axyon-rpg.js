@@ -136,52 +136,63 @@ function bar (value, max, width = 10) {
 /**
  * The hunter's profile card.
  *
- * Rounded frame, small-caps section titles, monospace bars so the blocks line
- * up, and the name in the display font. This is the card the reference images
- * are modelled on: emoji + bold label + em-dash + value, one field per line.
+ * NO UNICODE DISPLAY FONTS HERE.
+ * ------------------------------
+ * This card used to render its section titles in small-caps and the hunter's
+ * name in fraktur. It looked decorative but was genuinely hard to scan: the
+ * stylised glyphs are not the letter shapes a reader's eye is trained on, so a
+ * player had to decode the card instead of reading it.
+ *
+ * It is now a plain dossier: one light frame, WhatsApp *bold* labels, an em
+ * dash, and monospace values so the numbers line up in a column. Section rules
+ * split it into VITALS / COMBAT / HOLDINGS so the eye can jump straight to the
+ * group it wants. Everything is ordinary ASCII plus emoji, which every
+ * WhatsApp client renders identically.
+ *
+ * `!arise` and every other card keep their existing treatment — this change is
+ * scoped to the profile card only.
  */
 function profileCard (p, extra = {}) {
   const need = store.xpNeed(p.level)
-  const stats = T.frame([
-    T.field('\ud83d\udcc8', 'Level', T.m(p.level)),
-    T.field('\ud83c\udf96\ufe0f', 'Rank', T.b(p.rank)),
-    T.field('\ud83c\udf96\ufe0f', 'Grade', T.m(p.grade)),
-    T.field('\ud83c\udfad', 'Class', p.class || 'Fighter'),
-    '',
-    `\u2764\ufe0f ${T.b('HP')}`,
-    T.barLine(p.hp, p.maxHp),
-    '',
-    `\ud83d\udd0b ${T.b('POWER ENERGY')}`,
-    T.barLine(p.powerEnergy, p.maxPowerEnergy),
-    '',
-    `\ud83d\udca0 ${T.b('XP')}  ${T.m(`${p.xp}/${need}`)}`,
-    T.barLine(p.xp, need)
-  ], { kind: 'round', title: T.font('STATUS', 'smallcaps'), width: 24 })
+  const name = String(p.name || '').trim() || 'Unnamed Hunter'
 
-  const combat = T.frame([
-    T.field('\u2694\ufe0f', 'Attack', T.m(p.atk)),
-    T.field('\ud83d\udee1\ufe0f', 'Armor', T.m(p.def)),
-    T.field('\ud83d\udca8', 'Speed', T.m(p.spd)),
-    '',
-    T.field('\ud83e\ude99', 'Zen', T.m(fmt(p.zen))),
-    T.field('\ud83d\udc8e', 'Coins', T.m(fmt(p.coins))),
-    T.field('\ud83d\udeaa', 'Stage', T.m(p.stage)),
-    T.field('\ud83c\udfc6', 'Record', `${T.m(p.wins)}W / ${T.m(p.losses)}L`)
-  ], { kind: 'light', title: T.font('COMBAT', 'smallcaps'), width: 24 })
-
-  return [
-    T.header({ creators: greetings.creatorsOf(extra.settings) }),
-    '',
-    `\ud83d\udc64 ${T.hunterName(p.name)}`,
+  const body = [
+    `\ud83d\udc64 ${T.b(name)}`,
     extra.partner ? `\ud83d\udc9e ${T.i('bound to')} ${T.b(extra.partner)}` : null,
     '',
-    stats,
+    T.rule('VITALS', 'thin'),
+    `\ud83d\udcc8 ${T.b('Level')} — ${T.m(p.level)}   \ud83c\udfc5 ${T.b('Rank')} — ${T.b(p.rank)}   \ud83c\udf96\ufe0f ${T.b('Grade')} — ${T.m(p.grade)}`,
+    `\ud83c\udfad ${T.b('Class')} — ${p.class || 'Fighter'}`,
     '',
-    combat,
+    `\u2764\ufe0f ${T.b('HP')}  ${T.barLine(p.hp, p.maxHp)}`,
+    `\ud83d\udd0b ${T.b('Power Energy')}  ${T.barLine(p.powerEnergy, p.maxPowerEnergy)}`,
+    `\ud83d\udca0 ${T.b('XP')}  ${T.barLine(p.xp, need)}`,
     '',
-    T.rule('', 'hair'),
-    `\ud83c\udf96\ufe0f ${T.b(p.rank)} \u2022 ${T.i(`grade ${p.grade}`)} \u2022 ${T.i(`level ${p.level}`)}`
-  ].filter(x => x !== null && x !== undefined).join('\n')
+    T.rule('COMBAT', 'thin'),
+    `\u2694\ufe0f ${T.b('Attack')} — ${T.m(p.atk)}   \ud83d\udee1\ufe0f ${T.b('Armor')} — ${T.m(p.def)}   \ud83d\udca8 ${T.b('Speed')} — ${T.m(p.spd)}`,
+    `\ud83c\udfc6 ${T.b('Record')} — ${T.m(p.wins)}W / ${T.m(p.losses)}L`,
+    '',
+    T.rule('HOLDINGS', 'thin'),
+    `\ud83d\udcb0 ${T.b('Zen')} — ${T.m(fmt(p.zen))}   \ud83d\udc8e ${T.b('Coins')} — ${T.m(fmt(p.coins))}`,
+    `\ud83d\udeaa ${T.b('Stage')} — ${T.m(p.stage)}`
+  ].filter(x => x !== null && x !== undefined)
+
+  return [
+    /*
+     * A PLAIN HEADER, not T.header().
+     *
+     * T.header() renders the bot name in a mathematical-bold display font,
+     * which is exactly the treatment this card is dropping. Every other card
+     * still uses T.header(); only the profile card gets this plain variant, so
+     * the change stays scoped to `!profile`.
+     */
+    `\u2b21 *AXYN CORE*`,
+    `\u2514\u2500 by ${greetings.creatorsOf(extra.settings).join(' & ')}`,
+    '',
+    T.frame(body, { kind: 'light', title: 'DOSSIER', width: 30 }),
+    '',
+    `\ud83c\udf96\ufe0f ${T.b(p.rank)} • ${T.i(`grade ${p.grade}`)} • ${T.i(`level ${p.level}`)}`
+  ].join('\n')
 }
 
 /**
@@ -718,9 +729,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
   const SECTIONS = {
     core: { name: 'Core', icon: '\ud83c\udf00' },
-    battle: { name: 'Battle', icon: '\u2694\ufe0f' },
+    battle: { name: 'Combat', icon: '\u2694\ufe0f' },
+    duel: { name: 'Duels', icon: '\ud83e\udd4a' },
     dungeon: { name: 'Dungeon', icon: '\ud83c\udff9' },
     cards: { name: 'Cards', icon: '\ud83c\udccf' },
+    shop: { name: 'Shop & Inventory', icon: '\ud83d\uded2' },
     social: { name: 'Social', icon: '\ud83d\udc9e' },
     economy: { name: 'Economy', icon: '\ud83e\ude99' },
     media: { name: 'Media', icon: '\ud83c\udfb5' },

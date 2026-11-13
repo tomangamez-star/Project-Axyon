@@ -55,7 +55,7 @@ async function api (path, options = {}) {
 
 /* ------------------------------------------------------- SCREEN SWITCHER */
 
-const SCREENS = ['overview', 'pairing', 'groups', 'players', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
+const SCREENS = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
 
 /**
  * Shows one screen and hides the rest. Instant — a class toggle, no reload.
@@ -288,8 +288,18 @@ $('#pairType').onchange = () => $('#pairLabelWrap').classList.toggle('hidden', $
 $('#pairBtn').onclick = async () => {
   const b = $('#pairBtn')
   const accountType = $('#pairType').value
+  /*
+   * A pairing request waits for the WhatsApp socket to become ready, which can
+   * take up to 20 seconds. Without a visible pending state the button looks
+   * dead for that whole time — the exact complaint this dashboard keeps
+   * getting. So the label changes immediately and a toast says what is
+   * happening, before the request is even sent.
+   */
+  const original = b.textContent
   try {
     b.disabled = true
+    b.textContent = 'Contacting WhatsApp\u2026'
+    toast('Requesting a pairing code \u2014 this can take up to 20 seconds')
     const d = await api('actions/pair', { method: 'POST', body: JSON.stringify({ phone: $('#pairPhone').value, label: $('#pairLabel').value, accountType }) })
     pairCode = d.code
     $('#pairIdentity').textContent = d.accountType === 'primary' ? 'PRIMARY ARCHITECT PAIRING CODE' : 'ADDITIONAL INSTANCE PAIRING CODE'
@@ -298,9 +308,15 @@ $('#pairBtn').onclick = async () => {
     $('#pairResult').classList.remove('hidden')
     toast('Pairing code ready \u2014 enter it in WhatsApp')
   } catch (e) {
+    /* Never silent: the reason goes to the toast AND stays on screen. */
     toast(e.message)
+    $('#pairResult').classList.remove('hidden')
+    $('#pairIdentity').textContent = 'PAIRING FAILED'
+    $('#pairCode').textContent = '\u2014'
+    $('#pairSlot').textContent = e.message
   } finally {
     b.disabled = false
+    b.textContent = original
   }
 }
 

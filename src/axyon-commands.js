@@ -12,6 +12,10 @@
 const store = require('./axyon-store')
 const greetings = require('./greetings')
 const T = require('./theme')
+const items = require('./axyon-items')
+
+/** Thousands separators, matching the formatter the RPG cards use. */
+const fmt = (n) => Number(n || 0).toLocaleString('en-US')
 const { cache } = require('./cache')
 const { norm, isOwner } = require('./access')
 const { canonicalUserId, displayName, mentionedId } = require('./identity')
@@ -37,6 +41,72 @@ const MODE_LIST = {
   solo: { name: 'Solo', blurb: 'One player enters a gate alone.' },
   multiplayer: { name: 'Multiplayer', blurb: 'Several players, individual turns.' },
   party: { name: 'Party', blurb: 'An organised team of 2 or more.' }
+}
+
+/*
+ * GAME MODES
+ * ----------
+ * Four modes, and a command belongs to exactly one of them. The mode is a
+ * property of the PLAYER, not of the chat: `!mode combat` switches you, and
+ * every command you then send is checked against it.
+ *
+ *   combat   — fighting: stages, monsters, CPU opponents, battle actions
+ *   duels    — PvP duels and card fighting. Registered groups only.
+ *   dungeon  — dungeon floors, parties, gates
+ *   general  — social, economy, media, help, management
+ *
+ * INVENTORY AND SHOP ARE NOT IN THIS TABLE ON PURPOSE. `!shop`, `!buy`,
+ * `!inventory` and `!use` are reachable in all four modes, so they are listed
+ * in MODE_FREE below and skip the gate entirely.
+ */
+const GAME_MODES = {
+  combat: {
+    name: 'Combat',
+    icon: '\u2694\ufe0f',
+    blurb: 'Fight monsters, other characters and CPU opponents.',
+    sections: ['battle']
+  },
+  duels: {
+    name: 'Duels',
+    icon: '\ud83e\udd4a',
+    blurb: 'PvP duels and card fighting. Registered groups only.',
+    sections: ['duel', 'cards']
+  },
+  dungeon: {
+    name: 'Dungeon',
+    icon: '\ud83c\udff9',
+    blurb: 'Dungeon floors, parties and gates.',
+    sections: ['dungeon']
+  },
+  general: {
+    name: 'General',
+    icon: '\ud83d\udcac',
+    blurb: 'Social, economy, media and management.',
+    sections: ['core', 'social', 'economy', 'media', 'management']
+  }
+}
+
+/*
+ * Commands that work in EVERY mode.
+ *
+ * Two groups:
+ *   - the shop and inventory, which the brief requires in all four modes
+ *   - the meta commands that must never be blocked, because a player who is
+ *     stuck in the wrong mode needs them to get out: `!mode`, `!help`, `!ping`
+ *     and `!arise`.
+ */
+const MODE_FREE = new Set([
+  'shop', 'buy', 'inventory', 'inv', 'use', 'items',
+  'mode', 'help', 'ping', 'arise', 'profile', 'ai'
+])
+
+/** Which mode owns a command, or null when it is mode-free. */
+function modeOf (commandName, section) {
+  if (MODE_FREE.has(commandName)) return null
+  for (const [key, meta] of Object.entries(GAME_MODES)) {
+    if (meta.sections.includes(section)) return key
+  }
+  return null
 }
 
 function parseNum (v) {
@@ -208,7 +278,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ----------------------------------------------------------------- duels */
 
-  cmd('duel', 'dungeon', '{p}duel @player | {p}duel accept <id>', 'Challenge a player, or answer a challenge.', async (s, m, ctx, args, content) => {
+  cmd('duel', 'duel', '{p}duel @player | {p}duel accept <id>', 'Challenge a player, or answer a challenge.', async (s, m, ctx, args, content) => {
     const sub = String(args[0] || '').toLowerCase()
     if (['accept', 'decline'].includes(sub)) {
       const id = parseNum(args[1])
@@ -415,16 +485,55 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* -------------------------------------------------------- AXYON identity */
 
-  cmd('mode', 'management', '{p}mode <axyon|player>', 'Switch identity. PLAYER keeps AXYON authority.', async (s, m, ctx, args) => {
+  cmd('mode', 'core', '{p}mode <combat|duels|dungeon|general>', 'Switch game mode. Each mode runs only its own commands.', async (s, m, ctx, args) => {
     const want = String(args[0] || '').toLowerCase()
-    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*')
-    if (!['axyon', 'player'].includes(want)) {
-      const current = ctx.auth.numberMode || 'axyon'
-      return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83e\udeb7 *IDENTITY*\n\nCurrent: *${current.toUpperCase()} MODE*\n\n*${ctx.prefix}mode player* \u2014 use normal saved progression\n*${ctx.prefix}mode axyon* \u2014 owner authority and management\n\n> Switching to PLAYER does not remove AXYON's management authority.`)
+    const p = await store.player(ctx.userId)
+    const current = p?.gameMode || 'general'
+
+    if (!want) {
+      const rows = Object.entries(GAME_MODES).map(([key, meta]) => {
+        const mark = key === current ? '\u25b6\ufe0f' : '\u25ab\ufe0f'
+        return `${mark} ${meta.icon} ${T.b(meta.name)} \u2014 ${T.m(`${ctx.prefix}mode ${key}`)}\n   ${T.i(meta.blurb)}`
+      })
+      return axyon.send(s, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `\ud83c\udfae ${T.b('GAME MODES')}`,
+        '',
+        `You are in ${T.b(GAME_MODES[current]?.name || 'General')} mode.`,
+        '',
+        T.rule('', 'thin'),
+        '',
+        rows.join('\n\n'),
+        '',
+        T.rule('', 'hair'),
+        T.i('The shop and inventory work in every mode.')
+      ].join('\n'))
     }
-    await store.setNumberMode(ctx.userId, want)
-    await store.log(ctx.userId, 'identity_mode', want)
-    return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83e\udeb7 *IDENTITY SWITCHED*\n\nNow operating in *${want.toUpperCase()} MODE*.\n\n${want === 'player' ? 'You use normal saved player progression. Management commands remain available to you.' : 'Full AXYON authority and management access.'}`)
+
+    if (!GAME_MODES[want]) {
+      return axyon.send(s, ctx.jid, m, [
+        `\u274c No mode called *${want}*.`,
+        '',
+        `Modes: ${Object.keys(GAME_MODES).map(k => T.b(k)).join(', ')}`
+      ].join('\n'))
+    }
+    if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+
+    await store.setGameMode(ctx.userId, want)
+    await store.log(ctx.userId, 'game_mode', want)
+    const meta = GAME_MODES[want]
+    return axyon.send(s, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `${meta.icon} ${T.b(`${meta.name.toUpperCase()} MODE`)}`,
+      '',
+      T.i(meta.blurb),
+      '',
+      T.rule('', 'hair'),
+      `Commands now available: ${meta.sections.map(x => T.m(`${ctx.prefix}help ${x}`)).join(' ')}`,
+      T.i('Shop and inventory stay available.')
+    ].join('\n'))
   })
 
   cmd('numbers', 'management', '{p}numbers <add|remove|list> [number]', 'Manage AXYON_NUMBERS (AXYON only).', async (s, m, ctx, args, content) => {
@@ -610,6 +719,184 @@ function createCommands ({ axyon, economy, logger, ai }) {
     return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83c\udccf *CARD GRANTED*\n\nTarget: *${target}*\nSlot: *${slot}*\nCard: *${c.name}*\n\nThey claim it with *${ctx.prefix}claim card ${slot}*`)
   })
 
+  /* ------------------------------------------------------- shop & inventory */
+
+  /*
+   * THE SHOP AND THE INVENTORY ARE MODE-FREE.
+   *
+   * They are registered in the `shop` section, which belongs to no game mode,
+   * and their names are in MODE_FREE, so the gate below never blocks them. That
+   * is the requirement: a player must be able to buy a potion and use it
+   * whether they are in combat, duels, dungeon or general.
+   */
+
+  cmd('shop', 'shop', '{p}shop [items|abilities]', 'Browse the shop. Works in every mode.', async (s, m, ctx, args) => {
+    const filter = String(args[0] || '').toLowerCase()
+    const rows = filter === 'items' ? items.items()
+      : filter === 'abilities' ? items.abilities()
+        : items.catalogue()
+    const p = await store.player(ctx.userId)
+    const lines = rows.map(x => [
+      `${x.icon} ${T.b(x.name)} \u2014 ${T.m(fmt(x.price))} Zen`,
+      `   ${T.i(x.desc)}`,
+      `   ${T.m(`${ctx.prefix}buy ${x.key}`)}`
+    ].join('\n'))
+    return axyon.send(s, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `\ud83d\uded2 ${T.b('SHOP')}`,
+      '',
+      T.rule('', 'thin'),
+      '',
+      lines.join('\n\n'),
+      '',
+      T.rule('', 'hair'),
+      `Your Zen: ${T.b(fmt(p?.zen || 0))} \u2022 ${T.b(`${ctx.prefix}inventory`)} to see what you hold`,
+      T.i('The shop works in every mode.')
+    ].join('\n'))
+  })
+
+  cmd('buy', 'shop', '{p}buy <item>', 'Buy an item or ability with Zen. Works in every mode.', async (s, m, ctx, args) => {
+    const key = String(args[0] || '').toLowerCase()
+    const entry = items.get(key)
+    if (!entry) {
+      return axyon.send(s, ctx.jid, m, [
+        `\u274c No item called *${key || '(nothing)'}*.`,
+        '',
+        `See ${T.b(`${ctx.prefix}shop`)} for the catalogue.`
+      ].join('\n'))
+    }
+    const p = await store.player(ctx.userId)
+    if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+
+    /* An ability is bought once. Buying it twice would silently burn Zen. */
+    if (entry.kind === 'ability' && await store.inventoryQty(ctx.userId, entry.key) > 0) {
+      return axyon.send(s, ctx.jid, m, `\u2705 You already own *${entry.name}*.`)
+    }
+    if (p.zen < entry.price) {
+      return axyon.send(s, ctx.jid, m, [
+        `\u274c *NOT ENOUGH ZEN*`,
+        '',
+        `*${entry.name}* costs ${T.b(fmt(entry.price))} Zen.`,
+        `You hold ${T.b(fmt(p.zen))} \u2014 you need ${T.b(fmt(entry.price - p.zen))} more.`
+      ].join('\n'))
+    }
+
+    p.zen -= entry.price
+    await store.savePlayer(p)
+    const qty = await store.addItem(ctx.userId, entry.key, 1)
+    await store.log(ctx.userId, 'shop_buy', entry.key, { price: entry.price, qty })
+
+    return axyon.send(s, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `\u2705 ${T.b('PURCHASED')}`,
+      '',
+      `${entry.icon} ${T.b(entry.name)}`,
+      `${T.i(entry.desc)}`,
+      '',
+      T.rule('', 'hair'),
+      `Paid ${T.b(fmt(entry.price))} Zen \u2022 Zen left ${T.b(fmt(p.zen))}`,
+      `You now hold ${T.b(qty)}.`,
+      '',
+      `Use it with ${T.b(`${ctx.prefix}use ${entry.key}`)}`
+    ].join('\n'))
+  })
+
+  cmd('inventory', 'shop', '{p}inventory', 'Everything you hold. Works in every mode.', async (s, m, ctx) => {
+    const rows = await store.inventory(ctx.userId)
+    if (!rows.length) {
+      return axyon.send(s, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `\ud83c\udf92 ${T.b('INVENTORY')}`,
+        '',
+        'Your bag is empty.',
+        '',
+        `Buy something with ${T.b(`${ctx.prefix}shop`)}.`
+      ].join('\n'))
+    }
+    const lines = rows.map(r => {
+      const e = items.get(r.key)
+      if (!e) return `\u2022 ${T.m(r.key)} \u00d7 ${T.m(r.qty)}`
+      return [
+        `${e.icon} ${T.b(e.name)} \u00d7 ${T.m(r.qty)}`,
+        `   ${T.i(e.desc)}`,
+        `   ${T.m(`${ctx.prefix}use ${e.key}`)}`
+      ].join('\n')
+    })
+    return axyon.send(s, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `\ud83c\udf92 ${T.b('INVENTORY')}`,
+      '',
+      T.rule('', 'thin'),
+      '',
+      lines.join('\n\n'),
+      '',
+      T.rule('', 'hair'),
+      T.i('Usable in every mode.')
+    ].join('\n'))
+  })
+
+  cmd('use', 'shop', '{p}use <item>', 'Use an item or ability. Works in every mode.', async (s, m, ctx, args) => {
+    const key = String(args[0] || '').toLowerCase()
+    const entry = items.get(key)
+    if (!entry) return axyon.send(s, ctx.jid, m, `\u274c No item called *${key || '(nothing)'}*. See *${ctx.prefix}inventory*.`)
+
+    const qty = await store.inventoryQty(ctx.userId, entry.key)
+    if (qty <= 0) return axyon.send(s, ctx.jid, m, `\u274c You do not hold *${entry.name}*.`)
+
+    const p = await store.player(ctx.userId)
+    if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+    const battle = await store.getBattle(ctx.userId)
+
+    const r = items.apply(entry, battle, p)
+    if (!r.ok) return axyon.send(s, ctx.jid, m, `\u274c ${r.note}`)
+
+    /* Abilities are permanent: they are never consumed. */
+    if (entry.kind === 'item') await store.consumeItem(ctx.userId, entry.key)
+
+    if (r.battle) {
+      /* In a battle the effect lands on the battle state, and the enemy still
+       * gets its turn — using an item is an action, not a free move. */
+      const hit = Math.max(1, Math.round(r.battle.enemy.atk + Math.floor(Math.random() * 6) - p.def * 0.3))
+      r.battle.playerHp -= hit
+      r.battle.turn += 1
+      if (r.battle.playerHp <= 0) {
+        await store.setBattle(ctx.userId, null)
+        p.losses += 1
+        p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
+        await store.savePlayer(p)
+        await store.log(ctx.userId, 'item_use', entry.key, { died: true })
+        return axyon.send(s, ctx.jid, m, [
+          `${W}`, '', '\ud83d\udc80 *DEFEAT*', '',
+          `${entry.icon} ${T.b(entry.name)} was not enough.`,
+          `*${r.battle.enemy.name}* answers for *${hit}*.`
+        ].join('\n'))
+      }
+      await store.setBattle(ctx.userId, r.battle)
+      await store.log(ctx.userId, 'item_use', entry.key, { inBattle: true })
+      return axyon.withVisual(s, ctx.jid, m, r.battle.enemy.boss ? 'boss' : 'battle',
+        axyon.battleCard(r.battle, p, `${entry.icon} ${T.b(entry.name)}\n${r.note}\n\ud83d\udc79 ${r.battle.enemy.name} answers for *${hit}*.`),
+        axyon.battleButtons(), true)
+    }
+
+    /* Outside a battle the effect lands on the player row. */
+    await store.savePlayer(r.player)
+    await store.log(ctx.userId, 'item_use', entry.key, { inBattle: false })
+    return axyon.send(s, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `${entry.icon} ${T.b(entry.name.toUpperCase())}`,
+      '',
+      r.note,
+      '',
+      T.rule('', 'hair'),
+      `\u2764\ufe0f HP ${T.m(`${r.player.hp}/${r.player.maxHp}`)} \u2022 \ud83d\udd0b ${T.m(`${r.player.powerEnergy}/${r.player.maxPowerEnergy}`)}`
+    ].join('\n'))
+  })
+
   /* --------------------------------------------------------------- dispatch */
 
   const BY_NAME = new Map()
@@ -728,6 +1015,66 @@ function createCommands ({ axyon, economy, logger, ai }) {
       }
     }
 
+    /*
+     * MODE GATE
+     * ---------
+     * A command that belongs to another mode does not run. It says which mode
+     * it belongs to and how to switch, so the player is never left guessing.
+     *
+     * The shop and the inventory are in MODE_FREE and skip this entirely — they
+     * are required to work in all four modes.
+     */
+    const owner = modeOf(parsed.command, command.section)
+    if (owner) {
+      const p = await store.player(ctx.userId).catch(() => null)
+      const current = p?.gameMode || 'general'
+      if (current !== owner) {
+        const meta = GAME_MODES[owner]
+        const here = GAME_MODES[current]
+        await axyon.send(sock, ctx.jid, m, [
+          T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+          '',
+          `\ud83d\udd12 ${T.b('WRONG MODE')}`,
+          '',
+          `${T.m(`${ctx.prefix}${parsed.command}`)} belongs to ${meta.icon} ${T.b(meta.name)} mode.`,
+          `You are in ${here.icon} ${T.b(here.name)} mode.`,
+          '',
+          T.rule('', 'hair'),
+          `Switch with ${T.b(`${ctx.prefix}mode ${owner}`)}`,
+          T.i('The shop and inventory work in every mode.')
+        ].join('\n'))
+        return true
+      }
+    }
+
+    /*
+     * DUEL GATE
+     * ---------
+     * Duels and card fighting are group features: they need two players in one
+     * chat and a group the bot is allowed to act in. Outside a registered group
+     * they are refused with a reason, not silently ignored.
+     */
+    if (command.section === 'duel' || command.section === 'cards') {
+      if (!ctx.jid.endsWith('@g.us')) {
+        await axyon.send(sock, ctx.jid, m, [
+          T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+          '',
+          `\ud83e\udd4a ${T.b('GROUPS ONLY')}`,
+          '',
+          `${T.m(`${ctx.prefix}${parsed.command}`)} is a duel command.`,
+          'Duels and card fighting need a registered group.',
+          '',
+          T.rule('', 'hair'),
+          `An admin registers a group with ${T.b(`${ctx.prefix}register`)}.`
+        ].join('\n'))
+        return true
+      }
+      if (!ctx.group) {
+        await axyon.send(sock, ctx.jid, m, greetings.groupNotRegistered(ctx.prefix))
+        return true
+      }
+    }
+
     try {
       await command.handler(sock, m, ctx, parsed.args, content)
     } catch (e) {
@@ -773,4 +1120,4 @@ function createCommands ({ axyon, economy, logger, ai }) {
   return { handle, section, parse, buildContext, BY_NAME, mentionedId, answerAI }
 }
 
-module.exports = { createCommands, MODE_LIST, mentionedId }
+module.exports = { createCommands, MODE_LIST, GAME_MODES, MODE_FREE, modeOf, mentionedId }

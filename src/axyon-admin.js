@@ -11,6 +11,8 @@
  * visuals, prefix and the audit log.
  */
 const store = require('./axyon-store')
+const items = require('./axyon-items')
+const { GAME_MODES } = require('./axyon-commands')
 
 const MODES = ['duel', 'solo', 'multiplayer', 'party']
 
@@ -73,6 +75,12 @@ function createAxyonAdmin ({ logger }) {
       visuals: visuals.map(v => ({ mode: v.mode, url: v.url, caption: v.caption })),
       roles: roles.map(r => ({ userId: r.user_id, role: r.role })),
       numbers: numbers.map(n => ({ userId: n.user_id, mode: n.mode })),
+      /* The shop catalogue, so the panel's reward pickers are built from the
+       * same list the bot sells from — they cannot drift apart. */
+      catalogue: items.catalogue().map(x => ({
+        key: x.key, name: x.name, kind: x.kind, price: x.price, desc: x.desc
+      })),
+      gameModes: Object.entries(GAME_MODES).map(([key, m]) => ({ key, name: m.name, blurb: m.blurb })),
       log: log.map(l => ({
         id: l.id, actor: l.actor, action: l.action, target: l.target,
         detail: l.detail, at: l.created_at
@@ -147,6 +155,44 @@ function createAxyonAdmin ({ logger }) {
         await store.setBattle(input.userId, null)
         await store.log(actor, 'admin_player_clear_battle', input.userId)
         return { ok: true, message: 'Active battle cleared.' }
+      }
+      /*
+       * REWARDS
+       * -------
+       * Items, cash and abilities can be handed out from the panel. This is the
+       * "given out as rewards" half of the inventory system: the shop is how a
+       * player spends Zen, this is how an operator grants stock directly.
+       */
+      case 'player-grant-item': {
+        const entry = items.get(input.item)
+        if (!entry) return { ok: false, message: 'Unknown item.' }
+        const qty = Math.max(1, Math.min(99, num(input.qty, 1) || 1))
+        const p = await store.player(input.userId)
+        if (!p) return { ok: false, message: 'Player not found.' }
+        const total = await store.addItem(input.userId, entry.key, qty)
+        await store.log(actor, 'admin_grant_item', input.userId, { item: entry.key, qty })
+        return { ok: true, message: `Granted ${qty}\u00d7 ${entry.name}. They now hold ${total}.` }
+      }
+      case 'player-grant-ability': {
+        const entry = items.get(input.item)
+        if (!entry || entry.kind !== 'ability') return { ok: false, message: 'Unknown ability.' }
+        const p = await store.player(input.userId)
+        if (!p) return { ok: false, message: 'Player not found.' }
+        if (await store.inventoryQty(input.userId, entry.key) > 0) {
+          return { ok: false, message: `They already own ${entry.name}.` }
+        }
+        await store.addItem(input.userId, entry.key, 1)
+        await store.log(actor, 'admin_grant_ability', input.userId, { item: entry.key })
+        return { ok: true, message: `Granted the ability ${entry.name}.` }
+      }
+      case 'player-mode': {
+        const mode = String(input.mode || '').toLowerCase()
+        if (!GAME_MODES[mode]) return { ok: false, message: 'Unknown game mode.' }
+        const p = await store.player(input.userId)
+        if (!p) return { ok: false, message: 'Player not found.' }
+        await store.setGameMode(input.userId, mode)
+        await store.log(actor, 'admin_player_mode', input.userId, { mode })
+        return { ok: true, message: `Moved to ${GAME_MODES[mode].name} mode.` }
       }
 
       /* ---------------------------------------------------------- settings */

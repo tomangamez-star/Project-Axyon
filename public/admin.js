@@ -308,9 +308,64 @@ const A = (() => {
     </div>`
   }
 
+  /*
+   * SHOP & INVENTORY
+   * ----------------
+   * Two halves on one screen:
+   *   - the catalogue, read from the same module the bot sells from
+   *   - a reward desk that grants an item or an ability to a chosen player
+   *
+   * The player picker is a real <select> built from the snapshot, so a grant
+   * can never be sent with an empty or mistyped id.
+   */
+  function renderShop () {
+    const rows = data.catalogue || []
+    const players = data.players || []
+    const items = rows.filter(x => x.kind === 'item')
+    const abilities = rows.filter(x => x.kind === 'ability')
+
+    const table = list => `<div class="admin-scroll"><table class="admin-table"><thead><tr>
+        <th>Item</th><th>Effect</th><th class="num">Price</th><th></th></tr></thead><tbody>
+        ${list.map(x => `<tr>
+          <td><b>${esc(x.name)}</b><br><span class="mono">${esc(x.key)}</span></td>
+          <td>${esc(x.desc)}</td>
+          <td class="num">${nf(x.price)}</td>
+          <td style="text-align:right"><button class="mini" data-act="grant-item" data-item="${esc(x.key)}">Grant</button></td>
+        </tr>`).join('')}
+      </tbody></table></div>`
+
+    return `
+      <div class="admin-card">
+        <h3>Reward desk</h3>
+        <p class="muted">Grants go straight into the player's inventory &mdash; the same stock <code>!use</code> consumes.</p>
+        <div class="admin-grid">
+          <label class="admin-field"><small>Player</small>
+            <select id="grantUser">${players.length
+              ? players.map(p => `<option value="${esc(p.userId)}">${esc(p.name || 'Unnamed')} &middot; +${esc(p.userId)}</option>`).join('')
+              : '<option value="">No players yet</option>'}</select></label>
+          <label class="admin-field"><small>Item or ability</small>
+            <select id="grantItem">${rows.map(x => `<option value="${esc(x.key)}">${esc(x.name)} (${esc(x.kind)})</option>`).join('')}</select></label>
+          <label class="admin-field"><small>Quantity</small><input id="grantQty" type="number" min="1" max="99" value="1"></label>
+        </div>
+        <div class="admin-row"><button class="primary" id="doGrant">Grant reward</button></div>
+      </div>
+
+      <div class="admin-card">
+        <h3>Consumables</h3>
+        ${items.length ? table(items) : '<div class="admin-empty">No consumables in the catalogue.</div>'}
+      </div>
+
+      <div class="admin-card">
+        <h3>Abilities</h3>
+        <p class="muted">Permanent unlocks. A player owns each one once.</p>
+        ${abilities.length ? table(abilities) : '<div class="admin-empty">No abilities in the catalogue.</div>'}
+      </div>`
+  }
+
   const VIEWS = {
     groups: renderGroups,
     players: renderPlayers,
+    shop: renderShop,
     stages: renderStages,
     floors: renderFloors,
     modes: renderModes,
@@ -411,6 +466,19 @@ const A = (() => {
       aiModel: host.querySelector('#setAiModel').value,
       aiTimeoutMs: host.querySelector('#setAiTimeout').value
     }).catch(() => {})
+
+    /* Reward desk — one button, one real action. */
+    const doGrant = host.querySelector('#doGrant')
+    if (doGrant) doGrant.onclick = () => {
+      const userId = host.querySelector('#grantUser').value
+      const item = host.querySelector('#grantItem').value
+      const qty = host.querySelector('#grantQty').value
+      if (!userId) return requireField(host.querySelector('#grantUser'), 'No player selected — nobody has used !arise yet.')
+      if (!item) return requireField(host.querySelector('#grantItem'), 'Pick an item to grant.')
+      const entry = (data.catalogue || []).find(x => x.key === item)
+      const action = entry && entry.kind === 'ability' ? 'player-grant-ability' : 'player-grant-item'
+      act(action, { userId, item, qty }).catch(() => {})
+    }
   }
 
   async function handle (btn) {
@@ -440,6 +508,17 @@ const A = (() => {
         return await act(a, { userId: user, amount })
       }
       if (a === 'player-heal' || a === 'player-clear-battle') return await act(a, { userId: user })
+      if (a === 'grant-item') {
+        /* The per-row Grant button uses the reward desk's player picker, so the
+         * operator chooses the item from the table and the player from the
+         * select above — no prompt, no free-text id. */
+        const picker = $('#grantUser')
+        const userId = picker ? picker.value : ''
+        if (!userId) return requireField(picker, 'Choose a player in the reward desk first.')
+        const entry = (data.catalogue || []).find(x => x.key === btn.dataset.item)
+        const action = entry && entry.kind === 'ability' ? 'player-grant-ability' : 'player-grant-item'
+        return await act(action, { userId, item: btn.dataset.item, qty: 1 })
+      }
       if (a === 'stage-edit') {
         const row = (data.stages || []).find(s => String(s.ordinal) === String(ordinal))
         const hp = prompt('HP:', row.hp); if (hp === null) return

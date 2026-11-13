@@ -193,6 +193,14 @@ async function main () {
   }
 
   console.log('\n=== 7. Buttons: only where needed ===')
+  /*
+   * MODE GATE
+   * ---------
+   * `!stages`, `!fight` and `!attack` belong to COMBAT mode, so the player has
+   * to be in it. Switching is a real command, so the harness switches the same
+   * way a player would rather than reaching into the database.
+   */
+  await deliver(msg(OWNER, '!mode combat', { fromMe: true }))
   sock.sent.length = 0
   await deliver(msg(OWNER, '!stages', { fromMe: true }))
   ok('!stages has no buttons', !sock.sent.some(x => x.content?.buttons))
@@ -209,6 +217,8 @@ async function main () {
   await deliver(msg(OWNER, '!attack', { fromMe: true }))
   ok('!attack resolves a turn', sock.sent.length > 0, 'no output')
   ok('!attack reply mentions damage or HP', /HP|damage|strike|hit/i.test(lastText(sock)), lastText(sock).slice(0, 80))
+  /* Back to general: registration and the social commands live there. */
+  await deliver(msg(OWNER, '!mode general', { fromMe: true }))
 
   console.log('\n=== 9. Button taps route to real handlers ===')
   sock.sent.length = 0
@@ -262,6 +272,8 @@ async function main () {
   await store.setSetting('prefix', '!')
 
   console.log('\n=== 12. Duel: challenge, accept, temporary admin ===')
+  /* Duels live in their own mode, and only work in a registered group. */
+  await deliver(msg(OWNER, '!mode duels', { fromMe: true }))
   sock.sent.length = 0
   await deliver(msg(OWNER, `!duel @${PLAYER}`, { fromMe: true }))
   const duelText = lastText(sock)
@@ -272,6 +284,8 @@ async function main () {
   )).rows[0]
   ok('duel row is pending', !!pending)
   if (pending) {
+    /* The accepter needs to be in duels mode too — the gate is per player. */
+    await deliver(msg(PLAYER, '!mode duels', { fromMe: true }))
     sock.sent.length = 0
     await deliver(msg(PLAYER, `!duel accept ${pending.id}`, { fromMe: true }))
     ok('duel accepted', /DUEL BEGINS/i.test(lastText(sock)), lastText(sock).slice(0, 60))
@@ -280,6 +294,8 @@ async function main () {
       promoted ? promoted.content.participantsUpdate.action : 'not called')
     ok('promotion targets both fighters', promoted && promoted.content.participantsUpdate.ids.length === 2)
   }
+  /* Back to general so the later sections are not gated by duels mode. */
+  await deliver(msg(OWNER, '!mode general', { fromMe: true }))
 
   console.log('\n=== 13. Dashboard: real HTTP, real login, real CSRF ===')
   const sessions = {

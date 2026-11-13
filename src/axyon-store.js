@@ -202,6 +202,12 @@ async function ensureSchema () {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
+    CREATE TABLE IF NOT EXISTS axyon_inventory(
+      user_id TEXT NOT NULL,
+      item_key TEXT NOT NULL,
+      qty INT NOT NULL DEFAULT 0,
+      PRIMARY KEY(user_id, item_key));
+
     CREATE TABLE IF NOT EXISTS axyon_log(
       id BIGSERIAL PRIMARY KEY,
       actor TEXT NOT NULL DEFAULT '',
@@ -214,6 +220,15 @@ async function ensureSchema () {
     CREATE INDEX IF NOT EXISTS axyon_cards_owner ON axyon_cards(owner_id);
     CREATE INDEX IF NOT EXISTS axyon_log_created ON axyon_log(created_at DESC);
   `)
+  /*
+   * MIGRATION — the active game mode.
+   *
+   * `axyon_players` already exists on a live deployment, so the column is added
+   * with ADD COLUMN IF NOT EXISTS rather than being folded into the CREATE
+   * above. Existing players default to `general`, which is the mode that holds
+   * the social and economy commands they were already using.
+   */
+  await db().query("ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'general'")
   for (const s of ORIGINAL_STAGES) {
     await db().query(
       `INSERT INTO axyon_stages(key,name,ordinal,original,hp,atk,def,xp,zen)
@@ -365,6 +380,7 @@ function norm (r) {
     healUses: Number(r.heal_uses),
     cardUses: Number(r.card_uses),
     lastDaily: r.last_daily,
+    gameMode: r.game_mode || 'general',
     createdAt: r.created_at
   }
 }
@@ -431,6 +447,21 @@ async function leaderboard (limit = 10) {
 async function playerCount () {
   await ensureSchema()
   return Number((await db().query('SELECT COUNT(*)::int c FROM axyon_players')).rows[0].c)
+}
+
+/**
+ * Sets the player's active game mode.
+ *
+ * The mode is stored on the player row, not in memory, so it survives a
+ * reconnect and is the same in every chat the player uses.
+ */
+async function setGameMode (userId, mode) {
+  await ensureSchema()
+  const r = await db().query(
+    'UPDATE axyon_players SET game_mode=$2,updated_at=NOW() WHERE user_id=$1 RETURNING game_mode',
+    [userId, mode]
+  )
+  return r.rows[0]?.game_mode || null
 }
 
 async function setBattle (userId, battle) {
@@ -787,6 +818,62 @@ async function updateDuel (id, patch) {
   return r.rows[0] || null
 }
 
+/* -------------------------------------------------------------- inventory */
+
+/*
+ * INVENTORY
+ * ---------
+ * One row per (player, item). `qty` is the stock; abilities are stored with
+ * qty 1 and are never decremented, so "owned" and "in stock" are the same
+ * column and there is no second table to keep in sync.
+ *
+ * These are deliberately NOT cached: a purchase or a use must be visible on the
+ * very next read, and a stale inventory would let a player use an item twice.
+ */
+
+async function inventory (userId) {
+  await ensureSchema()
+  return (await db().query(
+    'SELECT item_key, qty FROM axyon_inventory WHERE user_id=$1 AND qty>0 ORDER BY item_key',
+    [userId]
+  )).rows.map(r => ({ key: r.item_key, qty: Number(r.qty) }))
+}
+
+async function inventoryQty (userId, key) {
+  await ensureSchema()
+  const r = await db().query(
+    'SELECT qty FROM axyon_inventory WHERE user_id=$1 AND item_key=$2',
+    [userId, key]
+  )
+  return Number(r.rows[0]?.qty || 0)
+}
+
+/** Adds stock. Used by purchases and by rewards. */
+async function addItem (userId, key, qty = 1) {
+  await ensureSchema()
+  const r = await db().query(
+    `INSERT INTO axyon_inventory(user_id,item_key,qty) VALUES($1,$2,$3)
+     ON CONFLICT(user_id,item_key) DO UPDATE SET qty=axyon_inventory.qty+$3
+     RETURNING qty`,
+    [userId, key, Math.max(1, Math.floor(qty))]
+  )
+  return Number(r.rows[0].qty)
+}
+
+/**
+ * Removes one unit. Returns false when there is nothing to remove, so a caller
+ * can refuse the action instead of going negative.
+ */
+async function consumeItem (userId, key) {
+  await ensureSchema()
+  const r = await db().query(
+    `UPDATE axyon_inventory SET qty=qty-1
+     WHERE user_id=$1 AND item_key=$2 AND qty>0 RETURNING qty`,
+    [userId, key]
+  )
+  return r.rows.length ? Number(r.rows[0].qty) : null
+}
+
 /* --------------------------------------------------------------------- log */
 
 async function log (actor, action, target = '', detail = {}) {
@@ -839,6 +926,7 @@ module.exports = {
   leaderboard,
   playerCount,
   setBattle,
+  setGameMode,
   getBattle,
   stages,
   stage,
@@ -882,6 +970,10 @@ module.exports = {
   createDuel,
   duel,
   updateDuel,
+  inventory,
+  inventoryQty,
+  addItem,
+  consumeItem,
   log,
   recentLog
 }

@@ -77,19 +77,19 @@ async function main () {
   const html = page.raw
 
   const screens = [...html.matchAll(/data-screen="([a-z]+)"/g)].map(m => m[1])
-  const expected = ['overview', 'pairing', 'groups', 'players', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
-  ok(`12 separate screens present (${screens.length})`, screens.length === 12, screens.join(','))
+  const expected = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
+  ok(`${expected.length} separate screens present (${screens.length})`, screens.length === expected.length, screens.join(','))
   for (const s of expected) ok(`screen "${s}" exists`, screens.includes(s))
 
   /* Navigation is a slide-out side panel, not a row of icons. */
   const navButtons = [...html.matchAll(/data-goto="([a-z]+)"/g)].map(m => m[1])
-  ok(`side panel lists ${navButtons.length} entries`, navButtons.length === 12, navButtons.join(','))
+  ok(`side panel lists ${navButtons.length} entries`, navButtons.length === expected.length, navButtons.join(','))
   ok('every screen has a side-panel entry', expected.every(s => navButtons.includes(s)))
   ok('side panel element exists', /<aside[^>]+id="sidePanel"/.test(html))
   ok('side panel is a slide-out (transform, not a static row)', /side-panel\{[^}]*transform:translateX/.test(fs.readFileSync(path.join(ROOT, 'public', 'dashboard.css'), 'utf8')))
   ok('one menu control opens it', /id="menuBtn"/.test(html) && /aria-controls="sidePanel"/.test(html))
   ok('no bottom dock remains', !/class="dock"/.test(html) && !/\.dock\{/.test(fs.readFileSync(path.join(ROOT, 'public', 'dashboard.css'), 'utf8')))
-  ok('panel rows carry an icon and a label', (html.match(/<span class="ico"/g) || []).length === 12 && (html.match(/<span class="lbl"/g) || []).length === 12)
+  ok('panel rows carry an icon and a label', (html.match(/<span class="ico"/g) || []).length === expected.length && (html.match(/<span class="lbl"/g) || []).length === expected.length)
   ok('panel marks the current screen', /aria-current|class="active"/.test(html))
   ok('panel closes on Escape', fs.readFileSync(path.join(ROOT, 'public', 'dashboard.js'), 'utf8').includes("e.key === 'Escape'"))
   ok('panel traps Tab focus', fs.readFileSync(path.join(ROOT, 'public', 'dashboard.js'), 'utf8').includes("e.key !== 'Tab'"))
