@@ -12,6 +12,18 @@ function resolveButtonId(c={}){const n=native(c);for(const x of[n.id,c.buttonsRe
 function isKnownButtonInteraction(c={}){return !!resolveButtonId(c)}
 const CMDS=new Set(['/start','/menu','/help','/p','/profile','/balance','/bal','/bank','/leaderboard','/lb','/casino','/games','/utilities','/dep','/deposit','/wd','/withdraw','/donate','/transfer','/addcoin','/setbal','/setbalance','/slots','/cf','/coinflip','/dice','/roulette','/ping','/test','/dbping','/image','/api','/mines','/cursedsticker','/rpg','/masters','/master','/daily','/explore','/inventory','/rlb','/rpgleaderboard','/guild','/train','/techniques','/skills','/shop','/combat','/fight','/story','/wealthlb','/wlb','/owner','/ownerpanel','/duel','/duels','/challenge','/cardbattle','/hybridbattle','/npc','/setzone','/zone','/zones','/cards','/collection','/card','/cardinfo','/cardstats','/deck','/grant','/grantcard','/rerollcardstats','/setcardstats','/spawncard'])
 function isReplyTrigger(c={}){return isKnownButtonInteraction(c)||CMDS.has(visibleText(c).toLowerCase().split(/\s+/)[0].split('@')[0])}
-function shouldHandleUpsert(c={},o={}){const b=isKnownButtonInteraction(c);if(o.fromMe&&!b)return false;if(o.type==='append'&&!b)return false;return o.type==='notify'||o.type==='append'}
+/*
+ * A command sent manually by the linked WhatsApp account is marked fromMe.
+ * Previously every fromMe text was discarded, making the connected number
+ * unable to use its own player commands. Only recognized Architect commands
+ * and known interactive buttons are admitted; ordinary outgoing messages
+ * remain ignored, and downstream registration/owner/zone checks still apply.
+ */
+function shouldHandleUpsert(c={},o={}){
+ const b=isKnownButtonInteraction(c),command=isReplyTrigger(c)
+ if(o.fromMe&&!b&&!command)return false
+ if(o.type==='append'&&!b&&!command)return false
+ return o.type==='notify'||o.type==='append'
+}
 class ReplyRateLimiter{constructor(){this.users=new Map();this.maxReplies=3;this.windowMs=5000;this.minMuteMs=5000;this.maxMuteMs=10000}key(m){const k=m?.key||{};return String(k.participantAlt||k.participant||k.remoteJidAlt||k.remoteJid||'unknown').split(':')[0].split('@')[0]}check(m){const now=Date.now(),k=this.key(m);let s=this.users.get(k)||{times:[],mutedUntil:0};if(s.mutedUntil>now)return{allowed:false,warn:false,remainingMs:s.mutedUntil-now};if(s.mutedUntil)s={times:[],mutedUntil:0};s.times=s.times.filter(t=>now-t<=this.windowMs);if(s.times.length>=this.maxReplies){const d=this.minMuteMs+Math.floor(Math.random()*(this.maxMuteMs-this.minMuteMs+1));s.mutedUntil=now+d;this.users.set(k,s);return{allowed:false,warn:true,durationMs:d}}s.times.push(now);this.users.set(k,s);return{allowed:true}}}
 module.exports={resolveButtonId,isKnownButtonInteraction,isReplyTrigger,shouldHandleUpsert,visibleText,ReplyRateLimiter}
