@@ -1,14 +1,171 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#09080f"><title>Architect Control</title><link rel="stylesheet" href="/dashboard/app.css"><link rel="stylesheet" href="/dashboard/controls.css"><link rel="stylesheet" href="/dashboard/admin.css"></head>
-<body><div class="noise"></div><section id="login" class="login-shell"><div class="login-card"><div class="sigil">A</div><p class="eyebrow">ARCHITECT • CONTROL LAYER</p><h1>Enter the System</h1><p class="muted">Sign in to pair and manage your Architect WhatsApp instance.</p><form id="loginForm"><label>Dashboard password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Unlock control</button><p class="error" id="loginError"></p></form></div></section>
-<main id="app" class="app hidden"><header><div><p class="eyebrow">SYSTEM AUTHORITY</p><h1>ARCHITECT <span>Control Panel</span></h1></div><div class="pill" id="livePill"><i></i><span>Connecting</span></div></header>
-<section class="hero"><div><p class="eyebrow">INSTANCE STATUS</p><h2 id="heroTitle">Architect is initializing.</h2><p class="muted" id="heroSub">Your game engine and WhatsApp connection status appear here.</p></div><div class="orb"><span>A</span></div></section>
-<div class="stats"><article><small>REGISTERED PLAYERS</small><strong id="users">—</strong></article><article><small>WHATSAPP ACCOUNTS</small><strong id="accounts">—</strong></article><article><small>ONLINE ACCOUNTS</small><strong id="online">—</strong></article><article><small>PRIMARY UPTIME</small><strong id="uptime">—</strong></article></div>
-<section class="panel"><div class="panel-head"><div><p class="eyebrow">PRIMARY LINK</p><h3 id="primaryTitle">Architect</h3><p class="muted" id="primaryMeta">Waiting for pairing</p></div><span class="badge" id="waBadge">Not paired</span></div><div class="detail-grid"><div><small>PHONE</small><b id="accountPhone">Not available</b></div><div><small>STORAGE</small><b id="storage">—</b></div><div><small>LAST MESSAGE</small><b id="lastMessage">—</b></div><div><small>MESSAGES HANDLED</small><b id="handled">0</b></div></div><div class="actions"><button id="reconnectBtn">Reconnect</button><button id="pauseBtn">Pause</button><button id="takeoverBtn" class="primary hidden">Take control</button><button id="logoutBtn">Sign out</button></div><p class="muted hidden" id="standbyNote">Another deployment currently controls the WhatsApp connection.</p></section>
-<section class="panel"><p class="eyebrow">PAIR A WHATSAPP NUMBER</p><h3>Connect Architect</h3><p class="muted">Use WhatsApp → Linked devices → Link with phone number. Start with the primary account; add more instances only when needed.</p><div class="detail-grid"><label>Phone number<input id="pairPhone" inputmode="numeric" placeholder="2348012345678"></label><label>Account slot<select id="pairType"><option value="primary">Primary Architect</option><option value="instance">Additional instance</option></select></label><label id="pairLabelWrap" class="hidden">Instance label<input id="pairLabel" maxlength="40" placeholder="Architect Two"></label></div><div class="actions"><button id="pairBtn" class="primary">Generate pairing code</button></div><div id="pairResult" class="pair-code hidden"><p class="eyebrow" id="pairIdentity">PAIRING CODE</p><strong id="pairCode"></strong><small id="pairSlot"></small><button id="copyPairCode">Copy code</button></div></section>
-<section class="panel"><div class="panel-head"><div><p class="eyebrow">LINKED INSTANCES</p><h3>WhatsApp connections</h3></div><button id="refreshBtn">Refresh</button></div><div id="accountList" class="list empty">No connections yet.</div></section>
-<section class="panel danger-zone"><p class="eyebrow">DESTRUCTIVE ACTION</p><h3>Reset linked sessions</h3><p class="muted">This logs out every WhatsApp number saved by this deployment. Player progress in the database is not deleted.</p><button id="removeAllBtn" class="danger">Reset all sessions</button></section>
-<section id="adminPanel" class="admin-shell hidden"><div class="panel-head"><div><p class="eyebrow">AXYON • MODERATION</p><h3>Admin panel</h3><p class="muted">Groups, players, stages, floors, modes, visuals, authority and the audit log — all without touching WhatsApp.</p></div></div>
-<nav class="admin-tabs"><button data-tab="groups" class="active">Groups</button><button data-tab="players">Players</button><button data-tab="stages">Stages</button><button data-tab="floors">Floors</button><button data-tab="modes">Modes</button><button data-tab="visuals">Visuals</button><button data-tab="authority">Authority</button><button data-tab="settings">Settings</button><button data-tab="log">Audit log</button></nav>
-<div id="adminBody"></div></section>
-</main><div id="toast" class="toast"></div><script src="/dashboard/app.js" defer></script><script src="/dashboard/admin.js" defer></script></body></html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#03070b"><title>Architect Control</title><link rel="stylesheet" href="/dashboard/app.css"><link rel="stylesheet" href="/dashboard/controls.css"><link rel="stylesheet" href="/dashboard/admin.css"></head>
+<body><div class="noise"></div>
+
+<!-- ============================== LOGIN ============================== -->
+<section id="login" class="login-shell"><div class="login-card"><div class="sigil">A</div><p class="eyebrow">ARCHITECT &bull; CONTROL LAYER</p><h1>Enter the System</h1><p class="muted">Sign in to pair and manage your Architect WhatsApp instance.</p><form id="loginForm"><label>Dashboard password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Unlock control</button><p class="error" id="loginError"></p></form></div></section>
+
+<!-- =============================== APP =============================== -->
+<main id="app" class="app hidden">
+
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">A</span><div><p class="eyebrow">SYSTEM AUTHORITY</p><h1>ARCHITECT</h1></div></div>
+    <div class="topbar-right">
+      <div class="pill" id="livePill"><i></i><span>Connecting</span></div>
+      <button class="icon-btn" id="logoutBtn" title="Sign out" aria-label="Sign out">&#9099;</button>
+    </div>
+  </header>
+
+  <!-- ---------------------------- OVERVIEW ---------------------------- -->
+  <section class="screen active" data-screen="overview">
+    <div class="screen-head"><p class="eyebrow">INSTANCE STATUS</p><h2 id="heroTitle">Architect is initializing.</h2><p class="muted" id="heroSub">Your game engine and WhatsApp connection status appear here.</p></div>
+    <div class="stats">
+      <article><small>REGISTERED PLAYERS</small><strong id="users">&mdash;</strong></article>
+      <article><small>WHATSAPP ACCOUNTS</small><strong id="accounts">&mdash;</strong></article>
+      <article><small>ONLINE ACCOUNTS</small><strong id="online">&mdash;</strong></article>
+      <article><small>PRIMARY UPTIME</small><strong id="uptime">&mdash;</strong></article>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><div><p class="eyebrow">PRIMARY LINK</p><h3 id="primaryTitle">Architect</h3><p class="muted" id="primaryMeta">Waiting for pairing</p></div><span class="badge" id="waBadge">Not paired</span></div>
+      <div class="detail-grid"><div><small>PHONE</small><b id="accountPhone">Not available</b></div><div><small>STORAGE</small><b id="storage">&mdash;</b></div><div><small>LAST MESSAGE</small><b id="lastMessage">&mdash;</b></div><div><small>MESSAGES HANDLED</small><b id="handled">0</b></div></div>
+      <div class="actions"><button id="reconnectBtn">Reconnect</button><button id="pauseBtn">Pause</button><button id="takeoverBtn" class="primary hidden">Take control</button></div>
+      <p class="muted hidden" id="standbyNote">Another deployment currently controls the WhatsApp connection.</p>
+    </div>
+  </section>
+
+  <!-- ----------------------------- PAIRING ---------------------------- -->
+  <section class="screen" data-screen="pairing">
+    <div class="screen-head"><p class="eyebrow">PAIR A WHATSAPP NUMBER</p><h2>Connect Architect</h2><p class="muted">WhatsApp &rarr; Linked devices &rarr; Link with phone number. Start with the primary account; add more instances only when needed.</p></div>
+    <div class="panel">
+      <div class="detail-grid">
+        <label>Phone number<input id="pairPhone" inputmode="numeric" placeholder="2348012345678"></label>
+        <label>Account slot<select id="pairType"><option value="primary">Primary Architect</option><option value="instance">Additional instance</option></select></label>
+        <label id="pairLabelWrap" class="hidden">Instance label<input id="pairLabel" maxlength="40" placeholder="Architect Two"></label>
+      </div>
+      <div class="actions"><button id="pairBtn" class="primary">Generate pairing code</button></div>
+      <div id="pairResult" class="pair-code hidden"><p class="eyebrow" id="pairIdentity">PAIRING CODE</p><strong id="pairCode"></strong><small id="pairSlot"></small><button id="copyPairCode">Copy code</button></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><div><p class="eyebrow">LINKED INSTANCES</p><h3>WhatsApp connections</h3></div><button id="refreshBtn">Refresh</button></div>
+      <div id="accountList" class="list empty">No connections yet.</div>
+    </div>
+    <div class="panel danger-zone">
+      <p class="eyebrow">DESTRUCTIVE ACTION</p><h3>Reset linked sessions</h3>
+      <p class="muted">This logs out every WhatsApp number saved by this deployment. Player progress in the database is not deleted.</p>
+      <button id="removeAllBtn" class="danger">Reset all sessions</button>
+    </div>
+  </section>
+
+  <!-- ------------------------------ GROUPS ---------------------------- -->
+  <section class="screen" data-screen="groups">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Groups</h2><p class="muted">Pause a group to make Architect ignore it entirely. Removing it deletes the registration &mdash; players keep their progress.</p></div>
+    <div id="adminBody-groups"></div>
+  </section>
+
+  <!-- ----------------------------- PLAYERS ---------------------------- -->
+  <section class="screen" data-screen="players">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Players</h2><p class="muted">Heal restores HP and Power Energy. Zen adjusts the balance by the amount you enter (negative removes). Clear battle drops a stuck fight. Reset returns a hunter to rank E, level 1.</p></div>
+    <div id="adminBody-players"></div>
+  </section>
+
+  <!-- ------------------------------ STAGES ---------------------------- -->
+  <section class="screen" data-screen="stages">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Stages</h2><p class="muted">The original three stages cannot be removed, only edited or locked.</p></div>
+    <div id="adminBody-stages"></div>
+  </section>
+
+  <!-- ------------------------------ FLOORS ---------------------------- -->
+  <section class="screen" data-screen="floors">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Dungeon floors</h2><p class="muted">Floors are the dungeon ladder. Boss floors are marked and use the boss visual.</p></div>
+    <div id="adminBody-floors"></div>
+  </section>
+
+  <!-- ------------------------------ MODES ----------------------------- -->
+  <section class="screen" data-screen="modes">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Modes</h2><p class="muted">Disabling a mode hides it from players. Party max also updates the global party limit.</p></div>
+    <div id="adminBody-modes"></div>
+  </section>
+
+  <!-- ----------------------------- VISUALS ---------------------------- -->
+  <section class="screen" data-screen="visuals">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Visuals</h2><p class="muted">Each mode can carry its own image, GIF or short clip. The AXYN CORE watermark stays on every message.</p></div>
+    <div id="adminBody-visuals"></div>
+  </section>
+
+  <!-- ---------------------------- AUTHORITY --------------------------- -->
+  <section class="screen" data-screen="authority">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Authority</h2><p class="muted">AXYON numbers keep management authority even after switching to PLAYER mode. RHM is scoped and never overrides AXYON.</p></div>
+    <div id="adminBody-authority"></div>
+  </section>
+
+  <!-- ----------------------------- SETTINGS --------------------------- -->
+  <section class="screen" data-screen="settings">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Settings</h2><p class="muted">The prefix applies to every group without its own override. Daily limits cap XP and Zen earned per player per day; anything above the cap is discarded, not banked.</p></div>
+    <div id="adminBody-settings"></div>
+  </section>
+
+  <!-- ------------------------------- LOG ------------------------------ -->
+  <section class="screen" data-screen="log">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; MODERATION</p><h2>Audit log</h2><p class="muted">Every management action is recorded &mdash; resets, grants, stage edits and dashboard changes alike.</p></div>
+    <div id="adminBody-log"></div>
+  </section>
+
+  <!-- ------------------------------- HELP ----------------------------- -->
+  <section class="screen" data-screen="help">
+    <div class="screen-head"><p class="eyebrow">REFERENCE</p><h2>Commands &amp; registration</h2><p class="muted">Everything the bot answers to, and the exact steps to get a group working.</p></div>
+
+    <div class="panel">
+      <p class="eyebrow">STEP BY STEP</p>
+      <h3>How to register a group</h3>
+      <ol class="steps">
+        <li><b>Add the bot's number to the group.</b> The number is the one you paired on the Pairing screen.</li>
+        <li><b>Make the bot a group admin.</b> Group info &rarr; Members &rarr; tap the bot &rarr; Make group admin. This is required for duel admin promotion, and it lets any admin run <code>!register</code>.</li>
+        <li><b>Send the command in the group:</b> <code>!register</code> &mdash; or <code>!register My Group Name</code> to name it yourself. If you leave the name out, the bot uses the group's own subject.</li>
+        <li><b>The bot replies:</b> <code>&#8984; AXYN CORE</code> then <code>&#9989; GROUP REGISTERED</code>, the group name, and <i>"Architect will now respond here."</i></li>
+        <li><b>Test it:</b> send <code>!ping</code>. You should get <code>&#127923; Pong &mdash; &#8984; AXYN CORE</code>.</li>
+      </ol>
+      <p class="admin-note"><b>Who can run it:</b> AXYON, or any group admin. A normal member gets <i>"&#128737;&#65039; Only AXYON or a group admin can register a group."</i></p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">TROUBLESHOOTING</p>
+      <h3>If the bot says the group isn't registered</h3>
+      <p class="muted">An unregistered group is silent for ordinary chat by design. But if you send a <b>command</b> in one, the bot now answers once with the registration steps instead of ignoring you.</p>
+      <ol class="steps">
+        <li><b>Send <code>!register</code> in the group.</b> That is the fix in almost every case.</li>
+        <li><b>If it says "Only AXYON or a group admin can register a group"</b> &mdash; you are a normal member. Ask a group admin to send <code>!register</code>, or send it from the AXYON number.</li>
+        <li><b>If it says "Run this inside the group you want to register"</b> &mdash; you sent it in a DM. Registration is per group, so it has to be sent inside the group.</li>
+        <li><b>If it still stays silent</b> &mdash; open the <b>Groups</b> screen here. The group may be <i>paused</i>. Press <b>Resume</b>. If it is not listed at all, the registration never landed: send <code>!register</code> again.</li>
+        <li><b>If nothing at all works</b> &mdash; check the <b>Overview</b> screen. If the account shows <i>Disconnected</i>, press <b>Reconnect</b> on the Pairing screen.</li>
+      </ol>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">REFERENCE</p>
+      <h3>Command list</h3>
+      <p class="muted">Default prefix is <code>!</code>. AXYON can change it with <code>!prefix</code>, and each group can have its own.</p>
+      <div id="helpCommands" class="cmd-grid"><p class="admin-empty">Loading commands&hellip;</p></div>
+    </div>
+  </section>
+
+  <!-- --------------------------- BOTTOM DOCK -------------------------- -->
+  <nav class="dock" id="dock" aria-label="Screens">
+    <button data-goto="overview" class="active"><span>&#9635;</span><small>Overview</small></button>
+    <button data-goto="pairing"><span>&#128241;</span><small>Pairing</small></button>
+    <button data-goto="groups"><span>&#128101;</span><small>Groups</small></button>
+    <button data-goto="players"><span>&#127894;</span><small>Players</small></button>
+    <button data-goto="stages"><span>&#9876;</span><small>Stages</small></button>
+    <button data-goto="floors"><span>&#127961;</span><small>Floors</small></button>
+    <button data-goto="modes"><span>&#9881;</span><small>Modes</small></button>
+    <button data-goto="visuals"><span>&#127912;</span><small>Visuals</small></button>
+    <button data-goto="authority"><span>&#128737;</span><small>Authority</small></button>
+    <button data-goto="settings"><span>&#128295;</span><small>Settings</small></button>
+    <button data-goto="log"><span>&#128220;</span><small>Log</small></button>
+    <button data-goto="help"><span>&#10067;</span><small>Help</small></button>
+  </nav>
+</main>
+
+<div id="toast" class="toast"></div>
+<script src="/dashboard/app.js" defer></script>
+<script src="/dashboard/admin.js" defer></script>
+</body></html>

@@ -7,6 +7,7 @@
  * account-config own.
  */
 const { database } = require('./auth-store')
+const { cache } = require('./cache')
 
 const RANKS = ['E', 'D', 'C', 'B', 'A', 'S', 'SS', 'SSS', 'Monarch']
 const RANK_LEVEL = { E: 1, D: 10, C: 20, B: 30, A: 40, S: 50, SS: 60, SSS: 70, Monarch: 80 }
@@ -219,12 +220,24 @@ async function ensureSchema () {
 
 /* ---------------------------------------------------------------- settings */
 
+/*
+ * CACHED READS
+ * ------------
+ * settings / group / axyonNumberMode / roleOf are read on EVERY message and
+ * change rarely. They are cached for 30 s and invalidated on write, which
+ * removes four Postgres round trips from the hot path.
+ *
+ * Player rows and battles are deliberately never cached: they change on every
+ * turn and a stale read would corrupt progression.
+ */
 async function settings () {
-  await ensureSchema()
-  const rows = (await db().query('SELECT key,value FROM axyon_settings')).rows
-  const out = { ...DEFAULT_SETTINGS }
-  for (const r of rows) out[r.key] = r.value
-  return out
+  return cache.wrap('settings', async () => {
+    await ensureSchema()
+    const rows = (await db().query('SELECT key,value FROM axyon_settings')).rows
+    const out = { ...DEFAULT_SETTINGS }
+    for (const r of rows) out[r.key] = r.value
+    return out
+  })
 }
 
 async function getSetting (key) {
@@ -239,6 +252,7 @@ async function setSetting (key, value) {
      ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`,
     [key, JSON.stringify(value)]
   )
+  cache.invalidate('settings')
   return value
 }
 
@@ -260,18 +274,22 @@ async function registerGroup (jid, name, by) {
      RETURNING *`,
     [jid, name || '', by || '']
   )
+  cache.invalidate(`group:${jid}`)
   return r.rows[0]
 }
 
 async function unregisterGroup (jid) {
   await ensureSchema()
   const r = await db().query('DELETE FROM axyon_groups WHERE group_jid=$1', [jid])
+  cache.invalidate(`group:${jid}`)
   return r.rowCount > 0
 }
 
 async function group (jid) {
-  await ensureSchema()
-  return (await db().query('SELECT * FROM axyon_groups WHERE group_jid=$1', [jid])).rows[0] || null
+  return cache.wrap(`group:${jid}`, async () => {
+    await ensureSchema()
+    return (await db().query('SELECT * FROM axyon_groups WHERE group_jid=$1', [jid])).rows[0] || null
+  })
 }
 
 async function groups () {
@@ -282,12 +300,14 @@ async function groups () {
 async function setGroupEnabled (jid, enabled) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_groups SET enabled=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, !!enabled])
+  cache.invalidate(`group:${jid}`)
   return r.rows[0] || null
 }
 
 async function setGroupPrefix (jid, prefix) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_groups SET prefix=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, prefix || null])
+  cache.invalidate(`group:${jid}`)
   return r.rows[0] || null
 }
 
@@ -600,12 +620,14 @@ async function addRole (userId, role, by) {
      ON CONFLICT(user_id) DO UPDATE SET role=EXCLUDED.role RETURNING *`,
     [userId, role, by || '']
   )
+  cache.invalidate(`role:${userId}`)
   return r.rows[0]
 }
 
 async function removeRole (userId) {
   await ensureSchema()
   const r = await db().query('DELETE FROM axyon_roles WHERE user_id=$1', [userId])
+  cache.invalidate(`role:${userId}`)
   return r.rowCount > 0
 }
 
@@ -615,8 +637,10 @@ async function roles () {
 }
 
 async function roleOf (userId) {
-  await ensureSchema()
-  return (await db().query('SELECT role FROM axyon_roles WHERE user_id=$1', [userId])).rows[0]?.role || null
+  return cache.wrap(`role:${userId}`, async () => {
+    await ensureSchema()
+    return (await db().query('SELECT role FROM axyon_roles WHERE user_id=$1', [userId])).rows[0]?.role || null
+  })
 }
 
 async function addAxyonNumber (userId, by, mode = 'axyon') {
@@ -625,6 +649,7 @@ async function addAxyonNumber (userId, by, mode = 'axyon') {
     'INSERT INTO axyon_numbers(user_id,added_by,mode) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET mode=EXCLUDED.mode RETURNING *',
     [userId, by || '', mode === 'player' ? 'player' : 'axyon']
   )
+  cache.invalidate(`number:${userId}`)
   return r.rows[0] || null
 }
 
@@ -632,18 +657,22 @@ async function addAxyonNumber (userId, by, mode = 'axyon') {
 async function setNumberMode (userId, mode) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_numbers SET mode=$2 WHERE user_id=$1 RETURNING *', [userId, mode === 'player' ? 'player' : 'axyon'])
+  cache.invalidate(`number:${userId}`)
   return r.rows[0] || null
 }
 
 async function axyonNumberMode (userId) {
-  await ensureSchema()
-  const row = (await db().query('SELECT mode FROM axyon_numbers WHERE user_id=$1', [userId])).rows[0]
-  return row ? row.mode : null
+  return cache.wrap(`number:${userId}`, async () => {
+    await ensureSchema()
+    const row = (await db().query('SELECT mode FROM axyon_numbers WHERE user_id=$1', [userId])).rows[0]
+    return row ? row.mode : null
+  })
 }
 
 async function removeAxyonNumber (userId) {
   await ensureSchema()
   const r = await db().query('DELETE FROM axyon_numbers WHERE user_id=$1', [userId])
+  cache.invalidate(`number:${userId}`)
   return r.rowCount > 0
 }
 

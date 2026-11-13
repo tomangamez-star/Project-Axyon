@@ -121,7 +121,7 @@ async function main () {
   ok('default prefix is !', settings.prefix === '!', settings.prefix)
   ok('no players yet', (await store.playerCount()) === 0)
   /* The group must be registered before anything else, because an
-   * unregistered group is silent for non-AXYON senders by design. */
+   * unregistered group only answers commands with a registration prompt. */
   await store.registerGroup(GROUP, 'Test Gate', OWNER)
   ok('test group registered', !!(await store.group(GROUP)))
 
@@ -227,7 +227,13 @@ async function main () {
   await store.unregisterGroup(GROUP)
   sock.sent.length = 0
   await deliver(msg(PLAYER, '!profile', { fromMe: true }))
-  ok('unregistered group is silent for players', sock.sent.length === 0, `${sock.sent.length} messages`)
+  /*
+   * CHANGED CONTRACT: an unregistered group used to be completely silent,
+   * which made a working bot look dead. It now answers a COMMAND with one
+   * registration prompt (ordinary chat is still ignored).
+   */
+  ok('unregistered group answers a command with a registration prompt', sock.sent.length === 1, `${sock.sent.length} messages`)
+  ok('the prompt names !register', /register/i.test(lastText(sock)), lastText(sock).slice(0, 70))
   sock.sent.length = 0
   await deliver(msg(OWNER, '!register Test Gate', { fromMe: true }))
   ok('AXYON can register the group', /REGISTERED/i.test(lastText(sock)), lastText(sock).slice(0, 60))

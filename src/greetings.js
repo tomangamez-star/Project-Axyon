@@ -98,4 +98,23 @@ function notRegistered (prefix) {
   ].join('\n')
 }
 
-module.exports = { firstGreeting, returnGreeting, notRegistered, FIRST_LIGHT, RETURNING, RANK_LINE, pick }
+/**
+ * Shown when a COMMAND is used in a group that was never registered.
+ *
+ * The bot used to stay completely silent here, which made a working bot look
+ * broken. Ordinary chat is still ignored; only commands get this reply, so the
+ * group is never spammed.
+ */
+function groupNotRegistered (prefix) {
+  return [
+    '\u232c AXYN CORE',
+    '',
+    '\ud83d\udd12 *THIS GROUP IS NOT REGISTERED*',
+    '',
+    `An admin needs to send *${prefix}register* here once.`,
+    '',
+    '> Then every command works. Nothing else is required.'
+  ].join('\n')
+}
+
+module.exports = { firstGreeting, returnGreeting, notRegistered, groupNotRegistered, FIRST_LIGHT, RETURNING, RANK_LINE, pick }

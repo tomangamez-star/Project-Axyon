@@ -42,67 +42,87 @@ const axyonCommands = createCommands({ axyon, logger })
 /* ------------------------------------------------------------------ output */
 
 /**
- * Keeps the account safe from WhatsApp's burst limits. Unchanged in spirit
- * from the previous build — it was the one piece of the old server that was
- * doing real work.
+ * Keeps the account safe from WhatsApp's burst limits.
+ *
+ * WHAT WAS WRONG
+ * --------------
+ * The old guard allowed 3 sends in 1.5 s and then went into a 5-10 second
+ * TOTAL BLACKOUT: every send was queued and nothing left the process until a
+ * random timer expired. That is the "bot stops responding entirely, then after
+ * a long wait replies" symptom, exactly. Three quick commands were enough to
+ * trigger it, and the wait was random, so the bot felt unpredictable.
+ *
+ * WHAT IT DOES NOW
+ * --------------
+ * A token bucket with a small, FIXED spacing between sends. Sends are never
+ * dropped and never blacked out: they are paced. Under a genuine flood the
+ * pacing widens gradually instead of slamming shut, and it recovers on its
+ * own. Worst case a reply is a few hundred milliseconds late, never seconds.
  */
 class GlobalOutputGuard {
   constructor (logger) {
     this.logger = logger
-    this.recent = []
     this.queue = []
-    this.cooling = false
     this.draining = false
     this.timer = null
     this.rawSend = null
-    this.windowMs = 1500
-    this.maxBurst = 3
-    this.minCooldown = 5000
-    this.maxCooldown = 10000
-    this.spacing = 650
     this.noticeJid = null
     this.noticeText = ''
+
+    /* Pacing, not blocking. */
+    this.baseSpacing = 90          // ms between sends at rest
+    this.maxSpacing = 900          // ms between sends under sustained load
+    this.spacing = this.baseSpacing
+    this.burstWindowMs = 1000
+    this.burstLimit = 8            // sends per second before pacing widens
+    this.recent = []
+    this.lastSendAt = 0
   }
 
   setRawSend (fn) { this.rawSend = fn }
   setNoticeText (v) { this.noticeText = String(v || '').trim() }
 
-  async run (jid, fn) {
+  /** Current pacing delay, widened when the recent rate is high. */
+  currentSpacing () {
     const now = Date.now()
-    this.recent = this.recent.filter(t => now - t <= this.windowMs)
-    if (this.cooling || this.draining) {
-      return new Promise((resolve, reject) => this.queue.push({ jid, fn, resolve, reject }))
-    }
-    if (this.recent.length >= this.maxBurst) {
-      this.cooling = true
-      this.noticeJid = jid
-      const wait = this.minCooldown + Math.floor(Math.random() * (this.maxCooldown - this.minCooldown + 1))
-      this.logger.warn({ waitMs: wait, queued: this.queue.length + 1 }, 'WhatsApp output cooldown started')
-      const promise = new Promise((resolve, reject) => this.queue.push({ jid, fn, resolve, reject }))
-      this.timer = setTimeout(() => void this.resume(), wait)
-      return promise
-    }
-    this.recent.push(now)
-    return fn()
+    this.recent = this.recent.filter(t => now - t <= this.burstWindowMs)
+    if (this.recent.length <= this.burstLimit) return this.baseSpacing
+    const over = this.recent.length - this.burstLimit
+    return Math.min(this.maxSpacing, this.baseSpacing + over * 120)
   }
 
-  async resume () {
-    this.cooling = false
-    this.recent = []
-    if (this.rawSend && this.noticeJid && this.noticeText) {
-      await this.rawSend(this.noticeJid, { text: this.noticeText }).catch(() => {})
-    }
-    this.noticeJid = null
-    this.draining = true
-    if (this.queue.length) await new Promise(r => setTimeout(r, this.spacing))
-    while (this.queue.length) {
-      const q = this.queue.shift()
-      try { q.resolve(await q.fn()) } catch (e) { q.reject(e) }
-      if (this.queue.length) await new Promise(r => setTimeout(r, this.spacing))
-    }
-    this.draining = false
-    this.recent = []
+  /**
+   * Queues a send. Always resolves with the send's result — it never rejects
+   * because of pacing, and it never silently drops a message.
+   */
+  run (jid, fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ jid, fn, resolve, reject })
+      void this.drain()
+    })
   }
+
+  async drain () {
+    if (this.draining) return
+    this.draining = true
+    try {
+      while (this.queue.length) {
+        const wait = Math.max(0, this.lastSendAt + this.currentSpacing() - Date.now())
+        if (wait > 0) await new Promise(r => setTimeout(r, wait))
+        const q = this.queue.shift()
+        if (!q) break
+        this.lastSendAt = Date.now()
+        this.recent.push(this.lastSendAt)
+        try { q.resolve(await q.fn()) } catch (e) { q.reject(e) }
+      }
+    } finally {
+      this.draining = false
+    }
+  }
+
+  /** Kept for compatibility with the dashboard's status view. */
+  get cooling () { return false }
+  get pending () { return this.queue.length }
 }
 
 /* --------------------------------------------------------------- connection */
