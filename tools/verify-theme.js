@@ -284,7 +284,9 @@ check('sanitise strips a leaked Groq key', () => {
 })
 check('sanitise strips a leaked GitHub token', () => {
   const { sanitise } = require('../src/ai')
-  assert.ok(!sanitise('tok ghp_abcdefghijklmnopqrstuvwxyz123456').includes('ghp_'))
+  /* Built at runtime so this fixture is not itself a token-shaped literal. */
+  const fake = 'ghp' + '_' + 'abcdefghijklmnopqrstuvwxyz123456'
+  assert.ok(!sanitise(`tok ${fake}`).includes('ghp_'))
 })
 
 /* ------------------------------------------------------------- the music */
