@@ -107,38 +107,81 @@ function shouldHandleUpsert (content = {}, opts = {}) {
   return type === 'notify'
 }
 
-/** Per-sender flood control. Three commands in five seconds, then a pause. */
+/**
+ * FLOOD CONTROL — scoped per chat AND per sender.
+ *
+ * WHAT WAS WRONG
+ * --------------
+ * The old limiter keyed only on the sender and counted every message that
+ * reached it, including the bot's own outgoing messages. Three consequences,
+ * all of which the operator saw as "the easy-there warning fires everywhere":
+ *
+ *   1. The bot's own replies counted against the sender, so a single command
+ *      that produced a few messages could trip the warning on the next one.
+ *   2. The key ignored the chat, so three commands in one group muted the same
+ *      person in every other group and in DMs.
+ *   3. Three messages in five seconds is ordinary conversation, not spam.
+ *
+ * WHAT IT DOES NOW
+ * ----------------
+ *   - key = chat + sender, so each conversation is independent
+ *   - `fromMe` messages are never counted and never warned about
+ *   - the window is 10 s and the allowance is 6, which no human conversation
+ *     reaches but a scripted flood does
+ *   - the warning is emitted at most once per mute window, not on every
+ *     suppressed message
+ */
 class ReplyRateLimiter {
-  constructor () {
+  constructor ({ maxReplies = 6, windowMs = 10000, minMuteMs = 4000, maxMuteMs = 8000 } = {}) {
     this.users = new Map()
-    this.maxReplies = 3
-    this.windowMs = 5000
-    this.minMuteMs = 5000
-    this.maxMuteMs = 10000
+    this.maxReplies = maxReplies
+    this.windowMs = windowMs
+    this.minMuteMs = minMuteMs
+    this.maxMuteMs = maxMuteMs
   }
 
+  /** Chat + sender. Two different groups are two different buckets. */
   key (m) {
     const k = m?.key || {}
-    return String(k.participantAlt || k.participant || k.remoteJidAlt || k.remoteJid || 'unknown')
+    const chat = String(k.remoteJid || k.remoteJidAlt || 'unknown').split(':')[0]
+    const sender = String(k.participantAlt || k.participant || k.remoteJidAlt || k.remoteJid || 'unknown')
       .split(':')[0].split('@')[0]
+    return `${chat}|${sender}`
   }
 
   check (m) {
+    /* The bot's own messages are never spam and never counted. */
+    if (m?.key?.fromMe) return { allowed: true, warn: false }
+
     const now = Date.now()
     const k = this.key(m)
-    let s = this.users.get(k) || { times: [], mutedUntil: 0 }
-    if (s.mutedUntil > now) return { allowed: false, warn: false, remainingMs: s.mutedUntil - now }
-    if (s.mutedUntil) s = { times: [], mutedUntil: 0 }
+    let s = this.users.get(k) || { times: [], mutedUntil: 0, warned: false }
+
+    if (s.mutedUntil > now) {
+      /* Already muted: stay quiet, and do not warn twice for one window. */
+      return { allowed: false, warn: false, remainingMs: s.mutedUntil - now }
+    }
+    if (s.mutedUntil) s = { times: [], mutedUntil: 0, warned: false }
+
     s.times = s.times.filter(t => now - t <= this.windowMs)
     if (s.times.length >= this.maxReplies) {
       const d = this.minMuteMs + Math.floor(Math.random() * (this.maxMuteMs - this.minMuteMs + 1))
       s.mutedUntil = now + d
+      s.warned = true
       this.users.set(k, s)
       return { allowed: false, warn: true, durationMs: d }
     }
     s.times.push(now)
     this.users.set(k, s)
-    return { allowed: true }
+    return { allowed: true, warn: false }
+  }
+
+  /** Drops buckets that have gone quiet, so the map cannot grow forever. */
+  prune (now = Date.now()) {
+    for (const [k, s] of this.users) {
+      const last = s.times[s.times.length - 1] || 0
+      if (s.mutedUntil < now && now - last > this.windowMs * 6) this.users.delete(k)
+    }
   }
 }
 

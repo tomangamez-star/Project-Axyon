@@ -40,3 +40,4 @@
 .admin-error b{color:var(--danger);letter-spacing:.06em;text-transform:uppercase;font-size:11px}
 .admin-error span{flex:1;min-width:180px}
 .admin-error button{background:transparent;border:0;color:var(--danger);font-size:18px;line-height:1;cursor:pointer;padding:0 4px}
+.field-invalid{border-color:var(--danger)!important;box-shadow:0 0 0 3px rgba(255,83,109,.16)!important}

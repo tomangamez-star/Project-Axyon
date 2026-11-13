@@ -1,8 +1,8 @@
 /* ARCHITECT CONTROL — screen switcher + pairing/overview logic.
  *
  * The dashboard is a set of discrete screens, not one long scroll. Exactly one
- * <section class="screen"> carries .active at a time; the bottom dock toggles
- * that class. No reload, no router, no history entries to get lost in.
+ * <section class="screen"> carries .active at a time; the slide-out side panel
+ * toggles that class. No reload, no router, no history entries to get lost in.
  */
 const $ = s => document.querySelector(s)
 const $$ = s => [...document.querySelectorAll(s)]
@@ -59,22 +59,96 @@ const SCREENS = ['overview', 'pairing', 'groups', 'players', 'stages', 'floors',
 
 /**
  * Shows one screen and hides the rest. Instant — a class toggle, no reload.
- * Also keeps the dock highlight and the URL hash in sync so a refresh or a
- * shared link lands on the same screen.
+ * Also keeps the side panel highlight and the URL hash in sync so a refresh or
+ * a shared link lands on the same screen.
  */
 function showScreen (name) {
   if (!SCREENS.includes(name)) name = 'overview'
   currentScreen = name
   $$('.screen').forEach(s => s.classList.toggle('active', s.dataset.screen === name))
-  $$('#dock button').forEach(b => b.classList.toggle('active', b.dataset.goto === name))
+  $$('#sideList button').forEach(b => {
+    const on = b.dataset.goto === name
+    b.classList.toggle('active', on)
+    if (on) b.setAttribute('aria-current', 'page')
+    else b.removeAttribute('aria-current')
+  })
   if (location.hash.slice(1) !== name) history.replaceState(null, '', `#${name}`)
   /* The admin screens are rendered lazily on first visit, then kept. */
   if (typeof window.architectRenderScreen === 'function') window.architectRenderScreen(name)
   window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' })
 }
 
-function wireDock () {
-  $$('#dock button').forEach(b => { b.onclick = () => showScreen(b.dataset.goto) })
+/* --------------------------------------------------------- SIDE PANEL */
+
+let panelOpen = false
+let lastFocus = null
+
+function panelEls () {
+  return { panel: $('#sidePanel'), scrim: $('#scrim'), btn: $('#menuBtn') }
+}
+
+function openPanel () {
+  const { panel, scrim, btn } = panelEls()
+  if (!panel || panelOpen) return
+  panelOpen = true
+  lastFocus = document.activeElement
+  panel.classList.add('open')
+  panel.setAttribute('aria-hidden', 'false')
+  if (scrim) { scrim.hidden = false; requestAnimationFrame(() => scrim.classList.add('show')) }
+  if (btn) btn.setAttribute('aria-expanded', 'true')
+  document.body.classList.add('panel-open')
+  /* Focus the current screen's row so keyboard users land in the right place. */
+  const active = panel.querySelector('#sideList button.active') || panel.querySelector('#sideList button')
+  if (active) active.focus({ preventScroll: false })
+}
+
+function closePanel ({ restoreFocus = true } = {}) {
+  const { panel, scrim, btn } = panelEls()
+  if (!panel || !panelOpen) return
+  panelOpen = false
+  panel.classList.remove('open')
+  panel.setAttribute('aria-hidden', 'true')
+  if (scrim) {
+    scrim.classList.remove('show')
+    setTimeout(() => { if (!panelOpen) scrim.hidden = true }, 240)
+  }
+  if (btn) btn.setAttribute('aria-expanded', 'false')
+  document.body.classList.remove('panel-open')
+  if (restoreFocus && lastFocus && lastFocus.focus) lastFocus.focus({ preventScroll: true })
+}
+
+function togglePanel () { panelOpen ? closePanel() : openPanel() }
+
+function wirePanel () {
+  const { btn, scrim } = panelEls()
+  if (btn) btn.onclick = togglePanel
+  const close = $('#sideClose')
+  if (close) close.onclick = () => closePanel()
+  if (scrim) scrim.onclick = () => closePanel()
+
+  $$('#sideList button').forEach(b => {
+    b.onclick = () => {
+      showScreen(b.dataset.goto)
+      closePanel({ restoreFocus: false })
+    }
+  })
+
+  /* Escape closes; Tab is trapped inside the panel while it is open. */
+  document.addEventListener('keydown', e => {
+    if (!panelOpen) return
+    if (e.key === 'Escape') { e.preventDefault(); closePanel(); return }
+    if (e.key !== 'Tab') return
+    const panel = $('#sidePanel')
+    if (!panel) return
+    const items = [...panel.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+      .filter(el => !el.disabled && el.offsetParent !== null)
+    if (!items.length) return
+    const first = items[0]
+    const last = items[items.length - 1]
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+  })
+
   window.addEventListener('hashchange', () => showScreen(location.hash.slice(1) || 'overview'))
 }
 
@@ -94,7 +168,7 @@ function showApp () {
 }
 
 async function boot () {
-  wireDock()
+  wirePanel()
   try {
     const s = await api('session')
     if (!s.configured) { showLogin('Set DASHBOARD_PASSWORD in Render, then redeploy.'); return }
@@ -231,8 +305,25 @@ $('#pairBtn').onclick = async () => {
 }
 
 $('#copyPairCode').onclick = async () => {
-  if (!pairCode) return
-  try { await navigator.clipboard.writeText(pairCode.replace(/-/g, '')); toast('Pairing code copied') } catch { toast('Hold the code to copy it') }
+  /* Never a silent no-op: if there is nothing to copy, say so. */
+  if (!pairCode) { toast('Generate a pairing code first'); return }
+  const plain = pairCode.replace(/-/g, '')
+  try {
+    await navigator.clipboard.writeText(plain)
+    toast('Pairing code copied')
+  } catch {
+    /* Clipboard is blocked outside a secure context. Select the code so the
+       user can copy it by hand, and tell them. */
+    const el = $('#pairCode')
+    if (el) {
+      const range = document.createRange()
+      range.selectNodeContents(el)
+      const sel = window.getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+    }
+    toast('Code selected \u2014 press Ctrl/Cmd+C to copy')
+  }
 }
 
 $('#refreshBtn').onclick = refresh
@@ -267,6 +358,7 @@ $('#removeAllBtn').onclick = async () => {
 
 /* Expose the switcher so admin.js can drive screen rendering. */
 window.architectShowScreen = showScreen
+window.architectClosePanel = closePanel
 window.architectToast = toast
 window.architectEsc = esc
 

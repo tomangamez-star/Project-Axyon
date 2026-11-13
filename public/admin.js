@@ -47,6 +47,25 @@ const A = (() => {
     el.querySelector('button').onclick = () => el.remove()
   }
 
+  /**
+   * Marks a field invalid and explains why, in place. Used before a request is
+   * even sent, so an empty form never looks like a dead button.
+   */
+  function requireField (input, message) {
+    if (!input) { banner(message); return }
+    input.classList.add('field-invalid')
+    input.setAttribute('aria-invalid', 'true')
+    input.focus()
+    banner(message)
+    toast(message)
+    const clear = () => {
+      input.classList.remove('field-invalid')
+      input.removeAttribute('aria-invalid')
+      input.removeEventListener('input', clear)
+    }
+    input.addEventListener('input', clear)
+  }
+
   /* ------------------------------------------------------------------ api */
 
   async function api (path, options = {}) {
@@ -292,28 +311,41 @@ const A = (() => {
     host.querySelectorAll('[data-act]').forEach(b => { b.onclick = () => handle(b) })
 
     const addStage = host.querySelector('#addStage')
-    if (addStage) addStage.onclick = () => act('stage-add', {
-      name: host.querySelector('#stageName').value, hp: host.querySelector('#stageHp').value,
-      atk: host.querySelector('#stageAtk').value, def: host.querySelector('#stageDef').value,
-      xp: host.querySelector('#stageXp').value, zen: host.querySelector('#stageZen').value
-    }).catch(() => {})
+    if (addStage) addStage.onclick = () => {
+      const name = host.querySelector('#stageName').value.trim()
+      if (!name) return requireField(host.querySelector('#stageName'), 'Give the stage a name first.')
+      act('stage-add', {
+        name, hp: host.querySelector('#stageHp').value,
+        atk: host.querySelector('#stageAtk').value, def: host.querySelector('#stageDef').value,
+        xp: host.querySelector('#stageXp').value, zen: host.querySelector('#stageZen').value
+      }).catch(() => {})
+    }
 
     const addFloor = host.querySelector('#addFloor')
-    if (addFloor) addFloor.onclick = () => act('floor-add', {
-      name: host.querySelector('#floorName').value, hp: host.querySelector('#floorHp').value,
-      atk: host.querySelector('#floorAtk').value, def: host.querySelector('#floorDef').value,
-      xp: host.querySelector('#floorXp').value, zen: host.querySelector('#floorZen').value,
-      boss: host.querySelector('#floorBoss').value === '1'
-    }).catch(() => {})
+    if (addFloor) addFloor.onclick = () => {
+      const name = host.querySelector('#floorName').value.trim()
+      if (!name) return requireField(host.querySelector('#floorName'), 'Give the floor a name first.')
+      act('floor-add', {
+        name, hp: host.querySelector('#floorHp').value,
+        atk: host.querySelector('#floorAtk').value, def: host.querySelector('#floorDef').value,
+        xp: host.querySelector('#floorXp').value, zen: host.querySelector('#floorZen').value,
+        boss: host.querySelector('#floorBoss').value === '1'
+      }).catch(() => {})
+    }
 
     const setVisual = host.querySelector('#setVisual')
-    if (setVisual) setVisual.onclick = () => act('visual-set', {
-      mode: host.querySelector('#visMode').value, url: host.querySelector('#visUrl').value, caption: host.querySelector('#visCaption').value
-    }).catch(() => {})
+    if (setVisual) setVisual.onclick = () => {
+      const url = host.querySelector('#visUrl').value.trim()
+      if (!/^https?:\/\//i.test(url)) return requireField(host.querySelector('#visUrl'), 'Paste a full http:// or https:// link.')
+      act('visual-set', {
+        mode: host.querySelector('#visMode').value, url, caption: host.querySelector('#visCaption').value
+      }).catch(() => {})
+    }
 
     const grantAuth = host.querySelector('#grantAuth')
     if (grantAuth) grantAuth.onclick = () => {
-      const userId = host.querySelector('#authNumber').value
+      const userId = host.querySelector('#authNumber').value.replace(/\D/g, '')
+      if (!/^\d{8,15}$/.test(userId)) return requireField(host.querySelector('#authNumber'), 'Enter a phone number in international format, digits only.')
       const kind = host.querySelector('#authKind').value
       act(kind === 'number' ? 'number-add' : 'role-add', { userId, role: 'rhm' }).catch(() => {})
     }

@@ -4,7 +4,7 @@
  *
  * This does not read the code and assume it works. It boots the real dashboard
  * router, logs in over HTTP, and then:
- *   1. checks the HTML really contains 12 separate screens and a dock
+ *   1. checks the HTML really contains 12 separate screens and a side panel
  *   2. checks every `data-act` in admin.js has a handler in admin.js
  *   3. calls EVERY admin action endpoint and asserts a real response
  *   4. calls the commands endpoint the help screen depends on
@@ -81,9 +81,19 @@ async function main () {
   ok(`12 separate screens present (${screens.length})`, screens.length === 12, screens.join(','))
   for (const s of expected) ok(`screen "${s}" exists`, screens.includes(s))
 
-  const dockButtons = [...html.matchAll(/data-goto="([a-z]+)"/g)].map(m => m[1])
-  ok(`dock has ${dockButtons.length} buttons`, dockButtons.length === 12, dockButtons.join(','))
-  ok('every screen has a dock button', expected.every(s => dockButtons.includes(s)))
+  /* Navigation is a slide-out side panel, not a row of icons. */
+  const navButtons = [...html.matchAll(/data-goto="([a-z]+)"/g)].map(m => m[1])
+  ok(`side panel lists ${navButtons.length} entries`, navButtons.length === 12, navButtons.join(','))
+  ok('every screen has a side-panel entry', expected.every(s => navButtons.includes(s)))
+  ok('side panel element exists', /<aside[^>]+id="sidePanel"/.test(html))
+  ok('side panel is a slide-out (transform, not a static row)', /side-panel\{[^}]*transform:translateX/.test(fs.readFileSync(path.join(ROOT, 'public', 'dashboard.css'), 'utf8')))
+  ok('one menu control opens it', /id="menuBtn"/.test(html) && /aria-controls="sidePanel"/.test(html))
+  ok('no bottom dock remains', !/class="dock"/.test(html) && !/\.dock\{/.test(fs.readFileSync(path.join(ROOT, 'public', 'dashboard.css'), 'utf8')))
+  ok('panel rows carry an icon and a label', (html.match(/<span class="ico"/g) || []).length === 12 && (html.match(/<span class="lbl"/g) || []).length === 12)
+  ok('panel marks the current screen', /aria-current|class="active"/.test(html))
+  ok('panel closes on Escape', fs.readFileSync(path.join(ROOT, 'public', 'dashboard.js'), 'utf8').includes("e.key === 'Escape'"))
+  ok('panel traps Tab focus', fs.readFileSync(path.join(ROOT, 'public', 'dashboard.js'), 'utf8').includes("e.key !== 'Tab'"))
+  ok('selecting an entry closes the panel', fs.readFileSync(path.join(ROOT, 'public', 'dashboard.js'), 'utf8').includes('closePanel({ restoreFocus: false })'))
   ok('only one screen starts active', (html.match(/class="screen active"/g) || []).length === 1)
   ok('no single long scroll: sections are siblings, not nested', !/data-screen="pairing"[\s\S]{0,4000}data-screen="groups"[\s\S]{0,200}data-screen="players"/.test(html) || true)
 

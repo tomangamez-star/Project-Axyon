@@ -27,7 +27,7 @@ const { createInstanceLease } = require('./instance-lease')
 const { createAxyon } = require('./axyon-rpg')
 const { createCommands } = require('./axyon-commands')
 const { resolveMessageUserId } = require('./identity')
-const { shouldHandleUpsert, resolveButtonId, ReplyRateLimiter } = require('./message-guard')
+const { shouldHandleUpsert, resolveButtonId, isCommandText, ReplyRateLimiter } = require('./message-guard')
 const accountConfig = require('./account-config')
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
@@ -331,14 +331,26 @@ class WhatsAppConnection {
     this.seen.set(id, Date.now())
     if (this.seen.size > 2000) this.seen.clear()
 
-    const limit = this.replyLimiter.check(m)
-    if (!limit.allowed) {
-      if (limit.warn) {
-        await sock.sendMessage(jid, {
-          text: `\ud83e\udd2b *EASY THERE*\n\nThree commands came in too quickly. Architect is ignoring you for ${Math.ceil(limit.durationMs / 1000)} seconds.`
-        }, { quoted: m }).catch(() => {})
+    /*
+     * FLOOD CONTROL
+     * -------------
+     * Only a COMMAND is rate-limited. Ordinary conversation is never counted,
+     * the bot's own messages are never counted, and the bucket is per chat +
+     * per sender (see ReplyRateLimiter). The warning is emitted once per mute
+     * window, not on every suppressed message.
+     */
+    const isCommand = isCommandText(content, prefix)
+    if (isCommand) {
+      const limit = this.replyLimiter.check(m)
+      if (!limit.allowed) {
+        if (limit.warn) {
+          await sock.sendMessage(jid, {
+            text: `\ud83e\udd2b *EASY THERE*\n\nThat is a lot of commands at once. Architect is pausing you here for ${Math.ceil(limit.durationMs / 1000)} seconds.`
+          }, { quoted: m }).catch(() => {})
+        }
+        return
       }
-      return
+      if (this.replyLimiter.users.size > 500) this.replyLimiter.prune()
     }
 
     const button = resolveButtonId(content)

@@ -73,22 +73,22 @@ test('unknown append messages remain ignored', () => {
   assert.equal(shouldHandleUpsert({ conversation: 'ordinary message' }, { fromMe: false, type: 'append', prefix: '!' }), false)
 })
 
-test('rate limiter allows three then mutes', () => {
+test('rate limiter allows a normal burst then mutes', () => {
+  /* The allowance is 6 in 10 s: above ordinary conversation, below a flood.
+     The old contract (3 in 5 s) is what made the warning fire on normal chat. */
   const rl = new ReplyRateLimiter()
   const m = { key: { remoteJid: '2348000000001@s.whatsapp.net' } }
-  assert.equal(rl.check(m).allowed, true)
-  assert.equal(rl.check(m).allowed, true)
-  assert.equal(rl.check(m).allowed, true)
-  const fourth = rl.check(m)
-  assert.equal(fourth.allowed, false)
-  assert.equal(fourth.warn, true)
+  for (let i = 0; i < 6; i++) assert.equal(rl.check(m).allowed, true, `message ${i + 1} of 6`)
+  const seventh = rl.check(m)
+  assert.equal(seventh.allowed, false)
+  assert.equal(seventh.warn, true)
 })
 
 test('rate limiter is per sender', () => {
   const rl = new ReplyRateLimiter()
   const a = { key: { remoteJid: '2348000000001@s.whatsapp.net' } }
   const b = { key: { remoteJid: '2348000000002@s.whatsapp.net' } }
-  rl.check(a); rl.check(a); rl.check(a)
+  for (let i = 0; i < 7; i++) rl.check(a)
   assert.equal(rl.check(a).allowed, false)
   assert.equal(rl.check(b).allowed, true)
 })

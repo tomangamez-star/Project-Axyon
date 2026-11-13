@@ -20,15 +20,65 @@ function createDashboard({sessions,database,lease,logger}){
  function prune(){const now=Date.now();for(const[token,s]of webSessions)if(s.expiresAt<=now)webSessions.delete(token);for(const[ip,s]of failures)if(now-s.startedAt>10*60*1000)failures.delete(ip)}
  function session(req){prune();const token=cookies(req).architect_session,s=webSessions.get(token);return s&&s.expiresAt>Date.now()?s:null}
  function requireAuth(req,res,csrf=false){const s=session(req);if(!s){json(res,401,{ok:false,error:'Sign in required'});return null}if(csrf&&!safeEqual(req.headers['x-architect-csrf'],s.csrf)){json(res,403,{ok:false,error:'Security token mismatch. Refresh the dashboard.'});return null}return s}
- async function asset(res,name){const file=path.join(PUBLIC,name);try{const data=await fs.readFile(file);res.writeHead(200,{'content-type':MIME[path.extname(name)]||'application/octet-stream','cache-control':name.endsWith('.html')?'no-store':'public, max-age=3600','x-content-type-options':'nosniff'});res.end(data)}catch{res.writeHead(404).end('Not found')}}
+ /*
+  * THE PAGE
+  * --------
+  * The HTML is rendered with a content hash appended to every asset URL
+  * (`/dashboard/app.js?v=ab12cd`). A deploy therefore changes the URL, so a
+  * browser that cached the previous build cannot keep serving it. This is the
+  * belt to the ETag's braces: the ETag handles revalidation, the hash handles
+  * a cache entry that was stored under the old `max-age` policy.
+  */
+ async function page(req,res){
+  try{
+   let html=await fs.readFile(path.join(PUBLIC,'dashboard.html'),'utf8')
+   /* The URL name and the file name differ for the two main assets
+      (/dashboard/app.js -> dashboard.js), so map them the same way the
+      routes below do. */
+   const FILES={'app.js':'dashboard.js','app.css':'dashboard.css','admin.js':'admin.js','admin.css':'admin.css','controls.css':'controls.css'}
+   const names=[...new Set([...html.matchAll(/\/dashboard\/([a-z]+\.(?:js|css))/g)].map(m=>m[1]))]
+   for(const name of names){
+    const file=FILES[name]||name
+    const data=await fs.readFile(path.join(PUBLIC,file))
+    const v=crypto.createHash('sha1').update(data).digest('hex').slice(0,10)
+    html=html.split(`/dashboard/${name}`).join(`/dashboard/${name}?v=${v}`)
+   }
+   res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'})
+   res.end(html)
+  }catch{res.writeHead(404).end('Not found')}
+ }
+
+ /*
+  * STATIC ASSETS
+  * -------------
+  * These used to be served with `public, max-age=3600` and no validator. After
+  * a deploy the browser kept the OLD dashboard.js and admin.js for up to an
+  * hour, so a fixed button still looked dead and a redesigned screen still
+  * looked like the previous one. That is a large part of why the same
+  * complaints kept coming back after each push.
+  *
+  * Now every asset carries a strong ETag derived from its bytes and is served
+  * `no-cache, must-revalidate`: the browser revalidates on each load and gets a
+  * cheap 304 when nothing changed, and the new file the moment it does.
+  */
+ async function asset(req,res,name){
+  const file=path.join(PUBLIC,name)
+  try{
+   const data=await fs.readFile(file)
+   const etag='"'+crypto.createHash('sha1').update(data).digest('base64url').slice(0,27)+'"'
+   const headers={'content-type':MIME[path.extname(name)]||'application/octet-stream','cache-control':'no-cache, must-revalidate','etag':etag,'x-content-type-options':'nosniff'}
+   if(String(req.headers['if-none-match']||'')===etag){res.writeHead(304,headers);res.end();return}
+   res.writeHead(200,headers);res.end(data)
+  }catch{res.writeHead(404).end('Not found')}
+ }
  async function stats(){const d=database();if(!d)return{database:false,registeredUsers:0};try{const q=await d.query('SELECT COUNT(*)::int AS registered_users FROM axyon_players');return{database:true,registeredUsers:q.rows[0]?.registered_users||0}}catch(e){logger.warn({err:e},'Architect dashboard stats failed');return{database:false,registeredUsers:0}}}
  async function handle(req,res){const url=new URL(req.url,'http://localhost');if(!url.pathname.startsWith('/dashboard'))return false;try{
-  if(req.method==='GET'&&['/dashboard','/dashboard/'].includes(url.pathname)){await asset(res,'dashboard.html');return true}
-  if(req.method==='GET'&&url.pathname==='/dashboard/app.css'){await asset(res,'dashboard.css');return true}
-  if(req.method==='GET'&&url.pathname==='/dashboard/controls.css'){await asset(res,'controls.css');return true}
-  if(req.method==='GET'&&url.pathname==='/dashboard/app.js'){await asset(res,'dashboard.js');return true}
-  if(req.method==='GET'&&url.pathname==='/dashboard/admin.js'){await asset(res,'admin.js');return true}
-  if(req.method==='GET'&&url.pathname==='/dashboard/admin.css'){await asset(res,'admin.css');return true}
+  if(req.method==='GET'&&['/dashboard','/dashboard/'].includes(url.pathname)){await page(req,res);return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/app.css'){await asset(req,res,'dashboard.css');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/controls.css'){await asset(req,res,'controls.css');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/app.js'){await asset(req,res,'dashboard.js');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/admin.js'){await asset(req,res,'admin.js');return true}
+  if(req.method==='GET'&&url.pathname==='/dashboard/admin.css'){await asset(req,res,'admin.css');return true}
   if(req.method==='GET'&&url.pathname==='/dashboard/api/admin'){const s=requireAuth(req,res);if(!s)return true;json(res,200,{ok:true,csrf:s.csrf,...await axyonAdmin.snapshot()});return true}
   if(req.method==='POST'&&url.pathname==='/dashboard/api/admin/action'){if(!requireAuth(req,res,true))return true;const input=await body(req,65536);const result=await axyonAdmin.act(String(input.action||''),input);json(res,result.ok?200:400,result);return true}
   if(req.method==='GET'&&url.pathname==='/dashboard/api/commands'){const s=requireAuth(req,res);if(!s)return true;json(res,200,{ok:true,commands:commandIndex});return true}
