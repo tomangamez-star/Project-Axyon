@@ -204,3 +204,32 @@ test('the Dockerfile installs the same three tools', () => {
   assert.match(df, /yt-dlp_linux/)
   assert.match(df, /ffprobe -version/)
 })
+
+test('music: the committed cookie jar is never handed to yt-dlp directly', () => {
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  /*
+   * yt-dlp writes the jar back at the end of a run. Pointed at the committed
+   * file that mutates the repo on every !play and lets two concurrent plays
+   * truncate each other. Every call must go through the per-run copy.
+   */
+  assert.match(src, /async function cookieJarFor/, 'the per-run copy helper must exist')
+  assert.match(src, /fs\.copyFile\(jar, copy\)/, 'the jar must be copied, not used in place')
+  /* The download loop must pass a work dir, so the copy lands in the temp dir. */
+  assert.match(src, /youtubeArgs\(client, sub\)/, 'every ladder rung must get its own jar copy')
+  assert.match(src, /youtubeArgs\(PLAYER_CLIENTS\[0\], scratch\)/, 'the search must get its own jar copy')
+})
+
+test('music: an age-restricted video is named as such, not as a generic failure', () => {
+  assert.strictEqual(music.ytFailureReason('ERROR: [youtube] x: Sign in to confirm your age. This video may be inappropriate for some users.'), 'age')
+  assert.strictEqual(music.ytFailureReason('Sorry, this content is age-restricted'), 'age')
+  assert.strictEqual(music.ytFailureReason('Sign in to confirm you\u2019re not a bot'), 'botcheck')
+  assert.strictEqual(music.ytFailureReason('Private video. Sign in if you have been granted access'), 'restricted')
+  assert.strictEqual(music.ytFailureReason('Requested format is not available'), 'format')
+  assert.strictEqual(music.ytFailureReason(''), null)
+  assert.strictEqual(music.ytFailureReason('some unrelated explosion'), null)
+
+  /* The user-facing sentence must explain the cause and the fix. */
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  assert.match(src, /age-restricted, so YouTube will only serve it to a signed-in account/)
+  assert.match(src, /reason: ytReason \|\| 'download-failed'/)
+})

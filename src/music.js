@@ -140,10 +140,45 @@ function hasJsRuntime () {
   return false
 }
 
-/** The yt-dlp flags that make a datacenter request look like a real browser. */
-function youtubeArgs (client = PLAYER_CLIENTS[0]) {
-  const args = []
+/**
+ * yt-dlp REWRITES the cookie jar it is given.
+ * ------------------------------------------
+ * At the end of a run it saves the jar back, refreshing rotated cookies and
+ * adding anything YouTube set (SIDCC, __Secure-1PSIDTS, YSC, ...). Pointed at
+ * `data/cookies.txt` in the repo that is a real defect:
+ *
+ *   - it mutates a committed file on every single `!play`, so the working tree
+ *     goes dirty and a deploy can pick up a rotated jar nobody reviewed;
+ *   - two `!play` commands at once write the same file concurrently and can
+ *     truncate it, after which EVERY play fails with a cookie error;
+ *   - on a read-only buildroot install the writeback itself can fail the run.
+ *
+ * So yt-dlp is never handed the original. Each run gets a private copy of the
+ * jar in the run's own temp directory, and the original stays untouched.
+ * `--sleep-requests` is not enough; the copy is what makes it safe.
+ */
+async function cookieJarFor (workDir) {
   const jar = cookiesPath()
+  if (!jar) return null
+  try {
+    const copy = path.join(workDir, 'cookies.txt')
+    await fs.copyFile(jar, copy)
+    return copy
+  } catch {
+    /* A copy we cannot make is better than no cookies at all. */
+    return jar
+  }
+}
+
+/**
+ * The yt-dlp flags that make a datacenter request look like a real browser.
+ *
+ * `jar` is the per-run writable copy from `cookieJarFor()`; every caller passes
+ * one so the committed file is never modified.
+ */
+async function youtubeArgs (client = PLAYER_CLIENTS[0], workDir = null) {
+  const args = []
+  const jar = workDir ? await cookieJarFor(workDir) : cookiesPath()
   if (jar) args.push('--cookies', jar)
   if (hasJsRuntime()) args.push('--js-runtimes', JS_RUNTIME)
   args.push('--extractor-args', `youtube:player_client=${client}`)
@@ -216,14 +251,17 @@ async function ytSearch (query) {
 
   /* The search itself is also blocked without cookies on a datacenter IP, so
    * the same browser-like flags are passed here too — not only on the
-   * download. */
-  const searchArgs = ['--flat-playlist', '--no-warnings', '--quiet', ...youtubeArgs()]
+   * download. It gets its own throwaway dir purely to hold the cookie copy. */
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'axyon-search-'))
+  const searchArgs = ['--flat-playlist', '--no-warnings', '--quiet', ...(await youtubeArgs(PLAYER_CLIENTS[0], scratch))]
   searchArgs.push('-J', `ytsearch1:${q}`)
 
   let raw
   try {
     raw = await run(bin, searchArgs, SEARCH_TIMEOUT_MS)
-  } catch { return null }
+  } catch { return null } finally {
+    await fs.rm(scratch, { recursive: true, force: true }).catch(() => {})
+  }
 
   let j
   try { j = JSON.parse(raw) } catch { return null }
@@ -290,12 +328,19 @@ async function downloadYt (video, dir, { ffmpeg }) {
       await fs.mkdir(sub, { recursive: true })
       const target = path.join(sub, 'track')
 
+      /*
+       * The cookie jar goes on EVERY rung, not just the first. An
+       * age-restricted video is rejected by the muxed rung exactly like the
+       * audio-only one, so a rung without `--cookies` is a rung that cannot
+       * succeed at all. Each rung also gets its own copy in `sub`, so the
+       * writeback lands in the throwaway dir.
+       */
       const args = [
         '--no-playlist', '--no-warnings', '--quiet',
         '--max-filesize', String(MAX_BYTES),
         '--retries', '3', '--socket-timeout', '20',
         '-o', `${target}.%(ext)s`,
-        ...youtubeArgs(client)
+        ...(await youtubeArgs(client, sub))
       ]
       if (!cookiesPath() && process.env.YTDLP_COOKIES_FROM_BROWSER) {
         args.push('--cookies-from-browser', process.env.YTDLP_COOKIES_FROM_BROWSER)
@@ -341,12 +386,51 @@ async function downloadYt (video, dir, { ffmpeg }) {
     }
   }
 
+  /*
+   * Classify the failure BEFORE it is worded for the user. `attempts` holds the
+   * last line of each rung's stderr, so the join is what we search.
+   */
+  const last = attempts.length ? attempts[attempts.length - 1] : ''
+  const all = attempts.join(' ')
+  const reason = ytFailureReason(all)
+
   return {
     file: null,
     step: ffmpeg ? 'download+transcode (ffmpeg)' : 'download',
-    error: attempts.length ? attempts[attempts.length - 1] : 'every download attempt failed',
-    attempts
+    error: last || 'every download attempt failed',
+    attempts,
+    reason
   }
+}
+
+/**
+ * Names the real cause of a failed download, because yt-dlp's own last line is
+ * usually the least useful one.
+ *
+ * Without this every failure reads "could not download the full audio", which
+ * is true and tells nobody what to do. The distinctions that matter:
+ *
+ *   age        the video is age-restricted. Only a signed-in jar fixes it —
+ *              no retry, client or format helps, so saying "download failed"
+ *              sends the operator looking in the wrong place.
+ *   login      the jar is missing, expired or not a signed-in account, so
+ *              YouTube is treating us as anonymous.
+ *   botcheck   the datacenter IP got "confirm you're not a bot" anyway.
+ *   restricted private / removed / region-blocked / members-only video.
+ *   format     the video exists but exposes no downloadable stream.
+ *
+ * @returns {'age'|'login'|'botcheck'|'restricted'|'format'|null}
+ */
+function ytFailureReason (text) {
+  const s = String(text || '').toLowerCase()
+  if (!s) return null
+  /* "Sign in to confirm your age" / "age-restricted" / "inappropriate". */
+  if (/confirm your age|age[- ]restricted|inappropriate for some users|agegate|age gate/.test(s)) return 'age'
+  if (/private video|members[- ]only|join this channel|removed by the uploader|no longer available|not available in your country|geo[- ]?restrict/.test(s)) return 'restricted'
+  if (/sign in to confirm you['\u2019]?re not a bot|confirm you['\u2019]?re not a bot|too many requests|http error 429/.test(s)) return 'botcheck'
+  if (/login required|cookies are no longer valid|the provided cookies|cookie.*expired|account.*terminated/.test(s)) return 'login'
+  if (/requested format is not available|no video formats|only images are available/.test(s)) return 'format'
+  return null
 }
 
 /**
@@ -502,6 +586,7 @@ async function resolve (query, { logger } = {}) {
     let source = ''
     let ytError = null
     let ytStep = null
+    let ytReason = null
 
     /* 1. yt-dlp — the normal path, and the one that returns the whole song. */
     if (yt) {
@@ -512,7 +597,8 @@ async function resolve (query, { logger } = {}) {
       } else {
         ytError = r.error
         ytStep = r.step
-        logger?.warn?.({ step: r.step, err: r.error }, 'yt-dlp download failed; trying Audius')
+        ytReason = r.reason || null
+        logger?.warn?.({ step: r.step, err: r.error, reason: ytReason }, 'yt-dlp download failed; trying Audius')
       }
     }
 
@@ -552,6 +638,23 @@ async function resolve (query, { logger } = {}) {
       const parts = []
       if (!binaries.has('yt-dlp')) {
         parts.push(`yt-dlp is not installed. ${INSTALL_HINT}`)
+      } else if (ytReason === 'age') {
+        /*
+         * Age-restricted is not a download glitch and must not be reported as
+         * one. It is a login problem: YouTube will only serve the stream to a
+         * signed-in account, so no retry, client or format fixes it. Saying
+         * "could not download" sends the operator looking in the wrong place,
+         * so this message names the cause and the actual fix.
+         */
+        parts.push('This video is age-restricted, so YouTube will only serve it to a signed-in account — it needs a logged-in cookie jar in data/cookies.txt.')
+      } else if (ytReason === 'login') {
+        parts.push('YouTube is treating this bot as signed out: the cookies in data/cookies.txt are missing, expired, or not from a logged-in account. Refresh that file with a signed-in session.')
+      } else if (ytReason === 'botcheck') {
+        parts.push('YouTube is still asking this server to confirm it is not a bot — the cookies in data/cookies.txt are likely stale or were signed out.')
+      } else if (ytReason === 'restricted') {
+        parts.push('That video is private, members-only, removed or region-blocked, so it cannot be downloaded.')
+      } else if (ytReason === 'format') {
+        parts.push('That video exposes no downloadable audio stream to this client.')
       } else if (ytError) {
         parts.push(`yt-dlp ${ytStep || 'download'} failed: ${ytError}`)
       }
@@ -561,7 +664,7 @@ async function resolve (query, { logger } = {}) {
 
       return {
         ok: false,
-        reason: 'download-failed',
+        reason: ytReason || 'download-failed',
         message: `Found the track but could not download the full audio. ${parts.join(' ')}`
       }
     }
@@ -639,5 +742,7 @@ module.exports = {
   probeSeconds,
   toolchain,
   cookiesPath,
-  youtubeArgs
+  cookieJarFor,
+  youtubeArgs,
+  ytFailureReason
 }
