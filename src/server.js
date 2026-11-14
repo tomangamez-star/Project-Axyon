@@ -32,6 +32,7 @@ const { shouldHandleUpsert, resolveButtonId, isCommandText, ReplyRateLimiter } =
 const accountConfig = require('./account-config')
 const store = require('./axyon-store')
 const cardSpawner = require('./card-spawn')
+const binaries = require('./binaries')
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 const port = Number(process.env.PORT || 3000)
@@ -619,6 +620,15 @@ const healthServer = http.createServer((q, r) => {
 
 async function main () {
   healthServer.listen(port, '0.0.0.0', () => logger.info({ port }, 'Architect health server listening'))
+  /*
+   * Report the play toolchain at startup. `!play` depends on three external
+   * programs that a managed host does not ship, and the old build failed at
+   * request time with a generic message. Logging them here means a deploy's
+   * logs answer "is yt-dlp installed?" without anyone needing shell access.
+   * Deliberately not awaited before the server listens: a slow version probe
+   * must never delay the health check.
+   */
+  void binaries.logStartup(logger).catch(e => logger.warn({ err: e?.message }, 'toolchain check failed'))
   const acquired = await lease.acquire(async () => { await sessions.stop() })
   if (!acquired) return
   await sessions.start()

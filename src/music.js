@@ -31,6 +31,15 @@
  * preview fallback any more — if a full track cannot be produced, `!play`
  * says so instead of quietly sending 30 seconds.
  *
+ * WHERE THE BINARIES COME FROM
+ * ----------------------------
+ * yt-dlp, ffmpeg and ffprobe are external programs, not npm packages. They are
+ * resolved through `./binaries`, which checks an env override, then the
+ * repo-local bundle at `.tools/bin` (populated by `render-build.sh` during the
+ * deploy), then PATH. Every failure below names the exact program that is
+ * missing and the exact step that failed, because the old build collapsed all
+ * of it into one sentence that told nobody anything.
+ *
  * FALLBACK ORDER
  * --------------
  *   1. yt-dlp (YouTube)      — the normal path, full track
@@ -44,7 +53,7 @@
 const fs = require('fs/promises')
 const os = require('os')
 const path = require('path')
-const { execFile } = require('child_process')
+const binaries = require('./binaries')
 
 const SEARCH_TIMEOUT_MS = 20000
 const DOWNLOAD_TIMEOUT_MS = 90000
@@ -56,17 +65,22 @@ const APP_NAME = 'AXYON'
 /* Audius rotates its discovery hosts; this one is the documented entry point. */
 const AUDIUS = 'https://api.audius.co'
 
+/* The install hint shown whenever a required program is absent. */
+const INSTALL_HINT = 'Run `bash render-build.sh` (or `npm run setup:tools`) on the host to install it.'
+
 function run (bin, args, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) return reject(Object.assign(err, { stderr: String(stderr || '') }))
-      resolve(String(stdout || ''))
-    })
-  })
+  return binaries.run(bin, args, timeoutMs)
 }
 
+/** True when the program is installed and executable. */
 async function hasBinary (bin) {
-  try { await run('which', [bin], 3000); return true } catch { return false }
+  return binaries.has(bin)
+}
+
+/** The last meaningful line of a tool's stderr, for a specific error message. */
+function tail (text, max = 180) {
+  const s = String(text || '').trim().split('\n').filter(Boolean).pop() || ''
+  return s.length > max ? `${s.slice(0, max)}…` : s
 }
 
 async function fetchJson (url, ms = SEARCH_TIMEOUT_MS) {
@@ -92,9 +106,12 @@ async function fetchJson (url, ms = SEARCH_TIMEOUT_MS) {
 async function ytSearch (query) {
   const q = String(query || '').trim()
   if (!q) return null
+  const bin = binaries.binPath('yt-dlp')
+  if (!bin) return null
+
   let raw
   try {
-    raw = await run('yt-dlp', [
+    raw = await run(bin, [
       '--flat-playlist', '--no-warnings', '--quiet',
       '-J', `ytsearch1:${q}`
     ], SEARCH_TIMEOUT_MS)
@@ -141,8 +158,15 @@ async function deezerMeta (query) {
  * ffmpeg, which is not guaranteed on every host — so when it is missing we ask
  * for the best native audio stream instead and let `mimeFor()` report the
  * truth. Either way the file is the WHOLE track, never a sample.
+ *
+ * @returns {Promise<{file:string|null, error?:string, step?:string}>}
  */
 async function downloadYt (video, dir, { ffmpeg }) {
+  const bin = binaries.binPath('yt-dlp')
+  if (!bin) {
+    return { file: null, step: 'download', error: 'yt-dlp is not installed on this host' }
+  }
+
   const target = path.join(dir, 'track')
   const args = [
     '--no-playlist', '--no-warnings', '--quiet',
@@ -168,16 +192,25 @@ async function downloadYt (video, dir, { ffmpeg }) {
   }
   args.push(video.url)
 
-  await run('yt-dlp', args, DOWNLOAD_TIMEOUT_MS)
+  try {
+    await run(bin, args, DOWNLOAD_TIMEOUT_MS)
+  } catch (e) {
+    /* Name the step and quote the tool, so the log says what actually broke. */
+    const why = tail(e?.stderr) || e?.message || 'unknown error'
+    return { file: null, step: ffmpeg ? 'download+transcode (ffmpeg)' : 'download', error: why }
+  }
 
   const files = await fs.readdir(dir)
   const audio = files.find(f => /^track\.(mp3|m4a|webm|opus|ogg|aac|wav)$/i.test(f))
-  if (!audio) return null
+  if (!audio) {
+    return { file: null, step: 'download', error: 'yt-dlp exited without producing an audio file' }
+  }
 
   const full = path.join(dir, audio)
   const st = await fs.stat(full)
-  if (!st.size || st.size > MAX_BYTES) return null
-  return full
+  if (!st.size) return { file: null, step: 'download', error: 'downloaded file was empty' }
+  if (st.size > MAX_BYTES) return { file: null, step: 'download', error: 'downloaded file exceeded the size cap' }
+  return { file: full }
 }
 
 /**
@@ -276,19 +309,33 @@ function mmss (sec) {
 /**
  * Resolves a query to a playable FULL track.
  *
- * @returns {Promise<{ok:boolean, track?:object, file?:string, full?:boolean, source?:string, message?:string}>}
+ * @returns {Promise<{ok:boolean, track?:object, file?:string, full?:boolean, source?:string, message?:string, reason?:string}>}
  */
 async function resolve (query, { logger } = {}) {
   const q = String(query || '').trim()
-  if (!q) return { ok: false, message: 'No song found for that search.' }
+  if (!q) return { ok: false, reason: 'empty-query', message: 'No song found for that search.' }
 
-  const [meta, yt, ffmpeg] = await Promise.all([
+  const [meta, yt, ffmpeg, ffprobe] = await Promise.all([
     deezerMeta(q).catch(() => null),
     hasBinary('yt-dlp').then(ok => (ok ? ytSearch(q).catch(() => null) : null)),
-    hasBinary('ffmpeg')
+    hasBinary('ffmpeg'),
+    hasBinary('ffprobe')
   ])
 
-  if (!meta && !yt) return { ok: false, message: 'No song found for that search.' }
+  if (!meta && !yt) {
+    /*
+     * Distinguish "the search found nothing" from "the searcher is not
+     * installed" — they need completely different fixes.
+     */
+    if (!binaries.has('yt-dlp')) {
+      return {
+        ok: false,
+        reason: 'missing-ytdlp',
+        message: `yt-dlp is not installed on this host, so the full-song search cannot run. ${INSTALL_HINT}`
+      }
+    }
+    return { ok: false, reason: 'no-match', message: 'No song found for that search.' }
+  }
 
   /* Prefer the catalogue that actually has the audio, but keep the better
    * artwork and the real duration from Deezer when it has them. */
@@ -305,14 +352,19 @@ async function resolve (query, { logger } = {}) {
   try {
     let file = null
     let source = ''
+    let ytError = null
+    let ytStep = null
 
     /* 1. yt-dlp — the normal path, and the one that returns the whole song. */
     if (yt) {
-      try {
-        file = await downloadYt(yt, dir, { ffmpeg })
-        if (file) source = 'yt-dlp'
-      } catch (e) {
-        logger?.warn?.({ err: e?.message }, 'yt-dlp download failed; trying Audius')
+      const r = await downloadYt(yt, dir, { ffmpeg })
+      if (r.file) {
+        file = r.file
+        source = 'yt-dlp'
+      } else {
+        ytError = r.error
+        ytStep = r.step
+        logger?.warn?.({ step: r.step, err: r.error }, 'yt-dlp download failed; trying Audius')
       }
     }
 
@@ -331,7 +383,26 @@ async function resolve (query, { logger } = {}) {
 
     if (!file) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-      return { ok: false, message: 'Found the track but could not download the full audio.' }
+      /*
+       * The message names the failing step and the tool's own words. This is
+       * the sentence that used to be "could not download the full audio" and
+       * told nobody whether yt-dlp was missing, blocked, or out of disk.
+       */
+      const parts = []
+      if (!binaries.has('yt-dlp')) {
+        parts.push(`yt-dlp is not installed. ${INSTALL_HINT}`)
+      } else if (ytError) {
+        parts.push(`yt-dlp ${ytStep || 'download'} failed: ${ytError}`)
+      }
+      if (!ffmpeg) parts.push('ffmpeg is not installed, so MP3 conversion is unavailable.')
+      if (!ffprobe) parts.push('ffprobe is not installed, so the track length cannot be verified.')
+      parts.push('The Audius fallback had no full-length match either.')
+
+      return {
+        ok: false,
+        reason: 'download-failed',
+        message: `Found the track but could not download the full audio. ${parts.join(' ')}`
+      }
     }
 
     /*
@@ -341,7 +412,11 @@ async function resolve (query, { logger } = {}) {
     const seconds = await probeSeconds(file)
     if (seconds && seconds < MIN_FULL_SECONDS) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-      return { ok: false, message: 'Only a short clip was available for that track — no full song found.' }
+      return {
+        ok: false,
+        reason: 'too-short',
+        message: 'Only a short clip was available for that track — no full song found.'
+      }
     }
 
     /*
@@ -353,6 +428,7 @@ async function resolve (query, { logger } = {}) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
       return {
         ok: false,
+        reason: 'truncated',
         message: `Only ${mmss(seconds)} of a ${mmss(track.duration)} track was available — no full song found.`
       }
     }
@@ -363,14 +439,16 @@ async function resolve (query, { logger } = {}) {
   } catch (e) {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
     logger?.warn?.({ err: e?.message }, 'play resolve failed')
-    return { ok: false, message: 'Could not fetch that track right now.' }
+    return { ok: false, reason: 'exception', message: `Could not fetch that track right now (${e?.message || 'unknown error'}).` }
   }
 }
 
 /** Real duration of a downloaded file, via ffprobe. 0 when it cannot tell. */
 async function probeSeconds (file) {
+  const bin = binaries.binPath('ffprobe')
+  if (!bin) return 0
   try {
-    const out = await run('ffprobe', [
+    const out = await run(bin, [
       '-v', 'error', '-show_entries', 'format=duration',
       '-of', 'default=noprint_wrappers=1:nokey=1', file
     ], 10000)
@@ -380,6 +458,11 @@ async function probeSeconds (file) {
 
 async function cleanup (dir) {
   if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+}
+
+/** The toolchain report, re-exported so the dashboard/health route can show it. */
+function toolchain () {
+  return binaries.describe()
 }
 
 module.exports = {
@@ -392,5 +475,6 @@ module.exports = {
   hasBinary,
   mimeFor,
   fileNameFor,
-  probeSeconds
+  probeSeconds,
+  toolchain
 }

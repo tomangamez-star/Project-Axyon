@@ -1,5 +1,7 @@
 node_modules/
 .env
+# Installed by render-build.sh at deploy time — never committed.
+.tools/
 session/
 sessions/
 npm-debug.log*

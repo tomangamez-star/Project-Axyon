@@ -801,6 +801,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       await sock.sendMessage(ctx.jid, {
         audio: buf,
         mimetype: music.mimeFor(r.file),
+        /* The song title is the file name the recipient sees and saves. */
+        fileName: music.fileNameFor(t.title, r.file),
         ptt: false
       }, { quoted: m })
       /*
