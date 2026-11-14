@@ -11,8 +11,6 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22.18.0
-      - key: DASHBOARD_PASSWORD
-        sync: false
       - key: DATABASE_URL
         sync: false
       - key: WA_SESSION_ID

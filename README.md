@@ -57,7 +57,25 @@ Switching to PLAYER mode does **not** remove AXYON's management authority. Extra
 
 ## Admin panel
 
-Open `/dashboard`, sign in with `DASHBOARD_PASSWORD`, and the panel appears below the pairing controls. It reuses the dashboard's password session and CSRF protection; every write is audit-logged.
+Open `/dashboard` and sign in with your **WhatsApp number**. AXYON sends a 7- or 8-digit code to that number privately; type it on the dashboard and you are in. There is no shared password any more — control of the number *is* the credential, so a code can be revoked per person and every level is distinguishable.
+
+### Authority levels
+
+| Level | Who | Can do |
+|---|---|---|
+| **admin** | The owner, `OWNER_NUMBERS`, and every number in `AXYON_NUMBERS` | Everything: pairing, sessions, economy, authority, settings |
+| **rhm** | Numbers granted RHM (`!rhm add`) | Moderate groups, players, stages, floors, modes, visuals, audit log, feedback |
+| **guest** | Any other number | Read-only game content: stages, floors, modes, shop catalogue, command list |
+
+A guest never sees a phone number, a session, a player record, an authority list or the audit log. The permission table lives in `src/access.js`; every route names the permission it needs, so adding a level is one table edit.
+
+### Sessions survive app switching
+
+The session token is kept in `localStorage` as well as an HttpOnly cookie, and the screen you were on is remembered. Switching apps on a phone suspends the page rather than ending the session, so returning re-validates silently and puts you back where you were instead of showing the login screen again.
+
+### Feedback
+
+`/dashboard#feedback` (and `!feedback <message>` on WhatsApp) lets anyone message AXYON **without signing in**. The thread id is a random value the browser makes per tab and discards when the tab closes, so nothing identifies the sender. Staff with `feedback.read` see every conversation in the inbox and can reply.
 
 | Tab | What it does |
 |---|---|
@@ -70,19 +88,33 @@ Open `/dashboard`, sign in with `DASHBOARD_PASSWORD`, and the panel appears belo
 | **Authority** | Grant or revoke AXYON numbers and RHM roles |
 | **Settings** | Prefix, daily XP/Zen limits, party bounds, combat allowances, group gating, duel auto-promote |
 | **Audit log** | Every management action, with actor and target |
+| **Feedback** | Anonymous conversations, with replies |
 
 Failures surface in a persistent banner as well as a toast — a button never fails silently.
+
+## Music (`!play`)
+
+`!play <song>` searches YouTube, shows the cover, and sends the **full track** as `audio/mpeg` named after the song.
+
+YouTube refuses anonymous requests from datacenter IPs with *"Sign in to confirm you're not a bot"*. Three things are needed, and all three are wired in `src/music.js`:
+
+1. **Cookies** — `data/cookies.txt` is committed (the repo is private). Override with `YTDLP_COOKIES_FILE` if you ever need to rotate it.
+2. **A JavaScript runtime** — yt-dlp must solve YouTube's player challenge or it reports *"Only images are available for download"*. **Deno** is installed by `render-build.sh` and the `Dockerfile`; Node 20 is reported as unsupported by the solver.
+3. **The `mweb` player client** — the default `web` client returns formats that 403 on the media fetch.
+
+If YouTube still refuses, the Audius fallback serves full tracks. A missing Deno is reported honestly rather than silently degrading.
 
 ## Environment
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | Postgres. Required for the RPG and for session persistence. |
-| `DASHBOARD_PASSWORD` | Dashboard sign-in. Without it the dashboard refuses to log anyone in. |
+| `DATABASE_URL` | Postgres. Required for the RPG, dashboard login and feedback. |
 | `OWNER_NUMBERS` | Comma-separated phone numbers with AXYON authority. |
 | `PORT` | HTTP port (default `3000`). |
 | `WA_SESSION_ID` | Primary session id (default `architect-primary`). |
 | `WA_MAX_SESSIONS` | Maximum paired accounts (default `5`). |
+| `DASHBOARD_SESSION_HOURS` | How long a dashboard login lasts (default `720`). |
+| `YTDLP_COOKIES_FILE` | Optional override for the committed YouTube cookie jar. |
 
 ## Development
 
@@ -98,7 +130,6 @@ npm test          # unit tests
 
 ```bash
 DATABASE_URL=postgres://postgres@localhost:5432/axyon_test \
-DASHBOARD_PASSWORD=test-pass \
 node tools/e2e.js
 ```
 

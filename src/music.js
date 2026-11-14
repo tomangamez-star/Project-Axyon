@@ -58,6 +58,88 @@ const binaries = require('./binaries')
 const SEARCH_TIMEOUT_MS = 20000
 const DOWNLOAD_TIMEOUT_MS = 90000
 const MAX_BYTES = 16 * 1024 * 1024
+
+/*
+ * YOUTUBE COOKIES — WHY THEY ARE IN THE REPO
+ * ------------------------------------------
+ * YouTube answers a datacenter IP with "Sign in to confirm you're not a bot"
+ * and refuses to serve the stream. That is not a bug in this code: it is
+ * YouTube refusing an anonymous request from a cloud host. The only reliable
+ * fix is to make the request look like a signed-in browser, which means
+ * sending a real account's cookies.
+ *
+ * The repo is private, so the operator chose to commit the cookie jar rather
+ * than require an env var on every deploy. The order below still lets an
+ * operator override it without a code change:
+ *
+ *   1. YTDLP_COOKIES_FILE   — an explicit path (env)
+ *   2. data/cookies.txt     — the committed jar (this is the normal path)
+ *   3. YTDLP_COOKIES_FROM_BROWSER — a local browser profile, dev machines only
+ *
+ * A missing jar is not fatal: yt-dlp simply runs without cookies and the
+ * Audius fallback still serves full tracks.
+ */
+const COOKIES_FILE = path.join(__dirname, '..', 'data', 'cookies.txt')
+
+/*
+ * THE JS RUNTIME AND THE PLAYER CLIENT — WHY BOTH ARE NEEDED
+ * ---------------------------------------------------------
+ * Cookies alone get past "Sign in to confirm you're not a bot", but YouTube
+ * then serves a player that requires a JavaScript challenge to be solved
+ * before any audio format is exposed. Without a solver yt-dlp reports
+ * "Only images are available for download" and the download fails.
+ *
+ *   --js-runtimes deno   yt-dlp's EJS challenge solver. Deno is the runtime it
+ *                        supports natively; Node 20 is reported as
+ *                        "unsupported" and cannot solve the challenge.
+ *   player_client=mweb   the client that actually returns a downloadable
+ *                        audio stream with these cookies. The default `web`
+ *                        client returns formats that 403 on the media fetch.
+ *
+ * Both are passed on every yt-dlp call. If Deno is absent the flags are
+ * omitted rather than passed as a broken value, so the error stays honest.
+ */
+const JS_RUNTIME = 'deno'
+const PLAYER_CLIENT = 'mweb'
+
+/** True when the challenge solver runtime is available (bundle or PATH). */
+function hasJsRuntime () {
+  const bundled = path.join(binaries.TOOLS_DIR, JS_RUNTIME)
+  try {
+    if (require('fs').statSync(bundled).isFile()) return true
+  } catch { /* fall through to PATH */ }
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+  for (const dir of dirs) {
+    try {
+      if (require('fs').statSync(path.join(dir, JS_RUNTIME)).isFile()) return true
+    } catch { /* keep looking */ }
+  }
+  return false
+}
+
+/** The yt-dlp flags that make a datacenter request look like a real browser. */
+function youtubeArgs () {
+  const args = []
+  const jar = cookiesPath()
+  if (jar) args.push('--cookies', jar)
+  if (hasJsRuntime()) args.push('--js-runtimes', JS_RUNTIME)
+  args.push('--extractor-args', `youtube:player_client=${PLAYER_CLIENT}`)
+  return args
+}
+
+/** The cookie jar to hand yt-dlp, or null when none is available. */
+function cookiesPath () {
+  const explicit = String(process.env.YTDLP_COOKIES_FILE || '').trim()
+  if (explicit) {
+    try {
+      if (require('fs').statSync(explicit).isFile()) return explicit
+    } catch { /* fall through to the committed jar */ }
+  }
+  try {
+    if (require('fs').statSync(COOKIES_FILE).isFile()) return COOKIES_FILE
+  } catch { /* no jar committed */ }
+  return null
+}
 /* Anything under this is a snippet, an intro or a preview — never a song. */
 const MIN_FULL_SECONDS = 60
 const APP_NAME = 'AXYON'
@@ -109,12 +191,15 @@ async function ytSearch (query) {
   const bin = binaries.binPath('yt-dlp')
   if (!bin) return null
 
+  /* The search itself is also blocked without cookies on a datacenter IP, so
+   * the same browser-like flags are passed here too — not only on the
+   * download. */
+  const searchArgs = ['--flat-playlist', '--no-warnings', '--quiet', ...youtubeArgs()]
+  searchArgs.push('-J', `ytsearch1:${q}`)
+
   let raw
   try {
-    raw = await run(bin, [
-      '--flat-playlist', '--no-warnings', '--quiet',
-      '-J', `ytsearch1:${q}`
-    ], SEARCH_TIMEOUT_MS)
+    raw = await run(bin, searchArgs, SEARCH_TIMEOUT_MS)
   } catch { return null }
 
   let j
@@ -176,12 +261,12 @@ async function downloadYt (video, dir, { ffmpeg }) {
 
   /*
    * YouTube answers "Sign in to confirm you're not a bot" to datacenter IPs.
-   * A real deployment can pass cookies and the block goes away, so both forms
-   * are honoured when the operator sets them. Neither is required.
+   * The committed jar (data/cookies.txt) plus the challenge solver and the
+   * mweb client are what make the request look like a real browser and expose
+   * a downloadable audio stream. See youtubeArgs() above.
    */
-  if (process.env.YTDLP_COOKIES_FILE) {
-    args.push('--cookies', process.env.YTDLP_COOKIES_FILE)
-  } else if (process.env.YTDLP_COOKIES_FROM_BROWSER) {
+  args.push(...youtubeArgs())
+  if (!cookiesPath() && process.env.YTDLP_COOKIES_FROM_BROWSER) {
     args.push('--cookies-from-browser', process.env.YTDLP_COOKIES_FROM_BROWSER)
   }
 
@@ -476,5 +561,7 @@ module.exports = {
   mimeFor,
   fileNameFor,
   probeSeconds,
-  toolchain
+  toolchain,
+  cookiesPath,
+  youtubeArgs
 }

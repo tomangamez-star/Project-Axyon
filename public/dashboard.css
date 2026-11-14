@@ -151,3 +151,28 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;bac
 @media(max-width:400px){
  .stats strong{font-size:17px}
 }
+
+/* ============================ LOGIN (code) ============================ */
+.login-step{display:grid;gap:16px;margin-top:28px}
+.login-step.hidden{display:none}
+.login-foot{margin:22px 0 0;text-align:center}
+.link-btn{background:none;border:0;padding:0;color:var(--cyan,#00e5ff);font:inherit;font-size:.86rem;cursor:pointer;text-decoration:underline;text-underline-offset:3px;opacity:.85}
+.link-btn:hover{opacity:1}
+#codeSentTo{margin:0;font-size:.86rem}
+
+/* ============================= ROLE BADGE ============================= */
+.role-badge{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;font-size:.66rem;font-weight:700;letter-spacing:.12em;border:1px solid #176071;color:#8fe9ff;background:#0a1c25}
+.role-badge.role-admin{color:#ffd479;border-color:#6b5320;background:#1d1708}
+.role-badge.role-rhm{color:#9dffc4;border-color:#1d5c3a;background:#08190f}
+.role-badge.role-guest{color:#9fb4c4;border-color:#2a3d4a;background:#0b141a}
+
+/* ============================== FEEDBACK ============================== */
+.feedback-thread{display:flex;flex-direction:column;gap:10px;max-height:52vh;overflow-y:auto;padding:4px 2px 12px;margin-bottom:14px}
+.fb-msg{max-width:82%;padding:10px 13px;border-radius:14px;border:1px solid #176071;background:#0a1c25}
+.fb-msg p{margin:0 0 4px;font-size:.9rem;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.fb-msg small{font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;opacity:.55}
+.fb-user{align-self:flex-end;border-color:#1d5c3a;background:#08190f}
+.fb-staff{align-self:flex-start;border-color:#6b5320;background:#1d1708}
+.feedback-form{display:grid;gap:10px}
+.feedback-form textarea{width:100%;resize:vertical;min-height:74px;padding:12px;border-radius:12px;border:1px solid #176071;background:#050c12;color:inherit;font:inherit;font-size:.9rem}
+.feedback-form textarea:focus{outline:2px solid #00e5ff55;outline-offset:1px}

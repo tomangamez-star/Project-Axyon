@@ -10,6 +10,7 @@
  * always gets the same line and it never feels like a slot machine.
  */
 const T = require('./theme')
+const lore = require('./lore')
 
 const FIRST_LIGHT = [
   'The gate did not open for you. It noticed you.',
@@ -178,5 +179,8 @@ function groupNotRegistered (prefix, settings) {
 
 module.exports = {
   firstGreeting, returnGreeting, notRegistered, groupNotRegistered,
-  FIRST_LIGHT, RETURNING, RANK_LINE, pick, creatorsOf
+  FIRST_LIGHT, RETURNING, RANK_LINE, pick, creatorsOf,
+  /** AXYON's own voice, for when the bot arrives somewhere new. */
+  welcome: lore.welcome,
+  WELCOME: lore.WELCOME
 }

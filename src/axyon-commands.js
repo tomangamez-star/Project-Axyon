@@ -11,6 +11,7 @@
  */
 const store = require('./axyon-store')
 const greetings = require('./greetings')
+const lore = require('./lore')
 const T = require('./theme')
 const items = require('./axyon-items')
 const cardSpawner = require('./card-spawn')
@@ -35,7 +36,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'top'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'top', 'story', 'aura', 'feedback'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -118,6 +119,10 @@ function parseNum (v) {
 function createCommands ({ axyon, economy, logger, ai }) {
   const cmd = axyon.cmd
   const W = WATERMARK
+
+  /* How many stories each player has read, so `!story` walks the anthology
+   * instead of repeating. In memory on purpose: it is a reading position. */
+  const storyReads = new Map()
 
   /* ------------------------------------------------------------ authority */
 
@@ -410,6 +415,52 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   cmd('play', 'media', '{p}play <song>', 'Search a song, show its cover and send the audio.', async (s, m, ctx, args) => axyon.play(s, m, ctx, args))
 
+  /* ------------------------------------------------------------------ lore */
+
+  cmd('story', 'media', '{p}story', 'A short piece of the tower\u2019s history.', async (s, m, ctx) => {
+    /* Deterministic per player, so the anthology is walked rather than
+     * sampled — the same hunter gets a new story each time until it wraps.
+     * The counter is in memory: it is a reading position, not progress, and
+     * it must not appear in anyone's inventory. */
+    const n = storyReads.get(ctx.userId) || 0
+    storyReads.set(ctx.userId, n + 1)
+    if (storyReads.size > 5000) storyReads.clear()
+    const entry = lore.story(`${ctx.userId}:${n}`)
+    return axyon.send(s, ctx.jid, m, lore.storyCard(entry, ctx.prefix))
+  })
+
+  cmd('aura', 'media', '{p}aura', 'A line that reminds you who you are.', async (s, m, ctx) => {
+    return axyon.send(s, ctx.jid, m, lore.auraCard(lore.aura()))
+  })
+
+  /* -------------------------------------------------------------- feedback */
+
+  /**
+   * `!feedback <message>` — talk to AXYON without an account.
+   *
+   * The message is stored against a thread derived from the chat, so a reply
+   * can land in the same place, and nothing else about the sender is kept.
+   */
+  cmd('feedback', 'core', '{p}feedback <message>', 'Send AXYON a message. No account needed.', async (s, m, ctx, args) => {
+    const text = args.join(' ').trim()
+    if (!text) {
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '\ud83d\udcac *FEEDBACK*', '',
+        `Usage: ${T.b(`${ctx.prefix}feedback <message>`)}`,
+        '',
+        T.i('A bug, an idea, a complaint, a hello \u2014 all of it reaches AXYON.')
+      ].join('\n'))
+    }
+    const dashAuth = require('./dash-auth')
+    const thread = `wa-${String(ctx.jid).replace(/[^a-zA-Z0-9]/g, '').slice(-24)}`
+    const r = await dashAuth.addFeedback(thread, text).catch(() => ({ ok: false }))
+    if (!r.ok) return axyon.send(s, ctx.jid, m, `\u26a0\ufe0f Could not record that right now. Try again in a moment.`)
+    return axyon.send(s, ctx.jid, m, [
+      `${W}`, '', '\u2705 *MESSAGE RECEIVED*', '',
+      T.i('AXYON has it. No account, no name, no trace.')
+    ].join('\n'))
+  })
+
   /* ------------------------------------------------------------------- ai */
 
   /**
@@ -493,7 +544,19 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!name) { try { name = (await s.groupMetadata(ctx.jid))?.subject || '' } catch { name = '' } }
     const g = await store.registerGroup(ctx.jid, name, ctx.userId)
     await store.log(ctx.userId, 'register_group', ctx.jid, { name })
-    return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *GROUP REGISTERED*\n\n${name ? `*${g.name}*\n` : ''}Architect will now respond here.\n\nUnregistered groups stay silent, as designed.`)
+    /* AXYON's own welcome line, so arriving in a new group has a voice. */
+    return axyon.send(s, ctx.jid, m, [
+      `${W}`,
+      '',
+      `\u2705 *GROUP REGISTERED*`,
+      '',
+      name ? `*${g.name}*` : null,
+      '',
+      greetings.welcome(),
+      '',
+      T.rule('', 'hair'),
+      `Start with ${T.b(`${ctx.prefix}arise`)} \u2014 or ${T.b(`${ctx.prefix}help`)} to see everything.`
+    ].filter(x => x !== null).join('\n'))
   })
 
   cmd('unregister', 'management', '{p}unregister', 'Stop Architect responding in this group.', async (s, m, ctx) => {

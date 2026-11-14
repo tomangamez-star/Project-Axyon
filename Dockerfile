@@ -34,6 +34,16 @@ RUN curl -L --fail --retry 3 \
  && chmod +x /usr/local/bin/yt-dlp \
  && yt-dlp --version
 
+# deno: yt-dlp's JavaScript challenge solver. Without it YouTube exposes no
+# audio format and `!play` fails even with valid cookies.
+RUN curl -L --fail --retry 3 \
+      https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip \
+      -o /tmp/deno.zip \
+ && (unzip -o -q /tmp/deno.zip -d /usr/local/bin || python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')") \
+ && chmod +x /usr/local/bin/deno \
+ && rm -f /tmp/deno.zip \
+ && deno --version
+
 WORKDIR /app
 
 # Dependencies first, so a source-only change does not reinstall node_modules.
@@ -45,7 +55,8 @@ COPY . .
 # Fail the image build — not the first `!play` — if a tool is missing.
 RUN yt-dlp --version \
  && ffmpeg -version | head -n 1 \
- && ffprobe -version | head -n 1
+ && ffprobe -version | head -n 1 \
+ && deno --version | head -n 1
 
 ENV NODE_ENV=production
 ENV PORT=3000

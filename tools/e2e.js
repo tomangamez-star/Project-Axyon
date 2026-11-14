@@ -328,15 +328,76 @@ async function main () {
   const anon = await call('/dashboard/api/admin')
   ok('admin snapshot requires auth', anon.status === 401, String(anon.status))
 
-  const badLogin = await call('/dashboard/api/login', { method: 'POST', body: JSON.stringify({ password: 'wrong' }) })
-  ok('wrong password rejected', badLogin.status === 401, String(badLogin.status))
+  /*
+   * LOGIN IS BY WHATSAPP CODE.
+   *
+   * The code is only ever delivered over WhatsApp, so the harness issues it
+   * through the same store the server uses and then drives the HTTP verify
+   * endpoint exactly as a browser would. The code must never appear in an HTTP
+   * response — that is asserted below.
+   */
+  const dashAuth = require('../src/dash-auth')
+  const OWNER_PHONE = '2349110799878'
 
-  const login = await call('/dashboard/api/login', { method: 'POST', body: JSON.stringify({ password: process.env.DASHBOARD_PASSWORD }) })
-  ok('login succeeds', login.status === 200, String(login.status))
+  const badCode = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: OWNER_PHONE, code: '0000000' }) })
+  ok('a code that was never issued is rejected', badCode.status === 401, String(badCode.status))
+
+  const issued = await dashAuth.issueCode(OWNER_PHONE)
+  ok('a login code is issued for the owner number', issued.ok === true, issued.message || '')
+  ok('the code is 7 or 8 digits', /^[1-9]\d{6,7}$/.test(String(issued.code)), String(issued.code))
+  ok('the owner number resolves to admin', issued.role === 'admin', String(issued.role))
+
+  const wrongCode = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: OWNER_PHONE, code: '0000000' }) })
+  ok('a wrong code is rejected', wrongCode.status === 401, String(wrongCode.status))
+
+  const login = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: OWNER_PHONE, code: issued.code }) })
+  ok('the right code signs in', login.status === 200, String(login.status))
   const csrf = login.json?.csrf
   ok('login returns a CSRF token', !!csrf)
+  ok('login returns the admin role', login.json?.role === 'admin', String(login.json?.role))
+  ok('login returns the permission list', Array.isArray(login.json?.permissions) && login.json.permissions.includes('authority.write'))
+  ok('the code is NOT echoed in the login response', !JSON.stringify(login.json).includes(String(issued.code)))
 
-  const snap = await call('/dashboard/api/admin')
+  const reuse = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: OWNER_PHONE, code: issued.code }) })
+  ok('a code is single-use', reuse.status === 401, String(reuse.status))
+
+  const sess = await call('/dashboard/api/session')
+  ok('the session endpoint reports the signed-in role', sess.json?.authenticated === true && sess.json?.role === 'admin')
+  ok('the session endpoint masks the phone number', !String(sess.json?.phone || '').includes(OWNER_PHONE), String(sess.json?.phone))
+
+  /* A guest must not reach anything sensitive. */
+  const guestIssued = await dashAuth.issueCode('2348000009999')
+  const guestLogin = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: '2348000009999', code: guestIssued.code }) })
+  ok('an unknown number signs in as guest', guestLogin.json?.role === 'guest', String(guestLogin.json?.role))
+  const guestToken = guestLogin.json?.token
+  const guestOverview = await call('/dashboard/api/overview', { headers: { 'x-architect-token': guestToken } })
+  ok('a guest cannot read the overview', guestOverview.status === 403, String(guestOverview.status))
+  const guestSnap = await call('/dashboard/api/admin', { headers: { 'x-architect-token': guestToken } })
+  ok('a guest can read the game catalogue', guestSnap.status === 200, String(guestSnap.status))
+  ok('a guest sees no players', (guestSnap.json?.players || []).length === 0)
+  ok('a guest sees no groups', (guestSnap.json?.groups || []).length === 0)
+  ok('a guest sees no authority lists', (guestSnap.json?.roles || []).length === 0 && (guestSnap.json?.numbers || []).length === 0)
+  ok('a guest sees no audit log', (guestSnap.json?.log || []).length === 0)
+  const guestWrite = await call('/dashboard/api/admin/action', { method: 'POST', headers: { 'x-architect-token': guestToken }, body: JSON.stringify({ action: 'player-zen', userId: OWNER, amount: 100 }) })
+  ok('a guest cannot write', guestWrite.status === 403, String(guestWrite.status))
+
+  /* Anonymous feedback: no session at all. */
+  const fb = await call('/dashboard/api/feedback', { method: 'POST', body: JSON.stringify({ thread: 'e2e-thread-1', body: 'hello from the harness' }) })
+  ok('feedback accepts a message with no login', fb.status === 200 && fb.json?.ok === true, String(fb.status))
+  const fbThread = await call('/dashboard/api/feedback/thread?thread=e2e-thread-1')
+  ok('the feedback thread reads back', (fbThread.json?.messages || []).length === 1)
+  const fbInbox = await call('/dashboard/api/feedback/inbox')
+  ok('the staff inbox is refused without staff rights', fbInbox.status === 401 || fbInbox.status === 403, String(fbInbox.status))
+
+  /* Sign back in as admin for the rest of the panel tests. */
+  const adminIssued = await dashAuth.issueCode(OWNER_PHONE)
+  const adminLogin = await call('/dashboard/api/login/verify', { method: 'POST', body: JSON.stringify({ phone: OWNER_PHONE, code: adminIssued.code }) })
+  ok('admin signs back in', adminLogin.status === 200, String(adminLogin.status))
+  const adminCsrf = adminLogin.json?.csrf
+  const adminToken = adminLogin.json?.token
+  const adminHeaders = { 'x-architect-token': adminToken, 'x-architect-csrf': adminCsrf }
+
+  const snap = await call('/dashboard/api/admin', { headers: { 'x-architect-token': adminToken } })
   ok('admin snapshot loads when signed in', snap.status === 200, String(snap.status))
   ok('snapshot has groups', Array.isArray(snap.json?.groups))
   ok('snapshot has players', Array.isArray(snap.json?.players))
@@ -345,7 +406,7 @@ async function main () {
   ok('snapshot reflects the registered group', (snap.json?.groups || []).some(g => g.jid === GROUP))
   ok('snapshot reflects the arisen player', (snap.json?.players || []).some(p => p.userId === OWNER))
 
-  const noCsrf = await call('/dashboard/api/admin/action', { method: 'POST', body: JSON.stringify({ action: 'group-disable', jid: GROUP }) })
+  const noCsrf = await call('/dashboard/api/admin/action', { method: 'POST', headers: { 'x-architect-token': adminToken }, body: JSON.stringify({ action: 'group-disable', jid: GROUP }) })
   ok('action without CSRF is refused', noCsrf.status === 403, String(noCsrf.status))
 
   /* Every button the panel renders, exercised for real. */
@@ -373,7 +434,7 @@ async function main () {
   for (const [action, payload, label] of actions) {
     const r = await call('/dashboard/api/admin/action', {
       method: 'POST',
-      headers: { 'x-architect-csrf': csrf },
+      headers: adminHeaders,
       body: JSON.stringify({ action, ...payload })
     })
     ok(`${label} (${action}) returns 200`, r.status === 200, `${r.status} ${r.json?.message || r.text.slice(0, 60)}`)
@@ -385,7 +446,7 @@ async function main () {
   const added = stages.find(s => s.name === 'E2E Stage')
   if (added) {
     const r = await call('/dashboard/api/admin/action', {
-      method: 'POST', headers: { 'x-architect-csrf': csrf },
+      method: 'POST', headers: adminHeaders,
       body: JSON.stringify({ action: 'stage-remove', ordinal: added.ordinal })
     })
     ok('stage-remove returns 200', r.status === 200, String(r.status))
@@ -394,20 +455,20 @@ async function main () {
   const addedFloor = floors.find(f => f.name === 'E2E Floor')
   if (addedFloor) {
     const r = await call('/dashboard/api/admin/action', {
-      method: 'POST', headers: { 'x-architect-csrf': csrf },
+      method: 'POST', headers: adminHeaders,
       body: JSON.stringify({ action: 'floor-remove', ordinal: addedFloor.ordinal })
     })
     ok('floor-remove returns 200', r.status === 200, String(r.status))
   }
 
   const unknown = await call('/dashboard/api/admin/action', {
-    method: 'POST', headers: { 'x-architect-csrf': csrf },
+    method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ action: 'not-a-real-action' })
   })
-  ok('unknown action returns 400 with a message', unknown.status === 400 && !!unknown.json?.message, String(unknown.status))
+  ok('unknown action returns 400 with a message', unknown.status === 400 && !!(unknown.json?.error || unknown.json?.message), String(unknown.status))
 
   const badPrefix = await call('/dashboard/api/admin/action', {
-    method: 'POST', headers: { 'x-architect-csrf': csrf },
+    method: 'POST', headers: adminHeaders,
     body: JSON.stringify({ action: 'settings', prefix: 'toolong' })
   })
   ok('invalid input is rejected, not silently ignored', badPrefix.status === 400 && /prefix/i.test(badPrefix.json?.message || ''), badPrefix.json?.message)
@@ -415,7 +476,7 @@ async function main () {
   const log = (await call('/dashboard/api/admin')).json.log
   ok('audit log recorded the dashboard actions', (log || []).some(l => String(l.action).startsWith('admin_')), `${(log || []).length} entries`)
 
-  const logout = await call('/dashboard/api/logout', { method: 'POST', headers: { 'x-architect-csrf': csrf }, body: '{}' })
+  const logout = await call('/dashboard/api/logout', { method: 'POST', headers: adminHeaders, body: '{}' })
   ok('logout succeeds', logout.status === 200, String(logout.status))
   const afterLogout = await call('/dashboard/api/admin')
   ok('admin snapshot refused after logout', afterLogout.status === 401, String(afterLogout.status))

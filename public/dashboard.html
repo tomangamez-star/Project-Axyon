@@ -3,7 +3,26 @@
 <body><div class="noise"></div>
 
 <!-- ============================== LOGIN ============================== -->
-<section id="login" class="login-shell"><div class="login-card"><div class="sigil">A</div><p class="eyebrow">ARCHITECT &bull; CONTROL LAYER</p><h1>Enter the System</h1><p class="muted">Sign in to pair and manage your Architect WhatsApp instance.</p><form id="loginForm"><label>Dashboard password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary" type="submit">Unlock control</button><p class="error" id="loginError"></p></form></div></section>
+<section id="login" class="login-shell"><div class="login-card"><div class="sigil">A</div><p class="eyebrow">ARCHITECT &bull; CONTROL LAYER</p><h1>Enter the System</h1><p class="muted">Sign in with the WhatsApp number AXYON already knows you by. The bot sends you a code privately.</p>
+
+  <!-- STEP 1: the number -->
+  <form id="loginForm" class="login-step">
+    <label>WhatsApp number<input id="loginPhone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="2348012345678" required></label>
+    <button class="primary" type="submit" id="loginSendBtn">Send me a code</button>
+    <p class="error" id="loginError"></p>
+  </form>
+
+  <!-- STEP 2: the code -->
+  <form id="codeForm" class="login-step hidden">
+    <p class="muted" id="codeSentTo"></p>
+    <label>Login code<input id="loginCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="7 or 8 digits" required></label>
+    <button class="primary" type="submit" id="loginVerifyBtn">Unlock control</button>
+    <p class="error" id="codeError"></p>
+    <button type="button" class="link-btn" id="loginBack">Use a different number</button>
+  </form>
+
+  <p class="login-foot"><button type="button" class="link-btn" id="openFeedbackFromLogin">Message AXYON without signing in &rarr;</button></p>
+</div></section>
 
 <!-- =============================== APP =============================== -->
 <main id="app" class="app hidden">
@@ -17,6 +36,7 @@
     </div>
     <div class="topbar-right">
       <div class="pill" id="livePill"><i></i><span>Connecting</span></div>
+      <span class="role-badge" id="roleBadge" hidden></span>
       <button class="icon-btn" id="logoutBtn" title="Sign out" aria-label="Sign out">&#9099;</button>
     </div>
   </header>
@@ -121,6 +141,23 @@
     <div id="adminBody-log"></div>
   </section>
 
+  <!-- ----------------------------- FEEDBACK --------------------------- -->
+  <section class="screen" data-screen="feedback">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; FEEDBACK</p><h2>Talk to AXYON</h2><p class="muted">Send a message without signing in. Nothing identifies you &mdash; the conversation is tied to this tab only and is gone when you close it.</p></div>
+    <div class="panel">
+      <div id="feedbackThread" class="feedback-thread"><p class="admin-empty">No messages yet. Say anything &mdash; a bug, an idea, a hello.</p></div>
+      <form id="feedbackForm" class="feedback-form">
+        <textarea id="feedbackInput" rows="3" maxlength="2000" placeholder="Type your message to AXYON&hellip;" required></textarea>
+        <button class="primary" type="submit" id="feedbackSend">Send</button>
+      </form>
+      <p class="error" id="feedbackError"></p>
+    </div>
+    <div class="panel" id="feedbackInboxPanel" hidden>
+      <div class="panel-head"><div><p class="eyebrow">STAFF INBOX</p><h3>Every conversation</h3></div><button id="feedbackRefresh">Refresh</button></div>
+      <div id="feedbackInbox" class="list empty">No messages yet.</div>
+    </div>
+  </section>
+
   <!-- ------------------------------- HELP ----------------------------- -->
   <section class="screen" data-screen="help">
     <div class="screen-head"><p class="eyebrow">REFERENCE</p><h2>Commands &amp; registration</h2><p class="muted">Everything the bot answers to, and the exact steps to get a group working.</p></div>
@@ -213,6 +250,7 @@
     <button type="button" data-goto="authority"><span class="ico" aria-hidden="true">&#128737;</span><span class="lbl">Authority</span></button>
     <button type="button" data-goto="settings"><span class="ico" aria-hidden="true">&#128295;</span><span class="lbl">Settings</span></button>
     <button type="button" data-goto="log"><span class="ico" aria-hidden="true">&#128220;</span><span class="lbl">Log</span></button>
+    <button type="button" data-goto="feedback"><span class="ico" aria-hidden="true">&#128172;</span><span class="lbl">Feedback</span></button>
     <button type="button" data-goto="help"><span class="ico" aria-hidden="true">&#10067;</span><span class="lbl">Help</span></button>
   </nav>
   <p class="side-foot">&#8984; AXYN CORE</p>

@@ -12,7 +12,6 @@ const assert = require('assert')
 const PORT = 3999
 process.env.PORT = String(PORT)
 process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@127.0.0.1:5432/axyon'
-process.env.DASHBOARD_PASSWORD = 'test-pass-123'
 
 let pass = 0
 let fail = 0

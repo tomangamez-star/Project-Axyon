@@ -77,7 +77,7 @@ async function main () {
   const html = page.raw
 
   const screens = [...html.matchAll(/data-screen="([a-z]+)"/g)].map(m => m[1])
-  const expected = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
+  const expected = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'feedback', 'help']
   ok(`${expected.length} separate screens present (${screens.length})`, screens.length === expected.length, screens.join(','))
   for (const s of expected) ok(`screen "${s}" exists`, screens.includes(s))
 
@@ -124,14 +124,23 @@ async function main () {
 
   /* ------------------------------------------------------------ 4. login */
   console.log('\n=== 4. AUTH ===')
-  const bad = await request(port, 'POST', '/dashboard/api/login', { body: { password: 'wrong' } })
-  ok('wrong password rejected', bad.status === 401, `got ${bad.status}`)
-  const login = await request(port, 'POST', '/dashboard/api/login', { body: { password: process.env.DASHBOARD_PASSWORD } })
-  ok('correct password accepted', login.status === 200, `got ${login.status}`)
+  /* Login is by WhatsApp code now: the code is issued through the same store
+   * the server uses, then verified over HTTP exactly as a browser would. */
+  const dashAuth = require(path.join(ROOT, 'src', 'dash-auth'))
+  const OWNER_PHONE = '2349110799878'
+  const bad = await request(port, 'POST', '/dashboard/api/login/verify', { body: { phone: OWNER_PHONE, code: '0000000' } })
+  ok('a code that was never issued is rejected', bad.status === 401, `got ${bad.status}`)
+  const issued = await dashAuth.issueCode(OWNER_PHONE)
+  ok('a login code is issued', issued.ok === true, issued.message || '')
+  ok('the code is 7 or 8 digits', /^[1-9]\d{6,7}$/.test(String(issued.code)), String(issued.code))
+  const login = await request(port, 'POST', '/dashboard/api/login/verify', { body: { phone: OWNER_PHONE, code: issued.code } })
+  ok('the right code is accepted', login.status === 200, `got ${login.status}`)
   const cookie = String(login.headers['set-cookie'] || '').split(';')[0]
   const csrf = login.json?.csrf
   ok('session cookie issued', !!cookie)
   ok('csrf token issued', !!csrf)
+  ok('the code is not echoed back', !JSON.stringify(login.json).includes(String(issued.code)))
+  ok('the owner number is admin', login.json?.role === 'admin', String(login.json?.role))
 
   const noAuth = await request(port, 'GET', '/dashboard/api/admin')
   ok('admin snapshot requires auth', noAuth.status === 401, `got ${noAuth.status}`)

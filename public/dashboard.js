@@ -1,17 +1,37 @@
-/* ARCHITECT CONTROL — screen switcher + pairing/overview logic.
+/* ARCHITECT CONTROL — screen switcher, WhatsApp-code login, feedback.
  *
- * The dashboard is a set of discrete screens, not one long scroll. Exactly one
- * <section class="screen"> carries .active at a time; the slide-out side panel
- * toggles that class. No reload, no router, no history entries to get lost in.
+ * SESSION PERSISTENCE
+ * -------------------
+ * The old build kept the session only in an HttpOnly cookie and re-checked it
+ * on every page load. On a phone, switching apps suspends the page; when the
+ * browser discards and reloads it, the login screen came back even though the
+ * session was still valid. That is the "login screen disappears / resets"
+ * complaint.
+ *
+ * Now the token is ALSO kept in localStorage. On boot the client sends it in
+ * an `x-architect-token` header, so a reload — or a return from another app —
+ * re-validates silently and lands back on the same screen. The cookie is still
+ * set, so a fresh tab works too.
+ *
+ * The screen the person was on is remembered as well, so returning from
+ * another app puts them back where they were instead of on Overview.
  */
 const $ = s => document.querySelector(s)
 const $$ = s => [...document.querySelectorAll(s)]
 
+const TOKEN_KEY = 'architect.token'
+const SCREEN_KEY = 'architect.screen'
+const THREAD_KEY = 'architect.feedback.thread'
+
 let csrf = ''
+let token = ''
+let role = 'guest'
+let permissions = []
 let overview = null
 let refreshTimer = null
 let pairCode = ''
 let currentScreen = 'overview'
+let pendingPhone = ''
 
 /* ------------------------------------------------------------- feedback */
 
@@ -36,7 +56,7 @@ function duration (sec) {
 }
 
 function ago (v) {
-  if (!v) return '\u2014'
+  if (!v) return '—'
   const n = Math.max(0, Math.floor((Date.now() - new Date(v).getTime()) / 1000))
   return n < 60 ? `${n}s ago` : n < 3600 ? `${Math.floor(n / 60)}m ago` : n < 86400 ? `${Math.floor(n / 3600)}h ago` : `${Math.floor(n / 86400)}d ago`
 }
@@ -46,6 +66,7 @@ function ago (v) {
 async function api (path, options = {}) {
   const headers = { 'content-type': 'application/json', ...(options.headers || {}) }
   if (options.method && options.method !== 'GET') headers['x-architect-csrf'] = csrf
+  if (token) headers['x-architect-token'] = token
   const r = await fetch(`/dashboard/api/${path}`, { credentials: 'same-origin', ...options, headers })
   const data = await r.json().catch(() => ({ error: `Invalid server response (HTTP ${r.status})` }))
   if (!r.ok) throw Error(data.error || data.message || `HTTP ${r.status}`)
@@ -55,15 +76,38 @@ async function api (path, options = {}) {
 
 /* ------------------------------------------------------- SCREEN SWITCHER */
 
-const SCREENS = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'help']
+const SCREENS = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'feedback', 'help']
 
-/**
- * Shows one screen and hides the rest. Instant — a class toggle, no reload.
- * Also keeps the side panel highlight and the URL hash in sync so a refresh or
- * a shared link lands on the same screen.
- */
+/* Which permission a screen needs. A screen the role cannot read is hidden
+ * from the side panel and refused if reached by hash. */
+const SCREEN_PERMISSION = {
+  overview: 'overview.read',
+  pairing: 'pairing.read',
+  groups: 'groups.read',
+  players: 'players.read',
+  shop: 'shop.read',
+  stages: 'stages.read',
+  floors: 'floors.read',
+  modes: 'modes.read',
+  visuals: 'visuals.read',
+  authority: 'authority.read',
+  settings: 'settings.read',
+  log: 'log.read',
+  feedback: null,   // public
+  help: 'commands.read'
+}
+
+function can (permission) {
+  if (!permission) return true
+  return permissions.includes(permission)
+}
+
 function showScreen (name) {
   if (!SCREENS.includes(name)) name = 'overview'
+  /* A screen the role cannot read falls back to the first one it can. */
+  if (!can(SCREEN_PERMISSION[name])) {
+    name = SCREENS.find(s => can(SCREEN_PERMISSION[s])) || 'feedback'
+  }
   currentScreen = name
   $$('.screen').forEach(s => s.classList.toggle('active', s.dataset.screen === name))
   $$('#sideList button').forEach(b => {
@@ -73,9 +117,23 @@ function showScreen (name) {
     else b.removeAttribute('aria-current')
   })
   if (location.hash.slice(1) !== name) history.replaceState(null, '', `#${name}`)
-  /* The admin screens are rendered lazily on first visit, then kept. */
+  try { localStorage.setItem(SCREEN_KEY, name) } catch {}
   if (typeof window.architectRenderScreen === 'function') window.architectRenderScreen(name)
   window.scrollTo({ top: 0, behavior: 'instant' in window ? 'instant' : 'auto' })
+}
+
+/** Hides the side-panel rows this role may not open. */
+function applyRoleToNav () {
+  $$('#sideList button').forEach(b => {
+    const perm = SCREEN_PERMISSION[b.dataset.goto]
+    b.hidden = !can(perm)
+  })
+  const badge = $('#roleBadge')
+  if (badge) {
+    badge.hidden = false
+    badge.textContent = role.toUpperCase()
+    badge.className = `role-badge role-${role}`
+  }
 }
 
 /* --------------------------------------------------------- SIDE PANEL */
@@ -97,8 +155,7 @@ function openPanel () {
   if (scrim) { scrim.hidden = false; requestAnimationFrame(() => scrim.classList.add('show')) }
   if (btn) btn.setAttribute('aria-expanded', 'true')
   document.body.classList.add('panel-open')
-  /* Focus the current screen's row so keyboard users land in the right place. */
-  const active = panel.querySelector('#sideList button.active') || panel.querySelector('#sideList button')
+  const active = panel.querySelector('#sideList button.active') || panel.querySelector('#sideList button:not([hidden])')
   if (active) active.focus({ preventScroll: false })
 }
 
@@ -133,7 +190,6 @@ function wirePanel () {
     }
   })
 
-  /* Escape closes; Tab is trapped inside the panel while it is open. */
   document.addEventListener('keydown', e => {
     if (!panelOpen) return
     if (e.key === 'Escape') { e.preventDefault(); closePanel(); return }
@@ -167,20 +223,70 @@ function showApp () {
   document.dispatchEvent(new CustomEvent('architect:login'))
 }
 
+function showCodeStep (phone, message = '') {
+  pendingPhone = phone
+  $('#loginForm').classList.add('hidden')
+  $('#codeForm').classList.remove('hidden')
+  $('#codeSentTo').textContent = `Code sent to ${phone} on WhatsApp.`
+  $('#codeError').textContent = message
+  $('#loginCode').value = ''
+  $('#loginCode').focus()
+}
+
+function showPhoneStep () {
+  $('#codeForm').classList.add('hidden')
+  $('#loginForm').classList.remove('hidden')
+  $('#loginError').textContent = ''
+  $('#loginPhone').focus()
+}
+
+/** Stores the session and enters the app. */
+function enterApp (data) {
+  token = data.token || token
+  csrf = data.csrf || csrf
+  role = data.role || 'guest'
+  permissions = Array.isArray(data.permissions) ? data.permissions : []
+  try { if (token) localStorage.setItem(TOKEN_KEY, token) } catch {}
+  applyRoleToNav()
+  showApp()
+  const remembered = (() => { try { return localStorage.getItem(SCREEN_KEY) } catch { return null } })()
+  showScreen(location.hash.slice(1) || remembered || 'overview')
+  void refresh()
+  clearInterval(refreshTimer)
+  refreshTimer = setInterval(refresh, 15000)
+}
+
+/**
+ * Boot.
+ *
+ * The stored token is tried FIRST, before anything is drawn, so a reload or a
+ * return from another app never flashes the login screen for a signed-in
+ * person.
+ */
 async function boot () {
   wirePanel()
+  wireFeedback()
+  try { token = localStorage.getItem(TOKEN_KEY) || '' } catch { token = '' }
   try {
     const s = await api('session')
-    if (!s.configured) { showLogin('Set DASHBOARD_PASSWORD in Render, then redeploy.'); return }
-    if (!s.authenticated) { showLogin(); return }
-    csrf = s.csrf
-    showApp()
-    showScreen(location.hash.slice(1) || 'overview')
-    await refresh()
-    refreshTimer = setInterval(refresh, 15000)
-  } catch (e) {
-    showLogin(e.message)
-  }
+    if (s.authenticated) {
+      role = s.role
+      permissions = s.permissions || []
+      csrf = s.csrf
+      applyRoleToNav()
+      showApp()
+      const remembered = (() => { try { return localStorage.getItem(SCREEN_KEY) } catch { return null } })()
+      showScreen(location.hash.slice(1) || remembered || 'overview')
+      await refresh()
+      clearInterval(refreshTimer)
+      refreshTimer = setInterval(refresh, 15000)
+      return
+    }
+  } catch { /* fall through to the login screen */ }
+  /* No valid session: clear the stale token so it is not retried forever. */
+  token = ''
+  try { localStorage.removeItem(TOKEN_KEY) } catch {}
+  showLogin()
 }
 
 /* ------------------------------------------------------------- accounts */
@@ -221,6 +327,7 @@ async function accountAction (b) {
 /* -------------------------------------------------------------- refresh */
 
 async function refresh () {
+  if (!can('overview.read')) return
   try {
     overview = await api('overview')
     const w = overview.whatsapp
@@ -255,7 +362,99 @@ async function refresh () {
     $('#pauseBtn').disabled = !active || !w.sessionId
     renderAccounts(overview.accounts || [])
   } catch (e) {
-    if (/sign in/i.test(e.message)) { clearInterval(refreshTimer); showLogin() } else toast(e.message)
+    if (/sign in/i.test(e.message)) { clearInterval(refreshTimer); signOutLocal(); showLogin() } else toast(e.message)
+  }
+}
+
+/* ------------------------------------------------------------- feedback */
+
+/** A random per-tab id. It is never sent anywhere but the feedback endpoints,
+ *  and it is discarded when the tab closes — that is what keeps it anonymous. */
+function feedbackThreadId () {
+  let t = ''
+  try { t = sessionStorage.getItem(THREAD_KEY) || '' } catch {}
+  if (!t) {
+    t = 'f' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+    try { sessionStorage.setItem(THREAD_KEY, t) } catch {}
+  }
+  return t
+}
+
+function renderFeedback (messages) {
+  const el = $('#feedbackThread')
+  if (!el) return
+  if (!messages.length) {
+    el.innerHTML = '<p class="admin-empty">No messages yet. Say anything — a bug, an idea, a hello.</p>'
+    return
+  }
+  el.innerHTML = messages.map(m => `<div class="fb-msg ${m.fromStaff ? 'fb-staff' : 'fb-user'}"><p>${esc(m.body)}</p><small>${m.fromStaff ? 'AXYON' : 'You'} · ${ago(m.createdAt)}</small></div>`).join('')
+  el.scrollTop = el.scrollHeight
+}
+
+async function loadFeedback () {
+  try {
+    const d = await api(`feedback/thread?thread=${encodeURIComponent(feedbackThreadId())}`)
+    renderFeedback(d.messages || [])
+  } catch (e) { /* the thread is best-effort; a failure must not block the page */ }
+}
+
+async function loadInbox () {
+  const panel = $('#feedbackInboxPanel')
+  if (!panel) return
+  if (!can('feedback.read')) { panel.hidden = true; return }
+  panel.hidden = false
+  try {
+    const d = await api('feedback/inbox')
+    const el = $('#feedbackInbox')
+    const rows = d.threads || []
+    if (!rows.length) { el.className = 'list empty'; el.textContent = 'No messages yet.'; return }
+    el.className = 'list'
+    el.innerHTML = rows.map(t => `<article class="panel"><div class="panel-head"><div><p class="eyebrow">${t.total} MESSAGE${t.total === 1 ? '' : 'S'}</p><p>${esc(t.preview)}</p><small class="muted">${ago(t.createdAt)}</small></div></div><div class="actions"><button data-reply-thread="${esc(t.thread)}">Reply</button></div></article>`).join('')
+    $$('[data-reply-thread]').forEach(b => {
+      b.onclick = async () => {
+        const text = prompt('Reply to this conversation')
+        if (!text) return
+        try {
+          await api('feedback/reply', { method: 'POST', body: JSON.stringify({ thread: b.dataset.replyThread, body: text }) })
+          toast('Reply sent')
+          await loadInbox()
+        } catch (e) { toast(e.message) }
+      }
+    })
+  } catch (e) { toast(e.message) }
+}
+
+function wireFeedback () {
+  const form = $('#feedbackForm')
+  if (form) {
+    form.onsubmit = async e => {
+      e.preventDefault()
+      const input = $('#feedbackInput')
+      const text = input.value.trim()
+      if (!text) return
+      const btn = $('#feedbackSend')
+      try {
+        btn.disabled = true
+        await api('feedback', { method: 'POST', body: JSON.stringify({ thread: feedbackThreadId(), body: text }) })
+        input.value = ''
+        $('#feedbackError').textContent = ''
+        await loadFeedback()
+      } catch (err) {
+        $('#feedbackError').textContent = err.message
+      } finally { btn.disabled = false }
+    }
+  }
+  const refreshBtn = $('#feedbackRefresh')
+  if (refreshBtn) refreshBtn.onclick = loadInbox
+  const fromLogin = $('#openFeedbackFromLogin')
+  if (fromLogin) {
+    fromLogin.onclick = () => {
+      /* Feedback needs no session, so it opens even from the login screen. */
+      showApp()
+      applyRoleToNav()
+      showScreen('feedback')
+      void loadFeedback()
+    }
   }
 }
 
@@ -263,23 +462,55 @@ async function refresh () {
 
 $('#loginForm').onsubmit = async e => {
   e.preventDefault()
+  const phone = $('#loginPhone').value.replace(/\D/g, '')
+  const btn = $('#loginSendBtn')
   $('#loginError').textContent = ''
+  if (!/^\d{8,15}$/.test(phone)) { $('#loginError').textContent = 'Enter your number in international format, digits only.'; return }
   try {
-    const d = await api('login', { method: 'POST', body: JSON.stringify({ password: $('#password').value }) })
-    csrf = d.csrf
-    $('#password').value = ''
-    showApp()
-    showScreen(location.hash.slice(1) || 'overview')
-    await refresh()
-    refreshTimer = setInterval(refresh, 15000)
+    btn.disabled = true
+    btn.textContent = 'Sending…'
+    const d = await api('login/request', { method: 'POST', body: JSON.stringify({ phone }) })
+    showCodeStep(phone, d.message || '')
   } catch (err) {
     $('#loginError').textContent = err.message
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Send me a code'
   }
+}
+
+$('#codeForm').onsubmit = async e => {
+  e.preventDefault()
+  const code = $('#loginCode').value.replace(/\D/g, '')
+  const btn = $('#loginVerifyBtn')
+  $('#codeError').textContent = ''
+  try {
+    btn.disabled = true
+    btn.textContent = 'Checking…'
+    const d = await api('login/verify', { method: 'POST', body: JSON.stringify({ phone: pendingPhone, code }) })
+    enterApp(d)
+  } catch (err) {
+    $('#codeError').textContent = err.message
+  } finally {
+    btn.disabled = false
+    btn.textContent = 'Unlock control'
+  }
+}
+
+$('#loginBack').onclick = showPhoneStep
+
+function signOutLocal () {
+  token = ''
+  csrf = ''
+  role = 'guest'
+  permissions = []
+  try { localStorage.removeItem(TOKEN_KEY) } catch {}
+  clearInterval(refreshTimer)
 }
 
 $('#logoutBtn').onclick = async () => {
   try { await api('logout', { method: 'POST', body: '{}' }) } catch {}
-  clearInterval(refreshTimer)
+  signOutLocal()
   showLogin()
 }
 
@@ -288,31 +519,23 @@ $('#pairType').onchange = () => $('#pairLabelWrap').classList.toggle('hidden', $
 $('#pairBtn').onclick = async () => {
   const b = $('#pairBtn')
   const accountType = $('#pairType').value
-  /*
-   * A pairing request waits for the WhatsApp socket to become ready, which can
-   * take up to 20 seconds. Without a visible pending state the button looks
-   * dead for that whole time — the exact complaint this dashboard keeps
-   * getting. So the label changes immediately and a toast says what is
-   * happening, before the request is even sent.
-   */
   const original = b.textContent
   try {
     b.disabled = true
-    b.textContent = 'Contacting WhatsApp\u2026'
-    toast('Requesting a pairing code \u2014 this can take up to 20 seconds')
+    b.textContent = 'Contacting WhatsApp…'
+    toast('Requesting a pairing code — this can take up to 20 seconds')
     const d = await api('actions/pair', { method: 'POST', body: JSON.stringify({ phone: $('#pairPhone').value, label: $('#pairLabel').value, accountType }) })
     pairCode = d.code
     $('#pairIdentity').textContent = d.accountType === 'primary' ? 'PRIMARY ARCHITECT PAIRING CODE' : 'ADDITIONAL INSTANCE PAIRING CODE'
     $('#pairCode').textContent = d.code
     $('#pairSlot').textContent = `Slot: ${d.sessionId}`
     $('#pairResult').classList.remove('hidden')
-    toast('Pairing code ready \u2014 enter it in WhatsApp')
+    toast('Pairing code ready — enter it in WhatsApp')
   } catch (e) {
-    /* Never silent: the reason goes to the toast AND stays on screen. */
     toast(e.message)
     $('#pairResult').classList.remove('hidden')
     $('#pairIdentity').textContent = 'PAIRING FAILED'
-    $('#pairCode').textContent = '\u2014'
+    $('#pairCode').textContent = '—'
     $('#pairSlot').textContent = e.message
   } finally {
     b.disabled = false
@@ -321,15 +544,12 @@ $('#pairBtn').onclick = async () => {
 }
 
 $('#copyPairCode').onclick = async () => {
-  /* Never a silent no-op: if there is nothing to copy, say so. */
   if (!pairCode) { toast('Generate a pairing code first'); return }
   const plain = pairCode.replace(/-/g, '')
   try {
     await navigator.clipboard.writeText(plain)
     toast('Pairing code copied')
   } catch {
-    /* Clipboard is blocked outside a secure context. Select the code so the
-       user can copy it by hand, and tell them. */
     const el = $('#pairCode')
     if (el) {
       const range = document.createRange()
@@ -338,7 +558,7 @@ $('#copyPairCode').onclick = async () => {
       sel.removeAllRanges()
       sel.addRange(range)
     }
-    toast('Code selected \u2014 press Ctrl/Cmd+C to copy')
+    toast('Code selected — press Ctrl/Cmd+C to copy')
   }
 }
 
@@ -372,10 +592,44 @@ $('#removeAllBtn').onclick = async () => {
   } catch (e) { toast(e.message) }
 }
 
+/*
+ * RETURNING FROM ANOTHER APP
+ * --------------------------
+ * A phone suspends the page rather than closing it. When it comes back the
+ * session is still valid, so the client re-validates quietly and re-renders
+ * the screen it was on. It never shows the login screen for a live session.
+ */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return
+  if (!token) return
+  void (async () => {
+    try {
+      const s = await api('session')
+      if (!s.authenticated) { signOutLocal(); showLogin('Your session expired. Sign in again.'); return }
+      role = s.role
+      permissions = s.permissions || []
+      csrf = s.csrf
+      applyRoleToNav()
+      if (currentScreen === 'feedback') void loadFeedback()
+      else if (can('overview.read')) void refresh()
+    } catch { /* offline: keep the current screen, try again on the next tick */ }
+  })()
+})
+
+/* A bfcache restore (back/forward) also must not reset the screen. */
+window.addEventListener('pageshow', e => {
+  if (!e.persisted) return
+  if (token) showScreen(currentScreen)
+})
+
 /* Expose the switcher so admin.js can drive screen rendering. */
 window.architectShowScreen = showScreen
 window.architectClosePanel = closePanel
 window.architectToast = toast
 window.architectEsc = esc
+window.architectCan = can
+window.architectRole = () => role
+window.architectLoadFeedback = loadFeedback
+window.architectLoadInbox = loadInbox
 
 boot()

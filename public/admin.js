@@ -598,6 +598,13 @@ const A = (() => {
   /** Called by the dashboard's screen switcher on every screen change. */
   async function renderFor (name) {
     if (name === 'help') { await loadCommands(); return }
+    /* Feedback is public: it renders without the admin snapshot, so a guest
+     * (or a signed-out visitor) can use it. */
+    if (name === 'feedback') {
+      if (window.architectLoadFeedback) await window.architectLoadFeedback()
+      if (window.architectLoadInbox) await window.architectLoadInbox()
+      return
+    }
     if (!VIEWS[name]) return
     if (!data) {
       try { await load() } catch (e) { banner(e.message); return }

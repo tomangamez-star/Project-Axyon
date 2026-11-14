@@ -96,6 +96,39 @@ else
   log "ffmpeg installed: $("$TOOLS_DIR/ffmpeg" -version | head -n 1)"
 fi
 
+# ---------------------------------------------------------------- deno ------
+# yt-dlp needs a JavaScript runtime to solve YouTube's player challenge. Without
+# one it reports "Only images are available for download" and `!play` fails even
+# with valid cookies. Deno is the runtime yt-dlp's EJS solver supports natively
+# (Node 20 is reported as "unsupported"). It is installed into .tools/bin so
+# src/music.js finds it on PATH via the same bundle directory.
+if [ -x "$TOOLS_DIR/deno" ] && "$TOOLS_DIR/deno" --version >/dev/null 2>&1; then
+  log "deno already present: $("$TOOLS_DIR/deno" --version | head -n 1)"
+else
+  log "installing deno (JS challenge solver for yt-dlp)"
+  TMPD="$(mktemp -d)"
+  ARCH="$(uname -m)"
+  case "$ARCH" in
+    x86_64|amd64) DENO_ZIP="deno-x86_64-unknown-linux-gnu.zip" ;;
+    aarch64|arm64) DENO_ZIP="deno-aarch64-unknown-linux-gnu.zip" ;;
+    *) DENO_ZIP="" ;;
+  esac
+  if [ -n "$DENO_ZIP" ]; then
+    curl -L --fail --retry 3 --retry-delay 2 --connect-timeout 20 \
+      "https://github.com/denoland/deno/releases/latest/download/$DENO_ZIP" -o "$TMPD/deno.zip"
+    (cd "$TMPD" && unzip -o -q deno.zip)
+    install -m 0755 "$TMPD/deno" "$TOOLS_DIR/deno"
+    rm -rf "$TMPD"
+    if "$TOOLS_DIR/deno" --version >/dev/null 2>&1; then
+      log "deno installed: $("$TOOLS_DIR/deno" --version | head -n 1)"
+    else
+      log "WARNING: deno installed but will not run; !play will report the missing solver"
+    fi
+  else
+    log "WARNING: no deno build for $ARCH; !play will report the missing solver"
+  fi
+fi
+
 # ------------------------------------------------------------- npm deps ----
 # `npm ci` when a lockfile is present (reproducible), otherwise `npm install`.
 if [ -f package-lock.json ]; then
