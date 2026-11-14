@@ -784,7 +784,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       `⏱️ ${T.m(music.mmss(t.duration))}`,
       '',
       T.rule('', 'hair'),
-      r.full ? `✅ ${T.i('full track')}` : `⚠️ ${T.i('30-second preview — full track unavailable')}`
+      `✅ ${T.i('full track')}`
     ].filter(Boolean).join('\n')
 
     try {

@@ -162,10 +162,19 @@ test('!play resolves a full-length track, not a preview', async () => {
 
 test('!play never presents a preview as the full song', () => {
   const src = require('fs').readFileSync(require.resolve('../src/music'), 'utf8')
-  /* The preview path must exist only as the last fallback, and the caller must
-   * be able to tell the difference — that is what `full` is for. */
-  assert.match(src, /full = true/)
-  assert.match(src, /source = 'preview'/)
+  /*
+   * There is no preview path at all any more. The 30-second Deezer `preview`
+   * field was the bug, so it must not be reachable: a track that cannot be
+   * produced in full is reported as a failure instead of being sent as a clip.
+   */
+  assert.doesNotMatch(src, /source = 'preview'/)
+  assert.doesNotMatch(src, /downloadPreview/)
+  assert.doesNotMatch(src, /t\.preview/)
+  /* The full-song method: yt-dlp search -> resolve -> download. */
+  assert.match(src, /ytsearch1:/)
+  assert.match(src, /full: true/)
+  /* A short file is rejected rather than sent. */
+  assert.match(src, /MIN_FULL_SECONDS/)
   assert.match(src, /is_streamable/)
 })
 

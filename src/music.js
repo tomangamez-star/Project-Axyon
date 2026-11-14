@@ -2,8 +2,8 @@
 /*
  * PLAY — `!play <song>`.
  *
- * Searches a public catalogue, shows the artwork, downloads the audio and sends
- * it as a WhatsApp audio message.
+ * Searches for the song, resolves the YouTube URL, downloads the COMPLETE
+ * audio and sends it as a WhatsApp audio message.
  *
  * WHY THE SOURCE CHANGED
  * ----------------------
@@ -13,35 +13,44 @@
  * retrying fixes that: the preview URL is the only audio Deezer's public API
  * exposes.
  *
- * The full track now comes from Audius, a public music catalogue with an open
- * API and no key:
+ * THE FULL-SONG METHOD (same architecture as JAWAD-MD's `.play`)
+ * -------------------------------------------------------------
+ *   1. SEARCH   yt-dlp `ytsearch1:<query>` resolves the song name to the first
+ *               matching YouTube video and returns its id, title, uploader,
+ *               duration and thumbnail.
+ *   2. RESOLVE  the video id becomes a canonical watch URL.
+ *   3. DOWNLOAD yt-dlp pulls the best audio stream for that URL. When ffmpeg is
+ *               present the stream is transcoded to MP3 so the message is a
+ *               real `audio/mpeg`; without ffmpeg the native stream (m4a/webm)
+ *               is sent as-is with its honest mimetype.
+ *   4. SEND     the local file is read into a Buffer and sent as an audio
+ *               message with the song title as the file name.
  *
- *   GET /v1/tracks/search?query=...&app_name=AXYON   -> track ids + metadata
- *   GET /v1/tracks/{id}/stream?app_name=AXYON        -> the FULL audio file
- *
- * The stream endpoint returns the whole track (verified: a 3:47 track came back
- * as a 9.1 MB 320 kbps MP3), not a sample. Deezer is still used for the cover
- * art and the duration, because its artwork is better and it is a cheap call.
+ * A track shorter than MIN_FULL_SECONDS is rejected rather than sent: that is
+ * what makes "full song" true instead of merely "not a preview". There is no
+ * preview fallback any more — if a full track cannot be produced, `!play`
+ * says so instead of quietly sending 30 seconds.
  *
  * FALLBACK ORDER
  * --------------
- *   1. Audius full track            (the normal path)
- *   2. yt-dlp, if the host has it   (full track, when YouTube is not blocking)
- *   3. Deezer preview               (last resort, and the caption SAYS it is a
- *                                    preview — it never pretends otherwise)
+ *   1. yt-dlp (YouTube)      — the normal path, full track
+ *   2. Audius                — full track, used when yt-dlp is missing or
+ *                              YouTube is blocking the host
  *
- * Everything is bounded: a hard timeout on each network call, a size cap, and a
- * temp directory that is always removed. A failed lookup returns a short
- * message — never a stack trace.
+ * Everything is bounded: a hard timeout on each call, a size cap, and a temp
+ * directory that is always removed. A failed lookup returns a short message —
+ * never a stack trace.
  */
 const fs = require('fs/promises')
 const os = require('os')
 const path = require('path')
 const { execFile } = require('child_process')
 
-const SEARCH_TIMEOUT_MS = 8000
-const DOWNLOAD_TIMEOUT_MS = 45000
+const SEARCH_TIMEOUT_MS = 20000
+const DOWNLOAD_TIMEOUT_MS = 90000
 const MAX_BYTES = 16 * 1024 * 1024
+/* Anything under this is a snippet, an intro or a preview — never a song. */
+const MIN_FULL_SECONDS = 60
 const APP_NAME = 'AXYON'
 
 /* Audius rotates its discovery hosts; this one is the documented entry point. */
@@ -49,7 +58,7 @@ const AUDIUS = 'https://api.audius.co'
 
 function run (bin, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) return reject(Object.assign(err, { stderr: String(stderr || '') }))
       resolve(String(stdout || ''))
     })
@@ -70,7 +79,46 @@ async function fetchJson (url, ms = SEARCH_TIMEOUT_MS) {
   } catch { return null } finally { clearTimeout(t) }
 }
 
-/** Deezer metadata: cover art, album, duration. Never the audio. */
+/* ------------------------------------------------------------------ search */
+
+/**
+ * Resolves a free-text query to a YouTube video.
+ *
+ * `--flat-playlist` keeps this cheap: yt-dlp returns the search metadata
+ * without resolving every stream format, so the lookup stays fast.
+ *
+ * @returns {Promise<{id:string,url:string,title:string,artist:string,duration:number,artwork:string}|null>}
+ */
+async function ytSearch (query) {
+  const q = String(query || '').trim()
+  if (!q) return null
+  let raw
+  try {
+    raw = await run('yt-dlp', [
+      '--flat-playlist', '--no-warnings', '--quiet',
+      '-J', `ytsearch1:${q}`
+    ], SEARCH_TIMEOUT_MS)
+  } catch { return null }
+
+  let j
+  try { j = JSON.parse(raw) } catch { return null }
+  const e = Array.isArray(j?.entries) ? j.entries[0] : null
+  if (!e?.id) return null
+
+  const thumbs = Array.isArray(e.thumbnails) ? e.thumbnails : []
+  const best = thumbs.slice().sort((a, b) => (b.width || 0) - (a.width || 0))[0]
+
+  return {
+    id: e.id,
+    url: `https://www.youtube.com/watch?v=${e.id}`,
+    title: e.title || q,
+    artist: e.uploader || e.channel || 'Unknown artist',
+    duration: Number(e.duration) || 0,
+    artwork: best?.url || (e.id ? `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg` : '')
+  }
+}
+
+/** Deezer metadata: better cover art and the real duration. Never the audio. */
 async function deezerMeta (query) {
   const j = await fetchJson(`https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=1`)
   const t = j?.data?.[0]
@@ -80,26 +128,64 @@ async function deezerMeta (query) {
     artist: t.artist?.name || 'Unknown artist',
     album: t.album?.title || '',
     duration: Number(t.duration) || 0,
-    artwork: t.album?.cover_xl || t.album?.cover_big || t.album?.cover_medium || '',
-    preview: t.preview || '',
-    url: t.link || ''
+    artwork: t.album?.cover_xl || t.album?.cover_big || t.album?.cover_medium || ''
   }
 }
 
+/* ---------------------------------------------------------------- download */
+
 /**
- * Searches Audius for a full-length track.
+ * Downloads the complete audio for a resolved YouTube URL.
  *
- * TWO FILTERS THAT MATTER
- * ----------------------
- * 1. `is_streamable` — Audius lists tracks whose rights holder has not enabled
- *    streaming. Their `/stream` endpoint answers 404, so picking one silently
- *    falls through to the 30-second preview. They are excluded up front.
- * 2. Duration — a 4-second or 34-second result is a snippet or a cover intro,
- *    not the song. Anything under 60 s is dropped, which is what makes "full
- *    length" true rather than merely "not a preview".
+ * MP3 IS PREFERRED, because the caller sends `audio/mpeg`. Transcoding needs
+ * ffmpeg, which is not guaranteed on every host — so when it is missing we ask
+ * for the best native audio stream instead and let `mimeFor()` report the
+ * truth. Either way the file is the WHOLE track, never a sample.
+ */
+async function downloadYt (video, dir, { ffmpeg }) {
+  const target = path.join(dir, 'track')
+  const args = [
+    '--no-playlist', '--no-warnings', '--quiet',
+    '--max-filesize', String(MAX_BYTES),
+    '-o', `${target}.%(ext)s`
+  ]
+
+  /*
+   * YouTube answers "Sign in to confirm you're not a bot" to datacenter IPs.
+   * A real deployment can pass cookies and the block goes away, so both forms
+   * are honoured when the operator sets them. Neither is required.
+   */
+  if (process.env.YTDLP_COOKIES_FILE) {
+    args.push('--cookies', process.env.YTDLP_COOKIES_FILE)
+  } else if (process.env.YTDLP_COOKIES_FROM_BROWSER) {
+    args.push('--cookies-from-browser', process.env.YTDLP_COOKIES_FROM_BROWSER)
+  }
+
+  if (ffmpeg) {
+    args.push('-f', 'bestaudio/best', '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0')
+  } else {
+    args.push('-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio')
+  }
+  args.push(video.url)
+
+  await run('yt-dlp', args, DOWNLOAD_TIMEOUT_MS)
+
+  const files = await fs.readdir(dir)
+  const audio = files.find(f => /^track\.(mp3|m4a|webm|opus|ogg|aac|wav)$/i.test(f))
+  if (!audio) return null
+
+  const full = path.join(dir, audio)
+  const st = await fs.stat(full)
+  if (!st.size || st.size > MAX_BYTES) return null
+  return full
+}
+
+/**
+ * Searches Audius for a full-length track — the fallback when yt-dlp is
+ * unavailable or YouTube is blocking the host.
  *
- * Among what survives, the result whose title and artist best match the query
- * wins, so "blinding lights the weeknd" does not return an unrelated remix.
+ * Two filters matter: `is_streamable` (unstreamable tracks 404 on /stream) and
+ * duration (a 34-second result is a snippet, not the song).
  */
 async function audiusSearch (query) {
   const q = String(query || '').trim()
@@ -108,33 +194,34 @@ async function audiusSearch (query) {
   const all = Array.isArray(j?.data) ? j.data : []
   if (!all.length) return null
 
-  const rows = all.filter(t => t.is_streamable !== false && Number(t.duration) >= 60)
+  const rows = all.filter(t => t.is_streamable !== false && Number(t.duration) >= MIN_FULL_SECONDS)
   if (!rows.length) return null
 
-  /*
-   * Prefer a normal song over a multi-hour mix.
-   *
-   * A search for "lofi hip hop" happily returns a 3-hour compilation, which is
-   * a legitimate result but a 100 MB download that blows the size cap and makes
-   * `!play` feel broken. Anything under 12 minutes is preferred; longer results
-   * are only used when nothing else matched.
-   */
+  /* Prefer a normal song over a multi-hour mix that would blow the size cap. */
   const normal = rows.filter(t => Number(t.duration) <= 12 * 60)
   const pool = normal.length ? normal : rows
 
   const words = q.toLowerCase().split(/\s+/).filter(w => w.length > 2)
+  /*
+   * A remix, bootleg, cover or sped-up edit is a different recording, not the
+   * song the user asked for. They are heavily represented on Audius, so they
+   * are pushed to the back of the queue rather than merely scored lower.
+   */
+  const DERIVATIVE = /\b(remix|bootleg|mashup|cover|sped\s*up|slowed|nightcore|instrumental|karaoke|8d|reverb|edit|flip|refix)\b/i
   const score = t => {
     const hay = `${t.title || ''} ${t.user?.name || ''}`.toLowerCase()
-    return words.reduce((n, w) => n + (hay.includes(w) ? 1 : 0), 0)
+    const hits = words.reduce((n, w) => n + (hay.includes(w) ? 1 : 0), 0)
+    return hits - (DERIVATIVE.test(hay) ? 100 : 0)
   }
   const best = pool.slice().sort((a, b) => score(b) - score(a))[0]
   if (!best?.id) return null
+  /* If every candidate is a derivative, there is no real match to offer. */
+  if (score(best) < 0) return null
 
   return {
     id: best.id,
     title: best.title || q,
     artist: best.user?.name || 'Unknown artist',
-    album: best.album_backlink ? '' : '',
     duration: Number(best.duration) || 0,
     artwork: best.artwork?.['1000x1000'] || best.artwork?.['480x480'] || best.artwork?.['150x150'] || '',
     stream: `${AUDIUS}/v1/tracks/${encodeURIComponent(best.id)}/stream?app_name=${APP_NAME}`
@@ -158,33 +245,7 @@ async function downloadAudius (track, dir) {
   } catch { return null } finally { clearTimeout(t) }
 }
 
-/**
- * Downloads the full track with yt-dlp, or null.
- *
- * NO POST-PROCESSING. `--extract-audio` needs ffmpeg, which is not guaranteed
- * on the host — and when it is missing yt-dlp downloads the file and then
- * throws during postprocessing, so the track is lost. Instead we ask for the
- * best native audio stream (m4a preferred, which WhatsApp plays directly) and
- * send it as-is with the matching mimetype.
- */
-async function downloadFull (track, dir) {
-  const target = path.join(dir, 'yt')
-  const query = `ytsearch1:${track.artist} - ${track.title} audio`
-  await run('yt-dlp', [
-    '--no-playlist', '--no-warnings', '--quiet',
-    '-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio',
-    '--max-filesize', String(MAX_BYTES),
-    '-o', `${target}.%(ext)s`,
-    query
-  ], DOWNLOAD_TIMEOUT_MS)
-  const files = await fs.readdir(dir)
-  const audio = files.find(f => /^yt\.(m4a|webm|mp3|opus|ogg|aac)$/i.test(f))
-  if (!audio) return null
-  const full = path.join(dir, audio)
-  const st = await fs.stat(full)
-  if (!st.size || st.size > MAX_BYTES) return null
-  return full
-}
+/* ------------------------------------------------------------------ output */
 
 /** The mimetype WhatsApp needs for a given file extension. */
 function mimeFor (file) {
@@ -192,23 +253,19 @@ function mimeFor (file) {
   if (ext === 'm4a' || ext === 'aac') return 'audio/mp4'
   if (ext === 'webm') return 'audio/webm'
   if (ext === 'ogg' || ext === 'opus') return 'audio/ogg; codecs=opus'
+  if (ext === 'wav') return 'audio/wav'
   return 'audio/mpeg'
 }
 
-/** Downloads the catalogue preview MP3, or null. Last resort only. */
-async function downloadPreview (track, dir) {
-  if (!track.preview) return null
-  const c = new AbortController()
-  const t = setTimeout(() => c.abort(), DOWNLOAD_TIMEOUT_MS)
-  try {
-    const r = await fetch(track.preview, { signal: c.signal })
-    if (!r.ok) return null
-    const buf = Buffer.from(await r.arrayBuffer())
-    if (!buf.length || buf.length > MAX_BYTES) return null
-    const file = path.join(dir, 'preview.mp3')
-    await fs.writeFile(file, buf)
-    return file
-  } catch { return null } finally { clearTimeout(t) }
+/** A safe WhatsApp file name: the song title, with the real extension. */
+function fileNameFor (title, file) {
+  const ext = String(file).split('.').pop().toLowerCase() || 'mp3'
+  const base = String(title || 'track')
+    .replace(/[\\/:*?"<>|\r\n\t]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80) || 'track'
+  return `${base}.${ext}`
 }
 
 function mmss (sec) {
@@ -217,7 +274,7 @@ function mmss (sec) {
 }
 
 /**
- * Resolves a query to a playable file.
+ * Resolves a query to a playable FULL track.
  *
  * @returns {Promise<{ok:boolean, track?:object, file?:string, full?:boolean, source?:string, message?:string}>}
  */
@@ -225,61 +282,84 @@ async function resolve (query, { logger } = {}) {
   const q = String(query || '').trim()
   if (!q) return { ok: false, message: 'No song found for that search.' }
 
-  /* Metadata and the full track are looked up in parallel: they are
-   * independent, and doing them together keeps `!play` feeling instant. */
-  const [meta, audius] = await Promise.all([
+  const [meta, yt, ffmpeg] = await Promise.all([
     deezerMeta(q).catch(() => null),
-    audiusSearch(q).catch(() => null)
+    hasBinary('yt-dlp').then(ok => (ok ? ytSearch(q).catch(() => null) : null)),
+    hasBinary('ffmpeg')
   ])
 
-  if (!meta && !audius) return { ok: false, message: 'No song found for that search.' }
+  if (!meta && !yt) return { ok: false, message: 'No song found for that search.' }
 
   /* Prefer the catalogue that actually has the audio, but keep the better
    * artwork and the real duration from Deezer when it has them. */
   const track = {
-    title: meta?.title || audius?.title || q,
-    artist: meta?.artist || audius?.artist || 'Unknown artist',
+    title: meta?.title || yt?.title || q,
+    artist: meta?.artist || yt?.artist || 'Unknown artist',
     album: meta?.album || '',
-    duration: meta?.duration || audius?.duration || 0,
-    artwork: meta?.artwork || audius?.artwork || '',
-    preview: meta?.preview || '',
-    url: meta?.url || ''
+    duration: meta?.duration || yt?.duration || 0,
+    artwork: meta?.artwork || yt?.artwork || '',
+    url: yt?.url || ''
   }
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'axyon-play-'))
   try {
     let file = null
-    let full = false
     let source = ''
 
-    /* 1. Audius — the normal path, and the only one that reliably returns a
-     *    full-length track without a key or a cookie. */
-    if (audius) {
-      file = await downloadAudius(audius, dir)
-      if (file) { full = true; source = 'audius' }
-    }
-
-    /* 2. yt-dlp, when the host has it and YouTube is not blocking. */
-    if (!file && await hasBinary('yt-dlp')) {
+    /* 1. yt-dlp — the normal path, and the one that returns the whole song. */
+    if (yt) {
       try {
-        file = await downloadFull(track, dir)
-        if (file) { full = true; source = 'yt-dlp' }
+        file = await downloadYt(yt, dir, { ffmpeg })
+        if (file) source = 'yt-dlp'
       } catch (e) {
-        logger?.warn?.({ err: e?.message }, 'yt-dlp download failed; trying the preview')
+        logger?.warn?.({ err: e?.message }, 'yt-dlp download failed; trying Audius')
       }
     }
 
-    /* 3. Deezer preview — last resort, and the caption says so. */
+    /* 2. Audius — full track, when yt-dlp is missing or YouTube is blocking. */
     if (!file) {
-      file = await downloadPreview(track, dir)
-      if (file) source = 'preview'
+      const audius = await audiusSearch(q).catch(() => null)
+      if (audius) {
+        file = await downloadAudius(audius, dir)
+        if (file) {
+          source = 'audius'
+          if (!track.duration) track.duration = audius.duration
+          if (!track.artwork) track.artwork = audius.artwork
+        }
+      }
     }
 
     if (!file) {
       await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
-      return { ok: false, message: 'Found the track but could not download the audio.' }
+      return { ok: false, message: 'Found the track but could not download the full audio.' }
     }
-    return { ok: true, track, file, full, source, dir }
+
+    /*
+     * A short file is a snippet, not a song. Measure what actually landed
+     * rather than trusting the search metadata, and refuse to send a preview.
+     */
+    const seconds = await probeSeconds(file)
+    if (seconds && seconds < MIN_FULL_SECONDS) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+      return { ok: false, message: 'Only a short clip was available for that track — no full song found.' }
+    }
+
+    /*
+     * A file that stops well before the track's known length is a truncated
+     * stream, not the song. This is what catches a catalogue that serves the
+     * first 90 seconds of a 3:20 track and calls it a stream.
+     */
+    if (seconds && track.duration && seconds < track.duration * 0.85) {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+      return {
+        ok: false,
+        message: `Only ${mmss(seconds)} of a ${mmss(track.duration)} track was available — no full song found.`
+      }
+    }
+
+    if (seconds && !track.duration) track.duration = seconds
+
+    return { ok: true, track, file, full: true, source, dir }
   } catch (e) {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
     logger?.warn?.({ err: e?.message }, 'play resolve failed')
@@ -287,8 +367,30 @@ async function resolve (query, { logger } = {}) {
   }
 }
 
+/** Real duration of a downloaded file, via ffprobe. 0 when it cannot tell. */
+async function probeSeconds (file) {
+  try {
+    const out = await run('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', file
+    ], 10000)
+    return Math.round(Number(String(out).trim()) || 0)
+  } catch { return 0 }
+}
+
 async function cleanup (dir) {
   if (dir) await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
 }
 
-module.exports = { resolve, search: deezerMeta, audiusSearch, cleanup, mmss, hasBinary, mimeFor }
+module.exports = {
+  resolve,
+  search: deezerMeta,
+  ytSearch,
+  audiusSearch,
+  cleanup,
+  mmss,
+  hasBinary,
+  mimeFor,
+  fileNameFor,
+  probeSeconds
+}
