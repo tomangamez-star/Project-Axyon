@@ -100,7 +100,30 @@ const COOKIES_FILE = path.join(__dirname, '..', 'data', 'cookies.txt')
  * omitted rather than passed as a broken value, so the error stays honest.
  */
 const JS_RUNTIME = 'deno'
-const PLAYER_CLIENT = 'mweb'
+
+/*
+ * THE FORMAT LADDER — WHY `bestaudio` ALONE IS NOT ENOUGH
+ * ------------------------------------------------------
+ * With these cookies YouTube exposes two kinds of stream on the mweb client:
+ *
+ *   format 251 (webm/opus)  audio-only, but its media URL now requires a GVS
+ *                           PO token. yt-dlp warns about it and the fetch
+ *                           returns HTTP 403, so `bestaudio` picks a stream
+ *                           that cannot actually be downloaded.
+ *   format 18  (mp4)        muxed audio+video, no PO token needed, and ffmpeg
+ *                           strips the audio out. This is the one that works.
+ *
+ * So the download walks a ladder: prefer a real audio-only stream, fall back
+ * to the muxed one, and only then give up. Each rung is a separate yt-dlp run
+ * in a clean directory, because a failed run can leave a partial file behind.
+ */
+const PLAYER_CLIENTS = ['mweb', 'web_embedded', 'default']
+
+/** Format selectors, best first. `best` is the muxed stream that still works. */
+const FORMAT_LADDER = [
+  { label: 'audio-only', selector: 'bestaudio[ext=m4a]/bestaudio' },
+  { label: 'muxed', selector: 'best' }
+]
 
 /** True when the challenge solver runtime is available (bundle or PATH). */
 function hasJsRuntime () {
@@ -118,12 +141,12 @@ function hasJsRuntime () {
 }
 
 /** The yt-dlp flags that make a datacenter request look like a real browser. */
-function youtubeArgs () {
+function youtubeArgs (client = PLAYER_CLIENTS[0]) {
   const args = []
   const jar = cookiesPath()
   if (jar) args.push('--cookies', jar)
   if (hasJsRuntime()) args.push('--js-runtimes', JS_RUNTIME)
-  args.push('--extractor-args', `youtube:player_client=${PLAYER_CLIENT}`)
+  args.push('--extractor-args', `youtube:player_client=${client}`)
   return args
 }
 
@@ -252,50 +275,78 @@ async function downloadYt (video, dir, { ffmpeg }) {
     return { file: null, step: 'download', error: 'yt-dlp is not installed on this host' }
   }
 
-  const target = path.join(dir, 'track')
-  const args = [
-    '--no-playlist', '--no-warnings', '--quiet',
-    '--max-filesize', String(MAX_BYTES),
-    '-o', `${target}.%(ext)s`
-  ]
+  const attempts = []
+  let n = 0
 
   /*
-   * YouTube answers "Sign in to confirm you're not a bot" to datacenter IPs.
-   * The committed jar (data/cookies.txt) plus the challenge solver and the
-   * mweb client are what make the request look like a real browser and expose
-   * a downloadable audio stream. See youtubeArgs() above.
+   * Walk the client x format ladder. The first rung that produces a real file
+   * wins; every failure is recorded so the final error names what was tried
+   * instead of only the last thing that broke.
    */
-  args.push(...youtubeArgs())
-  if (!cookiesPath() && process.env.YTDLP_COOKIES_FROM_BROWSER) {
-    args.push('--cookies-from-browser', process.env.YTDLP_COOKIES_FROM_BROWSER)
+  for (const client of PLAYER_CLIENTS) {
+    for (const rung of FORMAT_LADDER) {
+      n += 1
+      const sub = path.join(dir, `try${n}`)
+      await fs.mkdir(sub, { recursive: true })
+      const target = path.join(sub, 'track')
+
+      const args = [
+        '--no-playlist', '--no-warnings', '--quiet',
+        '--max-filesize', String(MAX_BYTES),
+        '--retries', '3', '--socket-timeout', '20',
+        '-o', `${target}.%(ext)s`,
+        ...youtubeArgs(client)
+      ]
+      if (!cookiesPath() && process.env.YTDLP_COOKIES_FROM_BROWSER) {
+        args.push('--cookies-from-browser', process.env.YTDLP_COOKIES_FROM_BROWSER)
+      }
+
+      if (ffmpeg) {
+        args.push('-f', rung.selector, '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0')
+      } else {
+        args.push('-f', rung.selector)
+      }
+      args.push(video.url)
+
+      try {
+        await run(bin, args, DOWNLOAD_TIMEOUT_MS)
+      } catch (e) {
+        attempts.push(`${client}/${rung.label}: ${tail(e?.stderr) || e?.message || 'unknown error'}`)
+        await fs.rm(sub, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+
+      const files = await fs.readdir(sub).catch(() => [])
+      const audio = files.find(f => /^track\.(mp3|m4a|mp4|webm|opus|ogg|aac|wav)$/i.test(f))
+      if (!audio) {
+        attempts.push(`${client}/${rung.label}: yt-dlp exited without producing an audio file`)
+        await fs.rm(sub, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+
+      const full = path.join(sub, audio)
+      const st = await fs.stat(full).catch(() => null)
+      if (!st?.size) {
+        attempts.push(`${client}/${rung.label}: downloaded file was empty`)
+        await fs.rm(sub, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+      if (st.size > MAX_BYTES) {
+        attempts.push(`${client}/${rung.label}: downloaded file exceeded the size cap`)
+        await fs.rm(sub, { recursive: true, force: true }).catch(() => {})
+        continue
+      }
+
+      return { file: full, client, format: rung.label }
+    }
   }
 
-  if (ffmpeg) {
-    args.push('-f', 'bestaudio/best', '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0')
-  } else {
-    args.push('-f', 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio')
+  return {
+    file: null,
+    step: ffmpeg ? 'download+transcode (ffmpeg)' : 'download',
+    error: attempts.length ? attempts[attempts.length - 1] : 'every download attempt failed',
+    attempts
   }
-  args.push(video.url)
-
-  try {
-    await run(bin, args, DOWNLOAD_TIMEOUT_MS)
-  } catch (e) {
-    /* Name the step and quote the tool, so the log says what actually broke. */
-    const why = tail(e?.stderr) || e?.message || 'unknown error'
-    return { file: null, step: ffmpeg ? 'download+transcode (ffmpeg)' : 'download', error: why }
-  }
-
-  const files = await fs.readdir(dir)
-  const audio = files.find(f => /^track\.(mp3|m4a|webm|opus|ogg|aac|wav)$/i.test(f))
-  if (!audio) {
-    return { file: null, step: 'download', error: 'yt-dlp exited without producing an audio file' }
-  }
-
-  const full = path.join(dir, audio)
-  const st = await fs.stat(full)
-  if (!st.size) return { file: null, step: 'download', error: 'downloaded file was empty' }
-  if (st.size > MAX_BYTES) return { file: null, step: 'download', error: 'downloaded file exceeded the size cap' }
-  return { file: full }
 }
 
 /**
@@ -305,6 +356,18 @@ async function downloadYt (video, dir, { ffmpeg }) {
  * Two filters matter: `is_streamable` (unstreamable tracks 404 on /stream) and
  * duration (a 34-second result is a snippet, not the song).
  */
+/**
+ * Strips the noise a YouTube title carries, so a fallback search can match.
+ * "Song (Official Music Video) [4K]" becomes "Song".
+ */
+function cleanQuery (q) {
+  return String(q || '')
+    .replace(/[([][^)\]]*[)\]]/g, ' ')
+    .replace(/\b(official\s*(music\s*)?video|official\s*audio|lyric\s*video|lyrics?|audio|hd|hq|4k|8k|visuali[sz]er|explicit|remaster(ed)?)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 async function audiusSearch (query) {
   const q = String(query || '').trim()
   if (!q) return null
@@ -368,7 +431,7 @@ async function downloadAudius (track, dir) {
 /** The mimetype WhatsApp needs for a given file extension. */
 function mimeFor (file) {
   const ext = String(file).split('.').pop().toLowerCase()
-  if (ext === 'm4a' || ext === 'aac') return 'audio/mp4'
+  if (ext === 'm4a' || ext === 'aac' || ext === 'mp4') return 'audio/mp4'
   if (ext === 'webm') return 'audio/webm'
   if (ext === 'ogg' || ext === 'opus') return 'audio/ogg; codecs=opus'
   if (ext === 'wav') return 'audio/wav'
@@ -453,15 +516,28 @@ async function resolve (query, { logger } = {}) {
       }
     }
 
-    /* 2. Audius — full track, when yt-dlp is missing or YouTube is blocking. */
+    /*
+     * 2. Audius — full track, when yt-dlp is missing or YouTube is blocking.
+     *
+     * The raw query is often a YouTube title ("Don Toliver - TORE UP [Official
+     * Music Video]"), which matches nothing on Audius. So the cleaned form is
+     * tried as a second pass before giving up — one YouTube failure should not
+     * leave the user with nothing.
+     */
     if (!file) {
-      const audius = await audiusSearch(q).catch(() => null)
-      if (audius) {
+      const queries = [q]
+      const cleaned = cleanQuery(q)
+      if (cleaned && cleaned.toLowerCase() !== q.toLowerCase()) queries.push(cleaned)
+
+      for (const aq of queries) {
+        const audius = await audiusSearch(aq).catch(() => null)
+        if (!audius) continue
         file = await downloadAudius(audius, dir)
         if (file) {
           source = 'audius'
           if (!track.duration) track.duration = audius.duration
           if (!track.artwork) track.artwork = audius.artwork
+          break
         }
       }
     }

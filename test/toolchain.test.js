@@ -149,6 +149,32 @@ test('music: the full-song behaviour is unchanged', () => {
   assert.doesNotMatch(src, /downloadPreview/)
 })
 
+test('music: the download walks a client x format ladder instead of one bestaudio call', () => {
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  /*
+   * Regression: `bestaudio` alone selects format 251, whose media URL now
+   * needs a GVS PO token and returns HTTP 403. The muxed `best` stream still
+   * downloads, so the ladder must try both, and more than one player client.
+   */
+  assert.match(src, /const PLAYER_CLIENTS = \[[^\]]*'mweb'/)
+  assert.match(src, /const FORMAT_LADDER = \[/)
+  assert.match(src, /selector: 'bestaudio\[ext=m4a\]\/bestaudio'/)
+  assert.match(src, /selector: 'best'/)
+  /* Every rung gets its own directory, so a partial file cannot be mistaken
+   * for a finished download. */
+  assert.match(src, /try\$\{n\}/)
+  /* The muxed stream is mp4; the mimetype must stay honest for it. */
+  assert.match(src, /ext === 'mp4'\) return 'audio\/mp4'/)
+})
+
+test('music: a YouTube failure still tries a cleaned Audius query', () => {
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  assert.match(src, /function cleanQuery/)
+  assert.match(src, /queries\.push\(cleaned\)/)
+  /* A YouTube title carries noise Audius cannot match. */
+  assert.match(src, /official\\s\*\(music\\s\*\)\?video/)
+})
+
 test('music: the sent file name is the song title with the real extension', () => {
   assert.strictEqual(music.fileNameFor('Blinding Lights', '/tmp/x/track.mp3'), 'Blinding Lights.mp3')
   assert.strictEqual(music.fileNameFor('A/B: C?', '/tmp/x/track.m4a'), 'A B C.m4a')
