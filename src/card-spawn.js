@@ -2,19 +2,20 @@
 
 /*
  * AXYON CARD SPAWNER
- * Uses the three original Tempest/Rimuru card renderers. Character identity
- * and portrait are retrieved from AniList; no AI image generation is claimed.
- * A drop is global: the first successful database transaction owns it.
+ * Uses the upgraded Old Gen renderer only. Danbooru is the primary artwork
+ * source; AniList is an identity-matched character fallback. A drop is global:
+ * the first successful database transaction owns it.
  */
 const crypto = require('crypto')
 const store = require('./axyon-store')
-const renderers = [
-  { key: 'hunt', render: require('./card-renderers/hunt-card') },
-  { key: 'old-gen', render: require('./card-renderers/special-hunt-card') },
-  { key: 'jtf-signature', render: require('./card-renderers/jtf-gen-card') }
-]
+const artwork = require('./card-artwork')
+const renderers = [{ key: 'old-gen', render: require('./card-renderers/special-hunt-card') }]
 
 const AUTO_INTERVAL_MS = 6 * 60 * 60 * 1000
+// Generated drops default to a 30-day validity window; set 0 for permanent.
+const CARD_VALIDITY_DAYS = process.env.AXYON_CARD_VALIDITY_DAYS == null
+  ? 30
+  : Math.max(0, Math.min(3650, Number.parseInt(process.env.AXYON_CARD_VALIDITY_DAYS, 10) || 0))
 const TIER_WEIGHTS = [
   { tier: 1, weight: 45 }, { tier: 2, weight: 27 }, { tier: 3, weight: 15 },
   { tier: 4, weight: 8 }, { tier: 5, weight: 4 }, { tier: 6, weight: 1 }
@@ -50,6 +51,7 @@ async function fetchCharacter () {
         name { full }
         image { large }
         favourites
+        media(perPage: 1, sort: POPULARITY_DESC) { nodes { title { english romaji } } }
       }
     }
   }`
@@ -72,6 +74,7 @@ async function fetchCharacter () {
       id: picked.id,
       name: picked.name.full,
       imageUrl: picked.image.large,
+      series: picked.media?.nodes?.[0]?.title?.english || picked.media?.nodes?.[0]?.title?.romaji || 'Anime',
       favorites: Number(picked.favourites) || 0
     }
   } finally {
@@ -79,24 +82,7 @@ async function fetchCharacter () {
   }
 }
 
-async function fetchImage (url) {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 20000)
-  try {
-    const response = await fetch(url, {
-      headers: { Accept: 'image/*', 'User-Agent': 'AXYON-Core/1.0' },
-      signal: controller.signal
-    })
-    if (!response.ok) throw new Error(`Character artwork request failed (${response.status})`)
-    const type = String(response.headers.get('content-type') || '').split(';')[0]
-    if (!type.startsWith('image/')) throw new Error('AniList did not return an image')
-    const data = Buffer.from(await response.arrayBuffer())
-    if (!data.length || data.length > 12 * 1024 * 1024) throw new Error('Character artwork is empty or too large')
-    return data
-  } finally {
-    clearTimeout(timeout)
-  }
-}
+async function fetchImage (url) { return artwork.fetchBuffer(url) }
 
 function buildCard (character, tier) {
   const weapon = WEAPONS[Math.floor(Math.random() * WEAPONS.length)]
@@ -105,7 +91,7 @@ function buildCard (character, tier) {
     id: character.id,
     character_id: `anilist-${character.id}`,
     name: character.name,
-    series: 'Anime Character',
+    series: character.series || 'Anime Character',
     favorites: character.favorites,
     forced_tier: tier,
     rarity: ['common', 'rare', 'epic', 'legendary', 'mythic', 'godlike'][tier - 1],
@@ -113,7 +99,8 @@ function buildCard (character, tier) {
     damage: 8 + tier * 7,
     ability,
     ability_damage: 12 + tier * 9,
-    rating: tier
+    rating: tier,
+    expires_at: CARD_VALIDITY_DAYS > 0 ? new Date(Date.now() + CARD_VALIDITY_DAYS * 86400000).toISOString() : null
   }
 }
 
@@ -140,8 +127,10 @@ async function createAndBroadcast (sock, options = {}) {
     const character = await fetchCharacter()
     const tier = rollTier()
     const card = buildCard(character, tier)
-    const sourceBuffer = await fetchImage(character.imageUrl)
-    const renderer = renderers[Math.floor(Math.random() * renderers.length)]
+    const art = await artwork.resolveArtwork({ name: character.name, kind: 'character', fallbackUrl: character.imageUrl, series: character.series || 'Anime' })
+    card.series = art.series || character.series || 'Anime'
+    const sourceBuffer = art.buffer
+    const renderer = renderers[0]
     if (!renderer.render.available()) throw new Error(`The ${renderer.key} renderer is unavailable. Install sharp and redeploy.`)
     const rendered = await renderer.render.render(card, sourceBuffer)
     if (!rendered?.buffer || !Buffer.isBuffer(rendered.buffer)) throw new Error('The card renderer returned no image.')
@@ -153,15 +142,19 @@ async function createAndBroadcast (sock, options = {}) {
         created = await store.createCardDrop({
           code,
           name: character.name,
+          series: card.series,
           weapon: card.weapon,
           damage: card.damage,
           ability: card.ability,
           abilityDamage: card.ability_damage,
           rating: tier,
-          imageUrl: character.imageUrl,
+          cardType: 'character',
+          imageUrl: art.fileUrl || character.imageUrl,
           imageData: rendered.buffer,
           renderer: renderer.key,
-          sourceUrl: character.imageUrl
+          sourceUrl: art.sourceUrl || character.imageUrl,
+          sourceArtist: art.sourceArtist || '',
+          expiresAt: card.expires_at
         })
         break
       } catch (error) {
@@ -180,6 +173,8 @@ async function createAndBroadcast (sock, options = {}) {
       `Damage: *${card.damage}*`,
       `Ability: *${card.ability}* (${card.ability_damage} damage)`,
       `Rating: *${tier}/6*`,
+      `Artwork: *${art.source}*${art.sourceArtist ? ` • ${art.sourceArtist}` : ''}`,
+      ...(art.sourceUrl ? [`Source: ${art.sourceUrl}`] : []),
       '',
       `Claim code: *#${created.claim_code}*`,
       'First successful claim wins globally.',
@@ -211,6 +206,74 @@ async function createAndBroadcast (sock, options = {}) {
   } finally {
     running = false
   }
+}
+
+async function createPlayerCard (ownerId, input = {}) {
+  const cardType = String(input.cardType || 'character').toLowerCase() === 'weapon' ? 'weapon' : 'character'
+  const identity = String(input.name || '').trim()
+  if (!identity) throw new Error('Card name is required.')
+  const art = input.imageUrl
+    ? { buffer: await artwork.fetchBuffer(input.imageUrl), source: 'AXYON supplied artwork', sourceUrl: input.imageUrl, fileUrl: input.imageUrl, sourceArtist: '', series: input.series || 'AXYON ARCHIVE' }
+    : await artwork.resolveArtwork({
+        name: identity,
+        kind: cardType,
+        series: input.series || (cardType === 'weapon' ? 'AXYON ARMORY' : 'Anime')
+      })
+  const card = {
+    name: identity,
+    series: input.series || art.series || (cardType === 'weapon' ? 'AXYON ARMORY' : 'ANIME'),
+    card_type: cardType,
+    weapon: input.weapon || (cardType === 'weapon' ? identity : ''),
+    damage: Math.max(0, Math.min(999999, Number(input.damage) || 0)),
+    ability: String(input.ability || '').slice(0, 100),
+    ability_damage: Math.max(0, Math.min(999999, Number(input.abilityDamage) || 0)),
+    rating: Math.max(1, Math.min(6, Number(input.rating) || 1)),
+    expires_at: input.expiresAt || null,
+    forced_tier: Math.max(1, Math.min(6, Number(input.rating) || 1)),
+    character_id: `admin-${Date.now()}`
+  }
+  const renderer = renderers[0]
+  if (!renderer.render.available()) throw new Error('Sharp is required for card image rendering.')
+  const rendered = await renderer.render.render(card, art.buffer)
+  const saved = await store.addCard(ownerId, {
+    name: card.name,
+    cardType,
+    series: card.series,
+    weapon: card.weapon,
+    damage: card.damage,
+    ability: card.ability,
+    abilityDamage: card.ability_damage,
+    rating: card.rating,
+    expiresAt: card.expires_at,
+    claimed: true,
+    imageUrl: art.fileUrl || input.imageUrl || '',
+    imageData: rendered.buffer,
+    renderer: renderer.key,
+    sourceUrl: art.sourceUrl || '',
+    sourceArtist: art.sourceArtist || ''
+  })
+  return { card: saved, artwork: art, rendered }
+}
+
+async function renderUpdatedArtwork (card, imageUrl) {
+  const art = imageUrl
+    ? { buffer: await artwork.fetchBuffer(imageUrl), source: 'AXYON supplied artwork', sourceUrl: imageUrl, fileUrl: imageUrl, sourceArtist: '' }
+    : await artwork.resolveArtwork({ name: card.name, kind: card.card_type || 'character' })
+  const renderer = renderers[0]
+  const payload = {
+    name: card.name,
+    series: card.series || (card.card_type === 'weapon' ? 'AXYON ARMORY' : 'ANIME'),
+    card_type: card.card_type || 'character',
+    weapon: card.weapon,
+    damage: card.damage,
+    ability: card.ability,
+    ability_damage: card.ability_damage,
+    rating: card.rating,
+    forced_tier: card.rating,
+    expires_at: card.expires_at || card.expiresAt || null
+  }
+  const rendered = await renderer.render.render(payload, art.buffer)
+  return { art, rendered }
 }
 
 async function tick () {
@@ -247,8 +310,13 @@ function stop (sock) {
 
 module.exports = {
   AUTO_INTERVAL_MS,
+  CARD_VALIDITY_DAYS,
   createAndBroadcast,
   start,
   stop,
-  fetchCharacter
+  fetchCharacter,
+  createPlayerCard,
+  renderUpdatedArtwork,
+  renderers,
+  artwork
 }

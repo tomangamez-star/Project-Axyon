@@ -139,6 +139,9 @@ async function ensureSchema () {
       id BIGSERIAL PRIMARY KEY,
       owner_id TEXT NOT NULL,
       slot INT NOT NULL DEFAULT 1,
+      equipped_slot SMALLINT,
+      card_type TEXT NOT NULL DEFAULT 'character',
+      series TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       weapon TEXT NOT NULL DEFAULT '',
       damage INT NOT NULL DEFAULT 0,
@@ -151,8 +154,17 @@ async function ensureSchema () {
       image_data BYTEA,
       renderer TEXT NOT NULL DEFAULT '',
       source_url TEXT NOT NULL DEFAULT '',
+      source_artist TEXT NOT NULL DEFAULT '',
+      ability_uses SMALLINT NOT NULL DEFAULT 0,
+      ability_day TEXT NOT NULL DEFAULT '',
       drop_code TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS equipped_slot SMALLINT;
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS card_type TEXT NOT NULL DEFAULT 'character';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS series TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS ability_uses SMALLINT NOT NULL DEFAULT 0;
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS ability_day TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS source_artist TEXT NOT NULL DEFAULT '';
     ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT '';
     ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS image_data BYTEA;
     ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS renderer TEXT NOT NULL DEFAULT '';
@@ -172,9 +184,20 @@ async function ensureSchema () {
       image_data BYTEA NOT NULL,
       renderer TEXT NOT NULL DEFAULT '',
       source_url TEXT NOT NULL DEFAULT '',
+      source_artist TEXT NOT NULL DEFAULT '',
+      card_type TEXT NOT NULL DEFAULT 'character',
+      series TEXT NOT NULL DEFAULT '',
+      expires_at TIMESTAMPTZ,
       claimed_by TEXT,
       claimed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    ALTER TABLE axyon_card_drops ADD COLUMN IF NOT EXISTS source_artist TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_card_drops ADD COLUMN IF NOT EXISTS card_type TEXT NOT NULL DEFAULT 'character';
+    ALTER TABLE axyon_card_drops ADD COLUMN IF NOT EXISTS series TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_card_drops ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS axyon_cards_owner ON axyon_cards(owner_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS axyon_cards_equipped_slot_unique
+      ON axyon_cards(owner_id,equipped_slot) WHERE equipped_slot IS NOT NULL;
     CREATE INDEX IF NOT EXISTS axyon_card_drops_unclaimed ON axyon_card_drops(created_at) WHERE claimed_by IS NULL;
     CREATE TABLE IF NOT EXISTS axyon_card_spawn_state(
       singleton_id SMALLINT PRIMARY KEY DEFAULT 1 CHECK(singleton_id=1),
@@ -272,6 +295,16 @@ async function ensureSchema () {
   for (const m of ['duel', 'solo', 'multiplayer', 'party']) {
     await db().query('INSERT INTO axyon_modes(mode,enabled,max_players) VALUES($1,TRUE,$2) ON CONFLICT(mode) DO NOTHING', [m, DEFAULT_SETTINGS.partyMax])
   }
+  await db().query(`
+    WITH ranked AS (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY owner_id ORDER BY slot,id) AS rn
+      FROM axyon_cards WHERE claimed=TRUE AND equipped_slot IS NULL
+        AND (expires_at IS NULL OR expires_at>NOW())
+    )
+    UPDATE axyon_cards c SET equipped_slot=ranked.rn
+    FROM ranked WHERE c.id=ranked.id AND ranked.rn<=2
+      AND NOT EXISTS (SELECT 1 FROM axyon_cards e WHERE e.owner_id=c.owner_id AND e.equipped_slot IS NOT NULL)
+  `)
   ready = true
 }
 
@@ -616,35 +649,55 @@ async function cards (ownerId) {
   return (await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 ORDER BY slot,id', [ownerId])).rows
 }
 
-async function card (ownerId, slot) {
+async function card (ownerId, collectionNo) {
   await ensureSchema()
-  return (await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 AND slot=$2', [ownerId, slot])).rows[0] || null
+  return (await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 AND slot=$2', [ownerId, collectionNo])).rows[0] || null
 }
 
 async function addCard (ownerId, c) {
   await ensureSchema()
-  const r = await db().query(
-    `INSERT INTO axyon_cards(owner_id,slot,name,weapon,damage,ability,ability_damage,rating,expires_at,image_url,image_data,renderer,source_url,drop_code)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-    [ownerId, c.slot || 1, c.name, c.weapon || '', c.damage || 0, c.ability || '', c.abilityDamage || 0, c.rating || 1, c.expiresAt || null,
-      c.imageUrl || '', c.imageData || null, c.renderer || '', c.sourceUrl || '', c.dropCode || null]
-  )
-  return r.rows[0]
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [String(ownerId)])
+    await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
+    const number = Number(c.slot) > 0 ? Number(c.slot) : Number((await client.query(
+      'SELECT COALESCE(MAX(slot),0)+1 AS next FROM axyon_cards WHERE owner_id=$1', [ownerId]
+    )).rows[0].next)
+    const r = await client.query(
+      `INSERT INTO axyon_cards(owner_id,slot,equipped_slot,card_type,series,name,weapon,damage,ability,ability_damage,rating,claimed,expires_at,image_url,image_data,renderer,source_url,source_artist,drop_code)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+      [ownerId, number, c.equippedSlot || null, c.cardType || 'character', c.series || '', c.name, c.weapon || '', c.damage || 0,
+        c.ability || '', c.abilityDamage || 0, c.rating || 1, c.claimed === true, c.expiresAt || null,
+        c.imageUrl || '', c.imageData || null, c.renderer || '', c.sourceUrl || '', c.sourceArtist || '', c.dropCode || null]
+    )
+    await client.query('COMMIT')
+    return r.rows[0]
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
 }
 
-async function claimCard (ownerId, slot) {
+async function claimCard (ownerId, collectionNo) {
   await ensureSchema()
-  const r = await db().query('UPDATE axyon_cards SET claimed=TRUE WHERE owner_id=$1 AND slot=$2 RETURNING *', [ownerId, slot])
+  const r = await db().query(
+    `UPDATE axyon_cards SET claimed=TRUE
+     WHERE owner_id=$1 AND slot=$2 AND claimed=FALSE AND (expires_at IS NULL OR expires_at>NOW()) RETURNING *`,
+    [ownerId, collectionNo]
+  )
   return r.rows[0] || null
 }
 
 async function createCardDrop (drop) {
   await ensureSchema()
   const r = await db().query(
-    `INSERT INTO axyon_card_drops(claim_code,name,weapon,damage,ability,ability_damage,rating,image_url,image_data,renderer,source_url)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,claim_code,name,weapon,damage,ability,ability_damage,rating,renderer,source_url,created_at`,
+    `INSERT INTO axyon_card_drops(claim_code,name,weapon,damage,ability,ability_damage,rating,image_url,image_data,renderer,source_url,source_artist,card_type,series,expires_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     RETURNING id,claim_code,name,weapon,damage,ability,ability_damage,rating,renderer,source_url,source_artist,card_type,series,expires_at,created_at`,
     [drop.code, drop.name, drop.weapon || '', drop.damage || 0, drop.ability || '', drop.abilityDamage || 0,
-      drop.rating || 1, drop.imageUrl || '', drop.imageData, drop.renderer || '', drop.sourceUrl || '']
+      drop.rating || 1, drop.imageUrl || '', drop.imageData, drop.renderer || '', drop.sourceUrl || '',
+      drop.sourceArtist || '', drop.cardType || 'character', drop.series || '', drop.expiresAt || null]
   )
   return r.rows[0]
 }
@@ -656,49 +709,134 @@ async function claimCardDrop (ownerId, rawCode) {
   try {
     await client.query('BEGIN')
     const player = await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
-    if (!player.rows[0]) {
-      await client.query('ROLLBACK')
-      return { ok: false, reason: 'not_registered' }
-    }
+    if (!player.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_registered' } }
     const found = await client.query('SELECT * FROM axyon_card_drops WHERE claim_code=$1 FOR UPDATE', [code])
     const drop = found.rows[0]
-    if (!drop) {
-      await client.query('ROLLBACK')
-      return { ok: false, reason: 'not_found' }
+    if (!drop) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' } }
+    if (drop.claimed_by) { await client.query('ROLLBACK'); return { ok: false, reason: 'claimed' } }
+    if (drop.expires_at && new Date(drop.expires_at).getTime() <= Date.now()) {
+      await client.query('ROLLBACK'); return { ok: false, reason: 'expired' }
     }
-    if (drop.claimed_by) {
-      await client.query('ROLLBACK')
-      return { ok: false, reason: 'claimed' }
-    }
-    const owned = await client.query('SELECT slot FROM axyon_cards WHERE owner_id=$1 ORDER BY slot FOR UPDATE', [ownerId])
-    const used = new Set(owned.rows.map(r => Number(r.slot)))
-    const slot = [1, 2].find(n => !used.has(n))
-    if (!slot) {
-      await client.query('ROLLBACK')
-      return { ok: false, reason: 'full' }
-    }
+    const slotResult = await client.query('SELECT COALESCE(MAX(slot),0)+1 AS next FROM axyon_cards WHERE owner_id=$1', [ownerId])
+    const collectionNo = Number(slotResult.rows[0].next)
     const updated = await client.query(
       'UPDATE axyon_card_drops SET claimed_by=$2,claimed_at=NOW() WHERE id=$1 AND claimed_by IS NULL RETURNING id',
       [drop.id, ownerId]
     )
-    if (!updated.rows[0]) {
-      await client.query('ROLLBACK')
-      return { ok: false, reason: 'claimed' }
-    }
+    if (!updated.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'claimed' } }
     const inserted = await client.query(
-      `INSERT INTO axyon_cards(owner_id,slot,name,weapon,damage,ability,ability_damage,rating,claimed,image_url,image_data,renderer,source_url,drop_code)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,TRUE,$9,$10,$11,$12,$13) RETURNING *`,
-      [ownerId, slot, drop.name, drop.weapon, drop.damage, drop.ability, drop.ability_damage, drop.rating,
-        drop.image_url, drop.image_data, drop.renderer, drop.source_url, drop.claim_code]
+      `INSERT INTO axyon_cards(owner_id,slot,card_type,series,name,weapon,damage,ability,ability_damage,rating,claimed,expires_at,image_url,image_data,renderer,source_url,source_artist,drop_code)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+      [ownerId, collectionNo, drop.card_type || 'character', drop.series || '', drop.name, drop.weapon, drop.damage, drop.ability,
+        drop.ability_damage, drop.rating, drop.expires_at, drop.image_url, drop.image_data, drop.renderer,
+        drop.source_url, drop.source_artist || '', drop.claim_code]
     )
     await client.query('COMMIT')
-    return { ok: true, card: inserted.rows[0], slot }
+    return { ok: true, card: inserted.rows[0], slot: collectionNo }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
     throw error
-  } finally {
-    client.release()
-  }
+  } finally { client.release() }
+}
+
+async function equipCard (ownerId, collectionNo, requestedSlot = null) {
+  await ensureSchema()
+  if (requestedSlot != null && ![1, 2].includes(Number(requestedSlot))) return { ok: false, reason: 'invalid_slot' }
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
+    await client.query('UPDATE axyon_cards SET equipped_slot=NULL WHERE owner_id=$1 AND equipped_slot IS NOT NULL AND expires_at<=NOW()', [ownerId])
+    const found = await client.query(
+      `SELECT * FROM axyon_cards WHERE owner_id=$1 AND slot=$2 AND claimed=TRUE FOR UPDATE`, [ownerId, collectionNo]
+    )
+    const c = found.rows[0]
+    if (!c) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_owned' } }
+    if (c.expires_at && new Date(c.expires_at).getTime() <= Date.now()) {
+      await client.query('ROLLBACK'); return { ok: false, reason: 'expired' }
+    }
+    let target = Number(requestedSlot)
+    if (![1, 2].includes(target) && c.equipped_slot) target = Number(c.equipped_slot)
+    if (![1, 2].includes(target)) {
+      const used = await client.query('SELECT equipped_slot FROM axyon_cards WHERE owner_id=$1 AND equipped_slot IS NOT NULL FOR UPDATE', [ownerId])
+      const occupied = new Set(used.rows.map(x => Number(x.equipped_slot)))
+      target = [1, 2].find(x => !occupied.has(x))
+      if (!target) { await client.query('ROLLBACK'); return { ok: false, reason: 'slots_full' } }
+    }
+    await client.query('UPDATE axyon_cards SET equipped_slot=NULL WHERE owner_id=$1 AND slot=$2', [ownerId, collectionNo])
+    await client.query('UPDATE axyon_cards SET equipped_slot=NULL WHERE owner_id=$1 AND equipped_slot=$2', [ownerId, target])
+    const updated = await client.query('UPDATE axyon_cards SET equipped_slot=$3 WHERE owner_id=$1 AND slot=$2 RETURNING *', [ownerId, collectionNo, target])
+    await client.query('COMMIT')
+    return { ok: true, card: updated.rows[0], equippedSlot: target }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
+}
+
+async function unequipCard (ownerId, equippedSlot) {
+  await ensureSchema()
+  if (![1, 2].includes(Number(equippedSlot))) return null
+  const r = await db().query(
+    'UPDATE axyon_cards SET equipped_slot=NULL WHERE owner_id=$1 AND equipped_slot=$2 RETURNING *', [ownerId, Number(equippedSlot)]
+  )
+  return r.rows[0] || null
+}
+
+async function equippedCards (ownerId) {
+  await ensureSchema()
+  await db().query('UPDATE axyon_cards SET equipped_slot=NULL WHERE owner_id=$1 AND equipped_slot IS NOT NULL AND expires_at<=NOW()', [ownerId])
+  return (await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 AND equipped_slot IS NOT NULL ORDER BY equipped_slot', [ownerId])).rows
+}
+
+async function useCardAbility (ownerId, equippedSlot) {
+  await ensureSchema()
+  const today = dayKey()
+  const r = await db().query(
+    `UPDATE axyon_cards SET
+       ability_uses=CASE WHEN ability_day=$3 THEN ability_uses+1 ELSE 1 END,
+       ability_day=$3
+     WHERE owner_id=$1 AND equipped_slot=$2 AND claimed=TRUE
+       AND (expires_at IS NULL OR expires_at>NOW())
+       AND CASE WHEN ability_day=$3 THEN ability_uses ELSE 0 END < 3
+       AND ability IS NOT NULL AND ability<>''
+     RETURNING *`, [ownerId, Number(equippedSlot), today]
+  )
+  if (r.rows[0]) return { ok: true, card: r.rows[0] }
+  const current = await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 AND equipped_slot=$2', [ownerId, Number(equippedSlot)])
+  const c = current.rows[0]
+  if (!c) return { ok: false, reason: 'empty_slot' }
+  if (c.expires_at && new Date(c.expires_at).getTime() <= Date.now()) return { ok: false, reason: 'expired' }
+  if (!c.ability) return { ok: false, reason: 'no_ability' }
+  return { ok: false, reason: 'depleted' }
+}
+
+async function editCard (ownerId, collectionNo, patch) {
+  await ensureSchema()
+  const allowed = { name: 'name', cardType: 'card_type', series: 'series', weapon: 'weapon', damage: 'damage', ability: 'ability', abilityDamage: 'ability_damage', rating: 'rating', expiresAt: 'expires_at', imageUrl: 'image_url', imageData: 'image_data', renderer: 'renderer', sourceUrl: 'source_url', sourceArtist: 'source_artist' }
+  const keys = Object.keys(patch || {}).filter(k => allowed[k])
+  if (!keys.length) return null
+  const values = [ownerId, collectionNo]
+  const sets = keys.map((k, i) => { values.push(patch[k]); return `${allowed[k]}=$${i + 3}` })
+  const r = await db().query(`UPDATE axyon_cards SET ${sets.join(',')} WHERE owner_id=$1 AND slot=$2 RETURNING *`, values)
+  return r.rows[0] || null
+}
+
+async function removeCard (ownerId, collectionNo) {
+  await ensureSchema()
+  const r = await db().query('DELETE FROM axyon_cards WHERE owner_id=$1 AND slot=$2 RETURNING *', [ownerId, collectionNo])
+  return r.rows[0] || null
+}
+
+async function cardDrops () {
+  await ensureSchema()
+  return (await db().query('SELECT * FROM axyon_card_drops ORDER BY created_at DESC LIMIT 30')).rows
+}
+
+async function removeCardDrop (code) {
+  await ensureSchema()
+  const r = await db().query('DELETE FROM axyon_card_drops WHERE claim_code=$1 AND claimed_by IS NULL RETURNING *', [String(code || '').replace(/^#/, '').trim().toUpperCase()])
+  return r.rows[0] || null
 }
 
 async function cardSpawnState () {
@@ -1058,6 +1196,14 @@ module.exports = {
   claimCard,
   createCardDrop,
   claimCardDrop,
+  equipCard,
+  unequipCard,
+  equippedCards,
+  useCardAbility,
+  editCard,
+  removeCard,
+  cardDrops,
+  removeCardDrop,
   cardSpawnState,
   setLastAutoCardSpawnAt,
   socialRequest,

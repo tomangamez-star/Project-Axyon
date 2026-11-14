@@ -10,6 +10,7 @@
  * anywhere in this file — every outcome is Math.random() plus fixed tables.
  */
 const store = require('./axyon-store')
+const cardSpawner = require('./card-spawn')
 const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
@@ -227,7 +228,7 @@ function battleCard (b, p, note = '') {
     hunter,
     '',
     T.rule('', 'dotted'),
-    `Uses \u2014 heal ${T.m(Math.max(0, b.healsLeft))} \u2022 class ${T.m(Math.max(0, 3 - p.classMovesUsed))} \u2022 card ${T.m(Math.max(0, 3 - p.cardUses))}`
+    `Uses \u2014 heal ${T.m(Math.max(0, b.healsLeft))} \u2022 class ${T.m(Math.max(0, 3 - p.classMovesUsed))} \u2022 card abilities ${T.m('3 per card/day')}`
   ].filter(x => x !== null && x !== undefined).join('\n')
 }
 
@@ -367,31 +368,100 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     ]
   }
 
-  async function cardPanel (sock, m, ctx) {
+  function cardExpiryText (value) {
+    if (!value) return 'PERMANENT'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return 'PERMANENT'
+    const left = date.getTime() - Date.now()
+    return left <= 0 ? `EXPIRED (${date.toISOString().slice(0, 10)})` : `${date.toISOString().slice(0, 10)} (${Math.ceil(left / 86400000)}d left)`
+  }
+
+  async function cardPanel (sock, m, ctx, requestedPage = 1) {
     const rows = await store.cards(ctx.userId)
-    if (!rows.length) {
-      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udccf *CARD COLLECTION*\n\nYou hold no cards yet.\nWatch registered groups for six-hour card drops, or receive one from AXYON.`)
-    }
-    const lines = rows.map(c => {
-      const exp = c.expires_at ? new Date(c.expires_at).toISOString().slice(0, 10) : 'never'
-      return [
-        `*${c.slot}. ${c.name}*${c.claimed ? ' \u2705' : ''}`,
-        `   \ud83d\udde1\ufe0f ${c.weapon || '\u2014'} \u2022 \ud83d\udca5 ${c.damage}`,
-        `   \u2728 ${c.ability || '\u2014'} \u2022 \ud83d\udca5 ${c.ability_damage}`,
-        `   \u2b50 ${c.rating} \u2022 \u23f3 ${exp}`
-      ].join('\n')
-    })
-    const defs = rows.slice(0, 6).map(c => [`\ud83c\udccf ${c.name}`, `ax_claim_${c.slot}`])
-    await buttons(sock, ctx.jid, m, [WATERMARK, '', '\ud83c\udccf *CARD COLLECTION*', '', lines.join('\n\n'), '', `Card abilities: *${ctx.settings.cardAbilitiesPerDay}* per day.`].join('\n'), WATERMARK, defs)
-    for (const c of rows) {
-      if (Buffer.isBuffer(c.image_data) && c.image_data.length) {
-        await sock.sendMessage(ctx.jid, {
-          image: c.image_data,
-          caption: `\ud83c\udccf *${c.name}*\nWeapon: ${c.weapon || '\u2014'} \u2022 Damage: ${c.damage}\nAbility: ${c.ability || '\u2014'} \u2022 Ability damage: ${c.ability_damage}\nRating: ${c.rating}/6`
-        }, { quoted: m })
+    const equippedCount = rows.filter(c => c.equipped_slot && (!c.expires_at || new Date(c.expires_at).getTime() > Date.now())).length
+    const pageSize = 10
+    const pages = Math.max(1, Math.ceil(rows.length / pageSize))
+    const page = Math.max(1, Math.min(pages, Number(requestedPage) || 1))
+    const visibleRows = rows.slice((page - 1) * pageSize, page * pageSize)
+    const lines = [WATERMARK, '', '⌬ *CARD ARCHIVE*', `Owned: *${rows.length}* • Equipped: *${equippedCount}/2* • Page: *${page}/${pages}*`, '']
+    if (!rows.length) lines.push('You hold no cards yet.', 'Watch registered groups for six-hour drops, or receive one from AXYON.')
+    else {
+      for (const c of visibleRows) {
+        const isExpired = c.expires_at && new Date(c.expires_at).getTime() <= Date.now()
+        const status = !c.claimed ? 'UNCLAIMED' : isExpired ? 'EXPIRED' : c.equipped_slot ? `EQUIPPED · SLOT ${c.equipped_slot}` : 'IN COLLECTION'
+        const todayUses = c.ability_day === new Date().toISOString().slice(0, 10) ? Number(c.ability_uses || 0) : 0
+        lines.push(
+          `*#${c.slot} ${c.name}*  _${status}_`,
+          `Series: *${c.series || '—'}*`,
+          `Type: *${String(c.card_type || 'character').toUpperCase()}* • Base DMG: *${c.damage}* • Rating: *${c.rating}/6*`,
+          `Ability: *${c.ability || '—'}* • Ability DMG: *${c.ability_damage}* • Uses: *${todayUses}/3 today*`,
+          `Expiry: *${cardExpiryText(c.expires_at)}*`, ''
+        )
       }
     }
+    const pageNav = pages > 1 ? [page > 1 ? `!cards ${page - 1} (previous)` : '', page < pages ? `!cards ${page + 1} (next)` : ''].filter(Boolean).join(' • ') : 'Only one page.'
+    lines.push('**CARD CONTROLS**', '!card <number> • !card equip <number> [slot 1|2]', '!card unequip <slot> • !card slots • !card abilities', '!card use <slot> (during battle) • !card inventory [page]', `Pages: *${pageNav}*`)
+    await send(sock, ctx.jid, m, lines.join('\n'))
+    // Keep the archive lightweight even when ownership is unlimited. Use
+    // `!card <number>` to open one card's artwork and complete details.
     return true
+  }
+
+  async function cardDetail (sock, m, ctx, collectionNo) {
+    let c = await store.card(ctx.userId, Number(collectionNo))
+    if (!c) return send(sock, ctx.jid, m, `No card #${collectionNo} exists in your collection.`)
+    // Upgrade inherited card art lazily, using its original stored artwork URL.
+    // If the old source is unavailable, preserve and show the existing image.
+    if (c.image_url && c.renderer !== 'old-gen') {
+      try {
+        const upgraded = await cardSpawner.renderUpdatedArtwork(c, c.image_url)
+        c = await store.editCard(ctx.userId, Number(collectionNo), { imageData: upgraded.rendered.buffer, renderer: 'old-gen' }) || c
+      } catch (error) { console.warn('[AXYON cards] legacy card re-render skipped:', error?.message || error) }
+    }
+    const todayUses = c.ability_day === new Date().toISOString().slice(0, 10) ? Number(c.ability_uses || 0) : 0
+    const text = [WATERMARK, '', `⌬ *${c.name}*`, `Collection number: *#${c.slot}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Daily ability uses: *${todayUses}/3*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, `Equipment: *${c.equipped_slot ? `Slot ${c.equipped_slot}` : 'Not equipped'}*`, `Status: *${c.claimed ? 'Owned' : 'Waiting to be claimed'}*`].join('\n')
+    if (Buffer.isBuffer(c.image_data) && c.image_data.length) return sock.sendMessage(ctx.jid, { image: c.image_data, caption: text }, { quoted: m })
+    return send(sock, ctx.jid, m, text)
+  }
+
+  async function equipCard (sock, m, ctx, collectionNo, targetSlot) {
+    const result = await store.equipCard(ctx.userId, Number(collectionNo), targetSlot)
+    const messages = { not_owned: 'That card is not in your claimed collection.', expired: 'Expired cards cannot be equipped.', slots_full: 'Both equipment slots are occupied. Choose slot 1 or 2 to replace one.', invalid_slot: 'Equipment slot must be 1 or 2.' }
+    if (!result.ok) return send(sock, ctx.jid, m, `❌ ${messages[result.reason] || 'Could not equip that card.'}`)
+    await store.log(ctx.userId, 'equip_card', String(collectionNo), { equippedSlot: result.equippedSlot })
+    return send(sock, ctx.jid, m, `✅ *${result.card.name}* equipped in card slot *${result.equippedSlot}*.`)
+  }
+
+  async function unequipCard (sock, m, ctx, targetSlot) {
+    const c = await store.unequipCard(ctx.userId, Number(targetSlot))
+    if (!c) return send(sock, ctx.jid, m, 'Choose an occupied equipment slot: *1* or *2*.')
+    await store.log(ctx.userId, 'unequip_card', String(targetSlot), { collectionNo: c.slot })
+    return send(sock, ctx.jid, m, `✅ *${c.name}* removed from equipment slot *${targetSlot}*. It remains in your collection.`)
+  }
+
+  async function cardSlots (sock, m, ctx) {
+    const rows = await store.equippedCards(ctx.userId)
+    const bySlot = new Map(rows.map(c => [Number(c.equipped_slot), c]))
+    const lines = [WATERMARK, '', '⌬ *CARD EQUIPMENT*', '']
+    for (const slot of [1, 2]) {
+      const c = bySlot.get(slot)
+      lines.push(`*SLOT ${slot}*`, c ? `#${c.slot} · *${c.name}* · Base ${c.damage} · Ability ${c.ability_damage}${c.expires_at && new Date(c.expires_at).getTime() <= Date.now() ? ' · EXPIRED (unequip/replace)' : ''}` : 'Empty', '')
+    }
+    lines.push('Only two cards can be equipped. Your owned collection is unlimited.')
+    return send(sock, ctx.jid, m, lines.join('\n'))
+  }
+
+  async function cardAbilities (sock, m, ctx) {
+    const rows = await store.equippedCards(ctx.userId)
+    const today = new Date().toISOString().slice(0, 10)
+    const lines = [WATERMARK, '', '⌬ *EQUIPPED CARD ABILITIES*', '']
+    if (!rows.length) lines.push('Equip a claimed card first.')
+    for (const c of rows) {
+      const uses = c.ability_day === today ? Number(c.ability_uses || 0) : 0
+      lines.push(`*Slot ${c.equipped_slot} · ${c.name}*`, `${c.ability || 'No ability'} · Ability damage: *${c.ability_damage}*`, `Uses today: *${uses}/3*`, '')
+    }
+    lines.push('Each equipped card has its own three-use daily limit. Reset is automatic at UTC midnight.')
+    return send(sock, ctx.jid, m, lines.join('\n'))
   }
 
   async function claimDrop (sock, m, ctx, code) {
@@ -401,49 +471,26 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         not_registered: 'Use !arise before claiming a card.',
         not_found: 'That claim code does not exist. Check the code and try again.',
         claimed: 'Someone already claimed that card. The first successful claim wins.',
-        full: 'Your two card slots are full. You cannot claim another card yet.'
+        expired: 'That card drop has expired.'
       }
-      return send(sock, ctx.jid, m, `\u274c ${messages[result.reason] || 'The card could not be claimed.'}`)
+      return send(sock, ctx.jid, m, `❌ ${messages[result.reason] || 'The card could not be claimed.'}`)
     }
     const c = result.card
-    await store.log(ctx.userId, 'claim_spawned_card', c.drop_code || code, { name: c.name, slot: result.slot })
-    const caption = [
-      `${WATERMARK}`, '', '\u2705 *CARD ACQUIRED*', '',
-      `*${c.name}*`,
-      `Slot: *${result.slot}/2*`,
-      `Weapon: *${c.weapon || '\u2014'}*`,
-      `Damage: *${c.damage}*`,
-      `Ability: *${c.ability || '\u2014'}*`,
-      `Ability damage: *${c.ability_damage}*`,
-      `Rating: *${c.rating}/6*`,
-      '',
-      'This card is now in your collection and ready for battle.'
-    ].join('\n')
-    if (Buffer.isBuffer(c.image_data) && c.image_data.length) {
-      await sock.sendMessage(ctx.jid, { image: c.image_data, caption }, { quoted: m })
-    } else {
-      await send(sock, ctx.jid, m, caption)
-    }
+    await store.log(ctx.userId, 'claim_spawned_card', c.drop_code || code, { name: c.name, collectionNo: result.slot })
+    const caption = [WATERMARK, '', '✅ *CARD ACQUIRED*', '', `*${c.name}*`, `Collection number: *#${result.slot}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, '', 'Unlimited collection. Equip up to two cards with !card equip.'].join('\n')
+    if (Buffer.isBuffer(c.image_data) && c.image_data.length) await sock.sendMessage(ctx.jid, { image: c.image_data, caption }, { quoted: m })
+    else await send(sock, ctx.jid, m, caption)
     return true
   }
 
-  async function claimCard (sock, m, ctx, slot) {
-    const c = await store.claimCard(ctx.userId, Number(slot))
-    if (!c) return send(sock, ctx.jid, m, `\u274c You have no card in slot *${slot}*.`)
-    await store.log(ctx.userId, 'claim_card', String(slot))
-    return send(sock, ctx.jid, m, [
-      `${WATERMARK}`, '', '\u2705 *CARD CLAIMED*', '',
-      `> \ud83c\udccf *${c.name}*`,
-      `\ud83d\udde1\ufe0f Weapon: *${c.weapon || '\u2014'}*`,
-      `\ud83d\udca5 Damage: *${c.damage}*`,
-      `\u2728 Ability: *${c.ability || '\u2014'}*`,
-      `\ud83d\udca5 Ability Damage: *${c.ability_damage}*`,
-      `\u2b50 Rating: *${c.rating}*`,
-      `\u23f3 Expires: *${c.expires_at ? new Date(c.expires_at).toISOString().slice(0, 10) : 'never'}*`
-    ].join('\n'))
+  async function claimCard (sock, m, ctx, collectionNo) {
+    const c = await store.claimCard(ctx.userId, Number(collectionNo))
+    if (!c) return send(sock, ctx.jid, m, `❌ Card #${collectionNo} is unavailable, already claimed, or expired.`)
+    await store.log(ctx.userId, 'claim_card', String(collectionNo))
+    return send(sock, ctx.jid, m, [WATERMARK, '', '✅ *CARD CLAIMED*', `*${c.name}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, '', `Equip it with *${ctx.settings.prefix}card equip ${c.slot}*`].join('\n'))
   }
 
-  async function battleAct (sock, m, ctx, action) {
+  async function battleAct (sock, m, ctx, action, cardSlot = 1) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
     const b = await store.getBattle(ctx.userId)
@@ -466,23 +513,30 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (b.energy < move.cost) return send(sock, ctx.jid, m, `\u26a1 Not enough Power Energy. *${move.name}* costs *${move.cost}*.`)
     }
 
+    let selectedAbility = null
     if (action === 'card') {
-      if (p.cardUses >= ctx.settings.cardAbilitiesPerDay) {
-        return send(sock, ctx.jid, m, `\ud83c\udccf *CARD ABILITIES SPENT*\n\nYou have used all *${ctx.settings.cardAbilitiesPerDay}* card abilities today.`)
+      const use = await store.useCardAbility(ctx.userId, Number(cardSlot))
+      if (!use.ok) {
+        const messages = {
+          empty_slot: `Equipment slot ${cardSlot} is empty. Use !card equip <number>.`,
+          expired: 'Expired cards cannot be used in combat.',
+          no_ability: 'That card has no ability assigned.',
+          depleted: 'That card has used all three ability charges for today.'
+        }
+        return send(sock, ctx.jid, m, `❌ ${messages[use.reason] || 'Card ability is unavailable.'}`)
       }
-      const owned = await store.cards(ctx.userId)
-      const card = owned.find(c => c.claimed)
-      if (!card) return send(sock, ctx.jid, m, '\ud83c\udccf You have no claimed card to call on.')
-      b.cardName = card.name
-      b.cardDamage = card.ability_damage || card.damage || 10
+      selectedAbility = use.card
     }
 
     let note = ''
     let dealt = 0
 
     if (action === 'attack') {
-      dealt = playerHit(p, b.enemy)
-      note = `\u2694\ufe0f You strike for *${dealt}*.`
+      const equipped = await store.equippedCards(ctx.userId)
+      const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
+      const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
+      dealt = playerHit(p, b.enemy, 1.0, baseBonus)
+      note = `\u2694\ufe0f You strike for *${dealt}*${baseBonus ? ` (includes ${weaponCard.name} +${baseBonus})` : ''}.`
     } else if (action === 'guard') {
       b.guard = 0.6
       note = '\ud83d\udee1\ufe0f You brace for the counter.'
@@ -501,10 +555,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       await store.savePlayer(p)
       note = `\ud83e\udde0 *${move.name}* lands for *${dealt}*.`
     } else if (action === 'card') {
-      dealt = playerHit(p, b.enemy, 1.0, b.cardDamage || 10)
-      p.cardUses += 1
-      await store.savePlayer(p)
-      note = `\ud83c\udccf *${b.cardName || 'Card'}* erupts for *${dealt}*.`
+      dealt = playerHit(p, b.enemy, 1.0, Number(selectedAbility?.ability_damage) || 0)
+      note = `\ud83c\udccf *${selectedAbility.name} · ${selectedAbility.ability}* erupts for *${dealt}*. (${selectedAbility.ability_uses}/3 today)`
     }
 
     b.enemyHp -= dealt
@@ -828,7 +880,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
-    cardPanel, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
+    cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
   }

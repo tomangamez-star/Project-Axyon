@@ -35,7 +35,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'top'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'top'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -98,7 +98,7 @@ const GAME_MODES = {
  */
 const MODE_FREE = new Set([
   'shop', 'buy', 'inventory', 'inv', 'use', 'items',
-  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard'
+  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard', 'card', 'cards', 'cardadmin'
 ])
 
 /** Which mode owns a command, or null when it is mode-free. */
@@ -292,13 +292,37 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ----------------------------------------------------------------- cards */
 
-  cmd('cards', 'cards', '{p}cards', 'Your card collection and stats.', async (s, m, ctx) => axyon.cardPanel(s, m, ctx))
-  cmd('claim', 'cards', '{p}claim card <n|#CODE>', 'Claim a granted card by slot or a spawned card by its code.', async (s, m, ctx, args) => {
+  cmd('cards', 'cards', '{p}cards [page]', 'Your full card collection and stats.', async (s, m, ctx, args) => axyon.cardPanel(s, m, ctx, parseNum(args[0]) || 1))
+  cmd('card', 'cards', '{p}card <number|equip|unequip|slots|abilities|use|inventory>', 'Inspect, equip and use your collectible cards.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || '').toLowerCase()
+    if (!sub || sub === 'inventory') return axyon.cardPanel(s, m, ctx, parseNum(args[1]) || 1)
+    if (sub === 'slots') return axyon.cardSlots(s, m, ctx)
+    if (sub === 'abilities') return axyon.cardAbilities(s, m, ctx)
+    if (sub === 'equip') {
+      const no = parseNum(args[1]); const slot = parseNum(args[2])
+      if (!no) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}card equip <collection number> [equipment slot 1|2]*`)
+      return axyon.equipCard(s, m, ctx, no, slot)
+    }
+    if (sub === 'unequip') {
+      const slot = parseNum(args[1])
+      if (![1, 2].includes(slot)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}card unequip 1|2*`)
+      return axyon.unequipCard(s, m, ctx, slot)
+    }
+    if (sub === 'use') {
+      const slot = parseNum(args[1])
+      if (![1, 2].includes(slot)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}card use 1|2* (during battle)`)
+      return axyon.battleAct(s, m, ctx, 'card', slot)
+    }
+    const no = parseNum(sub)
+    if (no) return axyon.cardDetail(s, m, ctx, no)
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}card <number|equip|unequip|slots|abilities|use|inventory>*`)
+  })
+  cmd('claim', 'cards', '{p}claim card <number|#CODE>', 'Claim a granted card or a global spawned drop.', async (s, m, ctx, args) => {
     const target = String(args[1] ?? args[0] ?? '').trim()
     if (/^#?[A-Z0-9]{6}$/i.test(target)) return axyon.claimDrop(s, m, ctx, target)
-    const slot = parseNum(target)
-    if (!slot) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}claim card 1* or *${ctx.prefix}claim card #F9GGK0*`)
-    return axyon.claimCard(s, m, ctx, slot)
+    const collectionNo = parseNum(target)
+    if (!collectionNo) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}claim card 1* or *${ctx.prefix}claim card #F9GGK0*`)
+    return axyon.claimCard(s, m, ctx, collectionNo)
   })
 
   /* ---------------------------------------------------------------- social */
@@ -720,13 +744,111 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}grantcard @player <name>*`)
     const name = args.slice(1).join(' ').trim()
     if (!name) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}grantcard @player <name>*`)
-    const existing = await store.cards(target)
-    const slot = existing.length + 1
     const c = await store.addCard(target, {
-      slot, name, weapon: 'Summoned Blade', damage: 24, ability: 'System Burst', abilityDamage: 18, rating: 3
+      name, cardType: 'character', weapon: 'Summoned Blade', damage: 24, ability: 'System Burst', abilityDamage: 18, rating: 3
     })
+    const slot = c.slot
     await store.log(ctx.userId, 'grant_card', target, { name, slot })
     return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83c\udccf *CARD GRANTED*\n\nTarget: *${target}*\nSlot: *${slot}*\nCard: *${c.name}*\n\nThey claim it with *${ctx.prefix}claim card ${slot}*`)
+  })
+
+  cmd('cardadmin', 'management', '{p}cardadmin <create|edit|art|delete|inspect|drops|cancel>', 'Manage the collectible card system (AXYON only).', async (s, m, ctx, args, content) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🛡️ *AXYON AUTHORITY REQUIRED*')
+    const sub = String(args[0] || '').toLowerCase()
+    const target = mentionedId(content) || norm(args[1] || '')
+    const raw = String(content?.conversation || content?.extendedTextMessage?.text || '')
+    const baseUsage = `*${ctx.prefix}cardadmin create @player <character|weapon> | Name | Series | BaseDamage | Ability | AbilityDamage | Rating | ExpiryDays | ImageURL(optional)*`
+
+    if (sub === 'create' || sub === 'give') {
+      const head = raw.replace(new RegExp(`^${ctx.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}cardadmin\\s+(?:create|give)\\s+`, 'i'), '')
+      const segments = head.split('|').map(x => x.trim())
+      const firstWords = String(segments[0] || '').split(/\s+/).filter(Boolean)
+      const type = String(firstWords.pop() || '').toLowerCase()
+      const player = target || String(firstWords.pop() || '').replace(/\D/g, '')
+      if (!/^\d{8,15}$/.test(player) || !['character', 'weapon'].includes(type) || segments.length < 7) {
+        return axyon.send(s, ctx.jid, m, `Usage: ${baseUsage}`)
+      }
+      const [name, series, damage, ability, abilityDamage, rating, expiryDays, imageUrl] = segments.slice(1)
+      if (!name || !Number.isFinite(Number(damage)) || !Number.isFinite(Number(abilityDamage)) || !Number.isFinite(Number(rating))) {
+        return axyon.send(s, ctx.jid, m, `Name, damage, ability damage and rating are required.\n${baseUsage}`)
+      }
+      const expiresAt = Number(expiryDays) > 0 ? new Date(Date.now() + Math.min(3650, Number(expiryDays)) * 86400000).toISOString() : null
+      const result = await cardSpawner.createPlayerCard(player, {
+        name, series, cardType: type, damage: Number(damage), ability,
+        abilityDamage: Number(abilityDamage), rating: Number(rating), expiresAt, imageUrl: imageUrl || ''
+      })
+      await store.log(ctx.userId, 'cardadmin_create', player, { card: result.card.name, collectionNo: result.card.slot, cardType: type })
+      return s.sendMessage(ctx.jid, { image: result.rendered.buffer, caption: `${W}\n\n✅ *CARD CREATED & GRANTED*\nTarget: *${player}*\nCollection: *#${result.card.slot}*\nCard: *${result.card.name}*\nArtwork: *${result.artwork.source}*${result.artwork.sourceArtist ? ` · ${result.artwork.sourceArtist}` : ''}\nSource: ${result.artwork.sourceUrl || 'not provided'}` }, { quoted: m })
+    }
+
+    if (['edit', 'art', 'delete', 'remove', 'inspect'].includes(sub)) {
+      if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}cardadmin ${sub} @player <collection number> ...*`)
+      const collectionNo = parseNum(args[2])
+      if (!collectionNo) return axyon.send(s, ctx.jid, m, `A valid collection number is required.`)
+      if (sub === 'inspect') {
+        const rows = await store.cards(target)
+        const c = rows.find(row => Number(row.slot) === collectionNo)
+        if (!c) return axyon.send(s, ctx.jid, m, 'That player has no card with that collection number.')
+        const today = new Date().toISOString().slice(0, 10)
+        const todayUses = c.ability_day === today ? Number(c.ability_uses || 0) : 0
+        return axyon.send(s, ctx.jid, m, `${W}\n\n*${c.name}* (#${c.slot})\nOwner: ${target}\nType: ${c.card_type}\nSeries: ${c.series || '—'}\nClaimed: ${c.claimed}\nEquipped: ${c.equipped_slot || 'no'}\nDamage: ${c.damage}\nAbility: ${c.ability} (${c.ability_damage})\nUses: ${todayUses}/3 today\nRating: ${c.rating}/6\nExpiry: ${c.expires_at || 'permanent'}\nArtist/source: ${c.source_artist || 'unknown'} · ${c.source_url || 'none'}`)
+      }
+      if (sub === 'delete' || sub === 'remove') {
+        const removed = await store.removeCard(target, collectionNo)
+        if (!removed) return axyon.send(s, ctx.jid, m, 'That card was not found.')
+        await store.log(ctx.userId, 'cardadmin_delete', target, { collectionNo, name: removed.name })
+        return axyon.send(s, ctx.jid, m, `✅ Removed *${removed.name}* from ${target}'s collection.`)
+      }
+      if (sub === 'art') {
+        const imageUrl = args.slice(3).join(' ').trim()
+        if (!/^https:\/\//i.test(imageUrl)) return axyon.send(s, ctx.jid, m, `Supply a direct HTTPS image URL. Usage: *${ctx.prefix}cardadmin art @player ${collectionNo} https://...jpg*`)
+        const existing = await store.card(target, collectionNo)
+        if (!existing) return axyon.send(s, ctx.jid, m, 'That card was not found.')
+        const rendered = await cardSpawner.renderUpdatedArtwork(existing, imageUrl)
+        const updated = await store.editCard(target, collectionNo, { imageUrl: rendered.art.fileUrl || imageUrl, imageData: rendered.rendered.buffer, sourceUrl: rendered.art.sourceUrl || imageUrl, sourceArtist: rendered.art.sourceArtist || '', renderer: 'old-gen' })
+        await store.log(ctx.userId, 'cardadmin_art', target, { collectionNo, name: existing.name })
+        return s.sendMessage(ctx.jid, { image: rendered.rendered.buffer, caption: `✅ Artwork refreshed for *${updated.name}*.\nSource: ${rendered.art.sourceUrl || imageUrl}` }, { quoted: m })
+      }
+      const field = String(args[3] || '').toLowerCase()
+      const value = args.slice(4).join(' ').trim()
+      const fields = {
+        name: { name: value }, series: { series: value }, type: { cardType: value.toLowerCase() }, damage: { damage: Math.min(999999, Math.max(0, Number(value) || 0)) },
+        ability: { ability: value }, abilitydamage: { abilityDamage: Math.min(999999, Math.max(0, Number(value) || 0)) },
+        rating: { rating: Math.max(1, Math.min(6, Number(value) || 1)) },
+        expiry: { expiresAt: Number(value) > 0 ? new Date(Date.now() + Math.min(3650, Number(value)) * 86400000).toISOString() : null },
+        weapon: { weapon: value }
+      }
+      const patch = fields[field]
+      if (field === 'type' && !['character', 'weapon'].includes(String(value).toLowerCase())) return axyon.send(s, ctx.jid, m, 'Card type must be character or weapon.')
+      if (!patch || (!value && field !== 'expiry')) return axyon.send(s, ctx.jid, m, `Editable fields: name, series, type, weapon, damage, ability, abilitydamage, rating, expiry.`)
+      const updated = await store.editCard(target, collectionNo, patch)
+      if (!updated) return axyon.send(s, ctx.jid, m, 'That card was not found.')
+      await store.log(ctx.userId, 'cardadmin_edit', target, { collectionNo, field, value })
+      if (updated.image_data && ['name', 'series', 'type', 'damage', 'ability', 'abilitydamage', 'rating', 'expiry', 'weapon'].includes(field)) {
+        const imageUrl = updated.image_url
+        if (imageUrl) {
+          try {
+            const rendered = await cardSpawner.renderUpdatedArtwork(updated, imageUrl)
+            const saved = await store.editCard(target, collectionNo, { imageData: rendered.rendered.buffer, renderer: 'old-gen' })
+            return s.sendMessage(ctx.jid, { image: rendered.rendered.buffer, caption: `✅ Updated *${saved.name}* (${field}).` }, { quoted: m })
+          } catch (error) { return axyon.send(s, ctx.jid, m, `Card data updated, but re-render failed: ${error.message}`) }
+        }
+      }
+      return axyon.send(s, ctx.jid, m, `✅ Updated *${updated.name}* · ${field}.`)
+    }
+
+    if (sub === 'drops') {
+      const drops = await store.cardDrops()
+      const rows = drops.length ? drops.map(d => `#${d.claim_code} · ${d.name} · ${d.claimed_by ? `claimed by ${d.claimed_by}` : 'available'}`).join('\n') : 'No drops in history.'
+      return axyon.send(s, ctx.jid, m, `${W}\n\n*CARD DROP HISTORY*\n\n${rows}`)
+    }
+    if (sub === 'cancel') {
+      const code = String(args[1] || '').replace(/^#/, '').toUpperCase()
+      if (!code) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}cardadmin cancel #CODE*`)
+      const removed = await store.removeCardDrop(code)
+      return axyon.send(s, ctx.jid, m, removed ? `✅ Unclaimed drop *#${code}* cancelled.` : `No unclaimed drop *#${code}* was found.`)
+    }
+    return axyon.send(s, ctx.jid, m, `${W}\n\n*CARD ADMIN*\n\n${baseUsage}\n*${ctx.prefix}cardadmin edit @player 1 damage 120*\n*${ctx.prefix}cardadmin art @player 1 https://...jpg*\n*${ctx.prefix}cardadmin delete @player 1*\n*${ctx.prefix}cardadmin inspect @player 1*\n*${ctx.prefix}cardadmin drops*\n*${ctx.prefix}cardadmin cancel #CODE*`)
   })
 
   /* ------------------------------------------------------- shop & inventory */
@@ -1004,7 +1126,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
         await axyon.send(sock, ctx.jid, m, greetings.groupNotRegistered(ctx.prefix))
         return true
       }
-      if (ctx.auth.axyon && !['register', 'groups', 'unregister', 'spawncard'].includes(parsed.command)) return true
+      if (ctx.auth.axyon && !['register', 'groups', 'unregister', 'spawncard', 'cardadmin'].includes(parsed.command)) return true
     }
 
     const command = BY_NAME.get(parsed.command)
@@ -1064,7 +1186,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
      * chat and a group the bot is allowed to act in. Outside a registered group
      * they are refused with a reason, not silently ignored.
      */
-    if (command.section === 'duel' || command.section === 'cards') {
+    if (command.section === 'duel') {
       if (!ctx.jid.endsWith('@g.us')) {
         await axyon.send(sock, ctx.jid, m, [
           T.header({ creators: greetings.creatorsOf(ctx.settings) }),
@@ -1072,7 +1194,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
           `\ud83e\udd4a ${T.b('GROUPS ONLY')}`,
           '',
           `${T.m(`${ctx.prefix}${parsed.command}`)} is a duel command.`,
-          'Duels and card fighting need a registered group.',
+          'Duels need a registered group. Your personal card collection works in private chat too.',
           '',
           T.rule('', 'hair'),
           `An admin registers a group with ${T.b(`${ctx.prefix}register`)}.`

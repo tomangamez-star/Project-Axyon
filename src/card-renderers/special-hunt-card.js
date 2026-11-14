@@ -1,193 +1,170 @@
-'use strict';
+'use strict'
 
-// JTF Cards — Old Gen / Special Hunt renderer.
-// Inspired by the layered 700x900 ASN old-generation template supplied by the
-// owner. The PSD itself is NOT bundled at runtime; Rimuru recreates the layout
-// with Sharp/SVG so deploys stay lightweight.
-
-const baseRenderer = require('./hunt-card');
-
-const WIDTH = 700;
-const HEIGHT = 900;
-
+// Upgraded Old Gen collectible renderer. All combat/card metadata is rendered
+// into this one image; no secondary WhatsApp-only stat card is required.
+const baseRenderer = require('./hunt-card')
+const WIDTH = 700
+const HEIGHT = 900
 const OLD_GEN = {
-  1: { symbol: 'C', label: 'COMMON', accent: '#8FC9FF', accent2: '#D9EEFF', glow: '#4B9CE8' },
-  2: { symbol: 'R', label: 'RARE', accent: '#51F28D', accent2: '#B9FFD1', glow: '#22C55E' },
-  3: { symbol: 'M', label: 'MYTHICAL', accent: '#B96CFF', accent2: '#F0C8FF', glow: '#7C3AED' },
-  4: { symbol: 'L', label: 'LEGACY', accent: '#A96AFF', accent2: '#FFD066', glow: '#7E22CE' },
-  5: { symbol: 'U', label: 'ULTIMATE', accent: '#FFD34F', accent2: '#FF8A2A', glow: '#EF6C00' },
-  6: { symbol: '✦', label: 'GODLIKE', accent: '#FFE476', accent2: '#FF4D3D', glow: '#FFB300' },
-};
-
-let sharpModule;
-let sharpLoadAttempted = false;
-function getSharp() {
-  if (sharpLoadAttempted) return sharpModule || null;
-  sharpLoadAttempted = true;
-  try { sharpModule = require('sharp'); }
-  catch (e) {
-    sharpModule = null;
-    console.warn(`[special-cards] sharp unavailable; Old Gen rendering disabled: ${e.message}`);
+  1: { symbol: 'C', label: 'COMMON', accent: '#8FC9FF', accent2: '#D9EEFF' },
+  2: { symbol: 'R', label: 'RARE', accent: '#51F28D', accent2: '#B9FFD1' },
+  3: { symbol: 'M', label: 'MYTHICAL', accent: '#B96CFF', accent2: '#F0C8FF' },
+  4: { symbol: 'L', label: 'LEGACY', accent: '#A96AFF', accent2: '#FFD066' },
+  5: { symbol: 'U', label: 'ULTIMATE', accent: '#FFD34F', accent2: '#FF8A2A' },
+  6: { symbol: '✦', label: 'GODLIKE', accent: '#FFE476', accent2: '#FF4D3D' }
+}
+let sharpModule
+let sharpLoadAttempted = false
+function getSharp () {
+  if (sharpLoadAttempted) return sharpModule || null
+  sharpLoadAttempted = true
+  try { sharpModule = require('sharp') } catch (error) {
+    sharpModule = null
+    console.warn(`[special-cards] sharp unavailable; Old Gen rendering disabled: ${error.message}`)
   }
-  return sharpModule;
+  return sharpModule
 }
-function available() { return !!getSharp(); }
-
-function clean(value, max = 600) {
-  return String(value == null ? '' : value)
-    .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/https?:\/\/\S+/gi, '')
-    .replace(/[\u0000-\u001F\u007F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, max);
+function available () { return !!getSharp() }
+function clean (value, max = 100) {
+  return String(value == null ? '' : value).replace(/<[^>]+>/g, ' ')
+    .replace(/https?:\/\/\S+/gi, '').replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, max)
 }
-function escapeXml(value) {
-  return clean(value, 1200)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+function esc (value) {
+  return clean(value, 180).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;')
 }
-function tierFor(card) { return baseRenderer.tierFor(card); }
-function oldTier(card) {
-  const t = tierFor(card);
-  return { ...t, ...(OLD_GEN[t.tier] || OLD_GEN[1]) };
+function tierFor (card) { return baseRenderer.tierFor(card) }
+function oldTier (card) { const t = tierFor(card); return { ...t, ...(OLD_GEN[t.tier] || OLD_GEN[1]) } }
+function hex (n) { return Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0') }
+function rgbToHsl (r, g, b) {
+  r /= 255; g /= 255; b /= 255
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min
+  let h = 0, s = 0
+  const l = (max + min) / 2
+  if (d) {
+    s = d / (1 - Math.abs(2 * l - 1))
+    if (max === r) h = ((g - b) / d) % 6
+    else if (max === g) h = (b - r) / d + 2
+    else h = (r - g) / d + 4
+    h *= 60; if (h < 0) h += 360
+  }
+  return [h, s, l]
 }
-function nameSize(name) {
-  const n = clean(name, 100).length;
-  if (n <= 9) return 61;
-  if (n <= 14) return 53;
-  if (n <= 20) return 45;
-  if (n <= 28) return 37;
-  return 31;
+function hslToHex (h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2
+  let rgb = [0, 0, 0]
+  if (h < 60) rgb = [c, x, 0]
+  else if (h < 120) rgb = [x, c, 0]
+  else if (h < 180) rgb = [0, c, x]
+  else if (h < 240) rgb = [0, x, c]
+  else if (h < 300) rgb = [x, 0, c]
+  else rgb = [c, 0, x]
+  return `#${rgb.map(v => hex((v + m) * 255)).join('')}`
 }
-function wrap(value, chars = 50, lines = 4) {
-  const words = clean(value, chars * lines * 2).split(/\s+/).filter(Boolean);
-  const out = [];
-  let line = '';
+function paletteFrom (dominant, tier) {
+  if (!dominant || !Number.isFinite(dominant.r)) return { accent: tier.accent, accent2: tier.accent2, glow: tier.accent }
+  const [h, s, l] = rgbToHsl(dominant.r, dominant.g, dominant.b)
+  const accent = hslToHex((h + 12) % 360, Math.max(.55, s), Math.max(.48, Math.min(.72, l)))
+  const complement = hslToHex((h + 165) % 360, Math.max(.6, s), .72)
+  return { accent, accent2: complement, glow: accent }
+}
+function wrap (value, limit = 42, maxLines = 2) {
+  const words = clean(value, 180).split(/\s+/).filter(Boolean)
+  const lines = []; let line = ''
   for (const word of words) {
-    const next = line ? `${line} ${word}` : word;
-    if (next.length > chars && line) {
-      out.push(line); line = word;
-      if (out.length >= lines - 1) break;
-    } else line = next;
+    const next = line ? `${line} ${word}` : word
+    if (next.length > limit && line) { lines.push(line); line = word; if (lines.length === maxLines - 1) break }
+    else line = next
   }
-  if (line && out.length < lines) out.push(line);
-  if (!out.length) out.push('A rare JTF collectible has entered the archive.');
-  return out;
+  if (line && lines.length < maxLines) lines.push(line)
+  return lines.length ? lines : ['—']
 }
-function starRow(tier, accent) {
-  const n = Math.max(1, Math.min(6, Number(tier) || 1));
-  const spacing = n >= 6 ? 53 : 58;
-  const start = WIDTH / 2 - ((n - 1) * spacing) / 2;
-  return Array.from({ length: n }, (_, i) =>
-    `<text x="${start + i * spacing}" y="633" text-anchor="middle" font-size="46" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${accent}" stroke="#FFF4D0" stroke-width="1.6" paint-order="stroke">★</text>`
-  ).join('');
+function expiryLabel (value) {
+  if (!value) return 'PERMANENT'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'PERMANENT'
+  const remaining = date.getTime() - Date.now()
+  const dayCount = Math.ceil(remaining / 86400000)
+  const dateText = date.toISOString().slice(0, 10)
+  return remaining <= 0 ? `EXPIRED • ${dateText}` : `${dateText} • ${dayCount}D LEFT`
 }
-function chainPath(x1, y1, x2, y2, accent, opacity = 0.7) {
-  const parts = 13;
-  let rings = '';
-  for (let i = 0; i <= parts; i++) {
-    const p = i / parts;
-    const x = x1 + (x2 - x1) * p;
-    const y = y1 + (y2 - y1) * p;
-    const rot = i % 2 ? 36 : -36;
-    rings += `<ellipse cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" rx="10" ry="5" transform="rotate(${rot} ${x.toFixed(1)} ${y.toFixed(1)})" fill="none" stroke="${accent}" stroke-width="3" opacity="${opacity}"/>`;
-  }
-  return rings;
+function starRow (rating, accent) {
+  const n = Math.max(1, Math.min(6, Number(rating) || 1))
+  const gap = 29, start = 350 - ((n - 1) * gap) / 2
+  return Array.from({ length: n }, (_, i) => `<text x="${start + i * gap}" y="607" text-anchor="middle" font-size="26" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${accent}" stroke="#101018" stroke-width="1.5" paint-order="stroke">★</text>`).join('')
 }
-function motif(cx, cy, r, accent) {
-  return `<g opacity="0.48"><circle cx="${cx}" cy="${cy}" r="${r}" fill="#08070A" fill-opacity="0.35" stroke="${accent}" stroke-width="4"/><circle cx="${cx}" cy="${cy}" r="${r * .62}" fill="none" stroke="${accent}" stroke-width="4"/><circle cx="${cx}" cy="${cy}" r="${r * .28}" fill="${accent}" fill-opacity="0.25" stroke="${accent}" stroke-width="3"/></g>`;
-}
-function overlaySvg(card) {
-  const tier = oldTier(card);
-  const nameRaw = clean(card.name || 'UNKNOWN', 100);
-  const name = escapeXml(nameRaw);
-  const seriesRaw = clean(card.series || 'UNKNOWN SERIES', 70).toUpperCase();
-  const series = escapeXml(seriesRaw);
-  const rawId = String(card.character_id || card.id || 'unknown').replace(/^anilist-/i, '');
-  const id = escapeXml(rawId);
-  const infoLines = wrap(card.bio || card.description || '', 44, 4).map(escapeXml);
-  const info = infoLines.map((line, i) => `<text x="350" y="${716 + i * 30}" text-anchor="middle" font-size="19" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="700" fill="#FFF7E3">${line}</text>`).join('');
-  const ns = nameSize(nameRaw);
-  const label = escapeXml(tier.label);
-  const symbol = escapeXml(tier.symbol);
-  const seriesSize = seriesRaw.length < 24 ? 22 : seriesRaw.length < 38 ? 18 : 14;
-
-  return Buffer.from(`<svg width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" xmlns="http://www.w3.org/2000/svg">
+function overlaySvg (card, palette = null) {
+  const tier = oldTier(card)
+  const colors = palette || { accent: tier.accent, accent2: tier.accent2, glow: tier.accent }
+  const name = esc(card.name || 'UNKNOWN')
+  const type = String(card.card_type || card.cardType || 'character').toUpperCase() === 'WEAPON' ? 'WEAPON' : 'CHARACTER'
+  const subtitle = esc(card.series || (type === 'WEAPON' ? 'AXYON ARMORY' : 'ANIME ARCHIVE')).toUpperCase()
+  const nameSize = name.length > 25 ? 34 : name.length > 18 ? 42 : name.length > 12 ? 49 : 57
+  const ability = wrap(card.ability || 'No ability assigned', 30, 2)
+  const abilityLines = ability.map((line, i) => `<text x="92" y="768" dy="${i * 24}" font-size="20" font-family="DejaVu Sans,Arial,sans-serif" font-weight="800" fill="#F5F7FF">${esc(line)}</text>`).join('')
+  const rarity = esc(tier.label)
+  const damage = Math.max(0, Number(card.damage) || 0)
+  const abilityDamage = Math.max(0, Number(card.ability_damage ?? card.abilityDamage) || 0)
+  const expiry = esc(expiryLabel(card.expires_at || card.expiresAt))
+  const weapon = esc(card.weapon || '—')
+  const id = esc(String(card.character_id || card.id || 'AXYON').replace(/^anilist-/i, ''))
+  return Buffer.from(`<svg width="700" height="900" viewBox="0 0 700 900" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${tier.accent}"/><stop offset="1" stop-color="${tier.accent2}"/></linearGradient>
-    <linearGradient id="bottom" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#050407" stop-opacity="0.05"/><stop offset="1" stop-color="#050407" stop-opacity="0.96"/></linearGradient>
-    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="5" result="b"/><feOffset dy="4" result="o"/><feComponentTransfer in="o"><feFuncA type="linear" slope="0.75"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${colors.accent}"/><stop offset="1" stop-color="${colors.accent2}"/></linearGradient>
+    <linearGradient id="heroFade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080B13" stop-opacity="0"/><stop offset=".44" stop-color="#080B13" stop-opacity=".18"/><stop offset=".66" stop-color="#080B13" stop-opacity=".86"/><stop offset="1" stop-color="#060810" stop-opacity=".99"/></linearGradient>
+    <linearGradient id="infoPanel" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${colors.accent}" stop-opacity=".23"/><stop offset=".55" stop-color="#080C17" stop-opacity=".94"/><stop offset="1" stop-color="${colors.accent2}" stop-opacity=".18"/></linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="4"/></filter>
   </defs>
-
-  <!-- Old Gen outer frame / supplied PSD proportions -->
-  <rect x="30" y="27" width="640" height="846" rx="12" fill="none" stroke="#08090B" stroke-width="17"/>
-  <rect x="39" y="36" width="622" height="828" rx="8" fill="none" stroke="url(#edge)" stroke-width="6" filter="url(#glow)"/>
-  <rect x="48" y="45" width="604" height="810" rx="4" fill="none" stroke="#FFF7E4" stroke-opacity="0.8" stroke-width="2"/>
-
-  <!-- tier-specific ambience -->
-  ${motif(583, 230, 62, tier.accent)}
-  ${motif(117, 760, 42, tier.accent)}
-  ${chainPath(70, 110, 180, 650, tier.accent, 0.56)}
-  ${chainPath(629, 92, 558, 665, tier.accent, 0.58)}
-  ${chainPath(85, 825, 300, 650, tier.accent, 0.42)}
-  ${chainPath(615, 820, 432, 650, tier.accent, 0.42)}
-
-  <!-- lower cinematic shade integrated over the art -->
-  <rect x="49" y="440" width="602" height="414" fill="url(#bottom)"/>
-
-  <!-- old-gen tier glyph -->
-  <path d="M54 49 L97 38 L128 65 L115 116 L73 130 L43 102 Z" fill="#09090D" fill-opacity="0.88" stroke="url(#edge)" stroke-width="4" filter="url(#shadow)"/>
-  <text x="84" y="93" text-anchor="middle" font-size="48" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="${tier.accent}" stroke="#160E09" stroke-width="1.4" paint-order="stroke">${symbol}</text>
-  <text x="84" y="116" text-anchor="middle" font-size="10" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.3" fill="#FFF7E4">T${tier.tier} ${label}</text>
-
-  <!-- character name dominates the composition like Old Gen cards -->
-  <text x="350" y="571" text-anchor="middle" font-size="${ns}" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="#FFE7A1" stroke="#7A2512" stroke-width="3.5" paint-order="stroke" filter="url(#shadow)">${name}</text>
-  ${starRow(tier.tier, tier.accent)}
-
-  <text x="78" y="664" font-size="18" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${tier.accent2}">INFO</text>
-  <text x="622" y="664" text-anchor="end" font-size="15" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${tier.accent2}">${label}</text>
-
-  <rect x="102" y="676" width="496" height="132" rx="12" fill="#08080C" fill-opacity="0.66" stroke="${tier.accent}" stroke-opacity="0.6" stroke-width="2"/>
-  ${info}
-
-  <text x="620" y="835" text-anchor="end" font-size="${seriesSize}" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${tier.accent2}" stroke="#1C0E0C" stroke-width="1.3" paint-order="stroke">${series}</text>
-  <text x="74" y="842" font-size="12" font-family="DejaVu Sans,Arial,sans-serif" font-weight="800" fill="#FFF7E4" opacity="0.8">#${id}</text>
-  <rect x="503" y="846" width="123" height="25" rx="7" fill="#09090D" fill-opacity="0.88" stroke="${tier.accent}" stroke-width="1.5"/>
-  <text x="565" y="864" text-anchor="middle" font-size="15" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="0.8" fill="#FFF7E4">JTF OLD GEN</text>
-  </svg>`);
+  <rect x="22" y="22" width="656" height="856" rx="18" fill="none" stroke="#05070C" stroke-width="20"/>
+  <rect x="32" y="32" width="636" height="836" rx="12" fill="none" stroke="url(#edge)" stroke-width="5" filter="url(#glow)"/>
+  <path d="M42 42 H166 L132 76 H42 Z M658 42 H534 L568 76 H658 Z M42 858 H170 L132 824 H42 Z M658 858 H530 L568 824 H658 Z" fill="${colors.accent}" opacity=".72"/>
+  <rect x="48" y="45" width="604" height="810" fill="url(#heroFade)"/>
+  <path d="M49 560 L128 560 L101 589 L49 589 Z M651 560 L572 560 L599 589 L651 589 Z" fill="${colors.accent2}" opacity=".68"/>
+  <path d="M50 622 L650 622 L630 856 L70 856 Z" fill="url(#infoPanel)" stroke="${colors.accent}" stroke-opacity=".76" stroke-width="2.5"/>
+  <path d="M50 622 L650 622 L628 640 L72 640 Z" fill="${colors.accent}" opacity=".82"/>
+  <path d="M50 622 L85 622 L68 640 L50 640 Z M650 622 L615 622 L632 640 L650 640 Z" fill="#F5F7FF" opacity=".55"/>
+  <path d="M54 54 L111 43 L145 78 L130 137 L76 151 L43 111 Z" fill="#080B13" fill-opacity=".9" stroke="url(#edge)" stroke-width="4"/>
+  <text x="94" y="101" text-anchor="middle" font-size="45" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${colors.accent2}">${esc(tier.symbol)}</text>
+  <text x="94" y="123" text-anchor="middle" font-size="10" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1" fill="#FFFFFF">T${tier.tier} ${rarity}</text>
+  <path d="M570 48 L650 48 L650 133 L608 151 L566 133 Z" fill="#080B13" fill-opacity=".93" stroke="url(#edge)" stroke-width="3"/>
+  <text x="608" y="83" text-anchor="middle" font-size="12" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.2" fill="#DCE6F5">RATING</text>
+  <text x="608" y="124" text-anchor="middle" font-size="34" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${colors.accent2}">${Math.max(1, Math.min(6, Number(card.rating) || tier.tier))}<tspan font-size="15" fill="#FFFFFF">/6</tspan></text>
+  <text x="350" y="535" text-anchor="middle" font-size="${nameSize}" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="#FFFFFF" stroke="#080B13" stroke-width="4" paint-order="stroke" filter="url(#glow)">${name}</text>
+  <text x="350" y="571" text-anchor="middle" font-size="16" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="3" fill="${colors.accent2}">${subtitle}</text>
+  ${starRow(card.rating || tier.tier, colors.accent2)}
+  <text x="82" y="660" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.5" fill="${colors.accent2}">BASE DAMAGE</text>
+  <text x="82" y="693" font-size="32" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${damage}</text>
+  <text x="350" y="660" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.5" fill="${colors.accent2}">CARD TYPE</text>
+  <text x="350" y="690" font-size="19" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${type}</text>
+  <text x="618" y="660" text-anchor="end" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.5" fill="${colors.accent2}">WEAPON</text>
+  <text x="618" y="690" text-anchor="end" font-size="14" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${weapon}</text>
+  <path d="M82 711 H618" stroke="${colors.accent2}" stroke-opacity=".42" stroke-width="1.5"/>
+  <text x="82" y="739" font-size="12" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.7" fill="${colors.accent2}">SPECIAL ABILITY</text>
+  ${abilityLines}
+  <rect x="462" y="725" width="156" height="79" rx="8" fill="#060912" fill-opacity=".88" stroke="${colors.accent}" stroke-width="1.5"/>
+  <text x="540" y="751" text-anchor="middle" font-size="10" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1" fill="${colors.accent2}">ABILITY DMG</text>
+  <text x="540" y="784" text-anchor="middle" font-size="27" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${abilityDamage}</text>
+  <text x="82" y="829" font-size="11" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.1" fill="${colors.accent2}">EXPIRY</text>
+  <text x="149" y="829" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${expiry}</text>
+  <text x="618" y="829" text-anchor="end" font-size="12" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF" opacity=".75">#${id.slice(0, 15)}</text>
+  <text x="350" y="854" text-anchor="middle" font-size="16" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="3" fill="#FFFFFF" opacity=".92">⌬ AXYN CORE</text>
+  </svg>`)
 }
-
-async function render(card, imageBuffer) {
-  const sharp = getSharp();
-  if (!sharp || !Buffer.isBuffer(imageBuffer) || !imageBuffer.length) return null;
-  const tier = oldTier(card);
-
-  // Special Hunt intentionally uses portrait premium art and a full-bleed
-  // cover crop. Unlike normal /hunt, there are no blurred sidebars: Old Gen is
-  // supposed to feel composed around the character rather than framed around a
-  // contained source picture.
-  const hero = await sharp(imageBuffer)
-    .rotate()
-    .resize(604, 810, { fit: 'cover', position: 'attention' })
-    .modulate({ saturation: 1.08, brightness: 0.98 })
-    .png()
-    .toBuffer();
-
-  const ambience = Buffer.from(`<svg width="700" height="900" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="g"><stop offset="0" stop-color="${tier.accent}" stop-opacity="0.25"/><stop offset="1" stop-color="#050508" stop-opacity="0.92"/></radialGradient></defs><rect width="700" height="900" fill="#050508"/><rect width="700" height="900" fill="url(#g)"/></svg>`);
-
-  const buffer = await sharp({ create: { width: WIDTH, height: HEIGHT, channels: 4, background: '#050508' } })
-    .composite([
-      { input: ambience, left: 0, top: 0 },
-      { input: hero, left: 48, top: 45 },
-      { input: overlaySvg(card), left: 0, top: 0 },
-    ])
-    .png({ compressionLevel: 9, adaptiveFiltering: true })
-    .toBuffer();
-
-  return { buffer, tier, width: WIDTH, height: HEIGHT, style: 'old-gen' };
+async function render (card, imageBuffer) {
+  const sharp = getSharp()
+  if (!sharp || !Buffer.isBuffer(imageBuffer) || !imageBuffer.length) return null
+  const tier = oldTier(card)
+  let dominant = null
+  try { dominant = (await sharp(imageBuffer).stats()).dominant } catch {}
+  const palette = paletteFrom(dominant, tier)
+  const hero = await sharp(imageBuffer).rotate().resize(604, 810, { fit: 'cover', position: 'attention' })
+    .modulate({ saturation: 1.08, brightness: 0.98 }).png().toBuffer()
+  const ambience = Buffer.from(`<svg width="700" height="900" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="a"><stop offset="0" stop-color="${palette.accent}" stop-opacity=".34"/><stop offset="1" stop-color="#05070C" stop-opacity=".98"/></radialGradient></defs><rect width="700" height="900" fill="#05070C"/><rect width="700" height="900" fill="url(#a)"/></svg>`)
+  const buffer = await sharp({ create: { width: WIDTH, height: HEIGHT, channels: 4, background: '#05070C' } })
+    .composite([{ input: ambience, left: 0, top: 0 }, { input: hero, left: 48, top: 45 }, { input: overlaySvg(card, palette), left: 0, top: 0 }])
+    .png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer()
+  return { buffer, tier, width: WIDTH, height: HEIGHT, style: 'old-gen' }
 }
-
-module.exports = { WIDTH, HEIGHT, OLD_GEN, available, tierFor, oldTier, overlaySvg, render };
+module.exports = { WIDTH, HEIGHT, OLD_GEN, available, tierFor, oldTier, overlaySvg, expiryLabel, paletteFrom, render }
