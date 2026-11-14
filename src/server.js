@@ -31,6 +31,7 @@ const { resolveMessageUserId } = require('./identity')
 const { shouldHandleUpsert, resolveButtonId, isCommandText, ReplyRateLimiter } = require('./message-guard')
 const accountConfig = require('./account-config')
 const store = require('./axyon-store')
+const cardSpawner = require('./card-spawn')
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 const port = Number(process.env.PORT || 3000)
@@ -259,6 +260,7 @@ class WhatsAppConnection {
         this.reconnectAttempt = 0
         this.pairingReady = true
         this.log.info('WhatsApp connected')
+        if (this.primary) cardSpawner.start(sock)
       }
       if (connection === 'close') void this.onClose(sock, g, lastDisconnect)
     })
@@ -271,6 +273,7 @@ class WhatsAppConnection {
     const code = d?.error?.output?.statusCode
     const message = String(d?.error?.message || '')
     const conflict = code === 440 || /conflict|replaced/i.test(message)
+    if (this.primary) cardSpawner.stop(sock)
     this.sock = null
     this.state = code === 401 ? 'logged-out' : conflict ? 'standby-conflict' : 'disconnected'
     if (this.stopping || code === 401 || code === 429) return
@@ -477,6 +480,7 @@ class WhatsAppConnection {
 
   async stop () {
     this.stopping = true
+    if (this.primary) cardSpawner.stop(this.sock)
     this.generation++
     try { this.sock?.end(undefined) } catch {}
     this.sock = null

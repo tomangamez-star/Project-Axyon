@@ -147,7 +147,40 @@ async function ensureSchema () {
       rating INT NOT NULL DEFAULT 1,
       claimed BOOLEAN NOT NULL DEFAULT FALSE,
       expires_at TIMESTAMPTZ,
+      image_url TEXT NOT NULL DEFAULT '',
+      image_data BYTEA,
+      renderer TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      drop_code TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS image_data BYTEA;
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS renderer TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+    ALTER TABLE axyon_cards ADD COLUMN IF NOT EXISTS drop_code TEXT;
+
+    CREATE TABLE IF NOT EXISTS axyon_card_drops(
+      id BIGSERIAL PRIMARY KEY,
+      claim_code TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      weapon TEXT NOT NULL DEFAULT '',
+      damage INT NOT NULL DEFAULT 0,
+      ability TEXT NOT NULL DEFAULT '',
+      ability_damage INT NOT NULL DEFAULT 0,
+      rating INT NOT NULL DEFAULT 1,
+      image_url TEXT NOT NULL DEFAULT '',
+      image_data BYTEA NOT NULL,
+      renderer TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      claimed_by TEXT,
+      claimed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    CREATE INDEX IF NOT EXISTS axyon_card_drops_unclaimed ON axyon_card_drops(created_at) WHERE claimed_by IS NULL;
+    CREATE TABLE IF NOT EXISTS axyon_card_spawn_state(
+      singleton_id SMALLINT PRIMARY KEY DEFAULT 1 CHECK(singleton_id=1),
+      last_auto_spawn_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    INSERT INTO axyon_card_spawn_state(singleton_id) VALUES(1) ON CONFLICT(singleton_id) DO NOTHING;
 
     CREATE TABLE IF NOT EXISTS axyon_social(
       id BIGSERIAL PRIMARY KEY,
@@ -591,9 +624,10 @@ async function card (ownerId, slot) {
 async function addCard (ownerId, c) {
   await ensureSchema()
   const r = await db().query(
-    `INSERT INTO axyon_cards(owner_id,slot,name,weapon,damage,ability,ability_damage,rating,expires_at)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-    [ownerId, c.slot || 1, c.name, c.weapon || '', c.damage || 0, c.ability || '', c.abilityDamage || 0, c.rating || 1, c.expiresAt || null]
+    `INSERT INTO axyon_cards(owner_id,slot,name,weapon,damage,ability,ability_damage,rating,expires_at,image_url,image_data,renderer,source_url,drop_code)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+    [ownerId, c.slot || 1, c.name, c.weapon || '', c.damage || 0, c.ability || '', c.abilityDamage || 0, c.rating || 1, c.expiresAt || null,
+      c.imageUrl || '', c.imageData || null, c.renderer || '', c.sourceUrl || '', c.dropCode || null]
   )
   return r.rows[0]
 }
@@ -602,6 +636,84 @@ async function claimCard (ownerId, slot) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_cards SET claimed=TRUE WHERE owner_id=$1 AND slot=$2 RETURNING *', [ownerId, slot])
   return r.rows[0] || null
+}
+
+async function createCardDrop (drop) {
+  await ensureSchema()
+  const r = await db().query(
+    `INSERT INTO axyon_card_drops(claim_code,name,weapon,damage,ability,ability_damage,rating,image_url,image_data,renderer,source_url)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id,claim_code,name,weapon,damage,ability,ability_damage,rating,renderer,source_url,created_at`,
+    [drop.code, drop.name, drop.weapon || '', drop.damage || 0, drop.ability || '', drop.abilityDamage || 0,
+      drop.rating || 1, drop.imageUrl || '', drop.imageData, drop.renderer || '', drop.sourceUrl || '']
+  )
+  return r.rows[0]
+}
+
+async function claimCardDrop (ownerId, rawCode) {
+  await ensureSchema()
+  const code = String(rawCode || '').replace(/^#/, '').trim().toUpperCase()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const player = await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
+    if (!player.rows[0]) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'not_registered' }
+    }
+    const found = await client.query('SELECT * FROM axyon_card_drops WHERE claim_code=$1 FOR UPDATE', [code])
+    const drop = found.rows[0]
+    if (!drop) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'not_found' }
+    }
+    if (drop.claimed_by) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'claimed' }
+    }
+    const owned = await client.query('SELECT slot FROM axyon_cards WHERE owner_id=$1 ORDER BY slot FOR UPDATE', [ownerId])
+    const used = new Set(owned.rows.map(r => Number(r.slot)))
+    const slot = [1, 2].find(n => !used.has(n))
+    if (!slot) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'full' }
+    }
+    const updated = await client.query(
+      'UPDATE axyon_card_drops SET claimed_by=$2,claimed_at=NOW() WHERE id=$1 AND claimed_by IS NULL RETURNING id',
+      [drop.id, ownerId]
+    )
+    if (!updated.rows[0]) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'claimed' }
+    }
+    const inserted = await client.query(
+      `INSERT INTO axyon_cards(owner_id,slot,name,weapon,damage,ability,ability_damage,rating,claimed,image_url,image_data,renderer,source_url,drop_code)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,TRUE,$9,$10,$11,$12,$13) RETURNING *`,
+      [ownerId, slot, drop.name, drop.weapon, drop.damage, drop.ability, drop.ability_damage, drop.rating,
+        drop.image_url, drop.image_data, drop.renderer, drop.source_url, drop.claim_code]
+    )
+    await client.query('COMMIT')
+    return { ok: true, card: inserted.rows[0], slot }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+async function cardSpawnState () {
+  await ensureSchema()
+  return (await db().query('SELECT * FROM axyon_card_spawn_state WHERE singleton_id=1')).rows[0] || null
+}
+
+async function setLastAutoCardSpawnAt (date = new Date()) {
+  await ensureSchema()
+  await db().query(
+    `INSERT INTO axyon_card_spawn_state(singleton_id,last_auto_spawn_at,updated_at)
+     VALUES(1,$1,NOW()) ON CONFLICT(singleton_id)
+     DO UPDATE SET last_auto_spawn_at=EXCLUDED.last_auto_spawn_at,updated_at=NOW()`,
+    [date]
+  )
 }
 
 /* ------------------------------------------------------------------ social */
@@ -944,6 +1056,10 @@ module.exports = {
   card,
   addCard,
   claimCard,
+  createCardDrop,
+  claimCardDrop,
+  cardSpawnState,
+  setLastAutoCardSpawnAt,
   socialRequest,
   pendingSocial,
   resolveSocial,

@@ -13,6 +13,7 @@ const store = require('./axyon-store')
 const greetings = require('./greetings')
 const T = require('./theme')
 const items = require('./axyon-items')
+const cardSpawner = require('./card-spawn')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -34,7 +35,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'top'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'top'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -97,7 +98,7 @@ const GAME_MODES = {
  */
 const MODE_FREE = new Set([
   'shop', 'buy', 'inventory', 'inv', 'use', 'items',
-  'mode', 'help', 'ping', 'arise', 'profile', 'ai'
+  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard'
 ])
 
 /** Which mode owns a command, or null when it is mode-free. */
@@ -292,9 +293,11 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* ----------------------------------------------------------------- cards */
 
   cmd('cards', 'cards', '{p}cards', 'Your card collection and stats.', async (s, m, ctx) => axyon.cardPanel(s, m, ctx))
-  cmd('claim', 'cards', '{p}claim card <n>', 'Claim a card by its slot number.', async (s, m, ctx, args) => {
-    const slot = parseNum(args[1] ?? args[0])
-    if (!slot) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}claim card 1*`)
+  cmd('claim', 'cards', '{p}claim card <n|#CODE>', 'Claim a granted card by slot or a spawned card by its code.', async (s, m, ctx, args) => {
+    const target = String(args[1] ?? args[0] ?? '').trim()
+    if (/^#?[A-Z0-9]{6}$/i.test(target)) return axyon.claimDrop(s, m, ctx, target)
+    const slot = parseNum(target)
+    if (!slot) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}claim card 1* or *${ctx.prefix}claim card #F9GGK0*`)
     return axyon.claimCard(s, m, ctx, slot)
   })
 
@@ -704,6 +707,13 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ------------------------------------------------------------- admin cards */
 
+  cmd('spawncard', 'management', '{p}spawncard', 'Generate and globally release a collectible card (AXYON owner only).', async (s, m, ctx) => {
+    if (!ctx.auth.owner) return axyon.send(s, ctx.jid, m, '🛡️ *AXYON OWNER ONLY*')
+    const result = await cardSpawner.createAndBroadcast(s, { announceJid: ctx.jid, quoted: m, manual: true })
+    if (!result.ok) return axyon.send(s, ctx.jid, m, `⚠️ Card spawn failed: ${result.reason}`)
+    return axyon.send(s, ctx.jid, m, `✅ *CARD DROP RELEASED*\n\nCharacter: *${result.card.name}*\nClaim code: *#${result.code}*\nBroadcast: *${result.sent}/${result.total}* chats\nRenderer: *${result.renderer}*`)
+  })
+
   cmd('grantcard', 'management', '{p}grantcard @player <name>', 'Grant a card to a player (AXYON).', async (s, m, ctx, args, content) => {
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*')
     const target = mentionedId(content) || norm(args[0] || '')
@@ -994,7 +1004,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
         await axyon.send(sock, ctx.jid, m, greetings.groupNotRegistered(ctx.prefix))
         return true
       }
-      if (ctx.auth.axyon && !['register', 'groups', 'unregister'].includes(parsed.command)) return true
+      if (ctx.auth.axyon && !['register', 'groups', 'unregister', 'spawncard'].includes(parsed.command)) return true
     }
 
     const command = BY_NAME.get(parsed.command)

@@ -370,7 +370,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function cardPanel (sock, m, ctx) {
     const rows = await store.cards(ctx.userId)
     if (!rows.length) {
-      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udccf *CARD COLLECTION*\n\nYou hold no cards yet.\nCards are granted by AXYON or won in Duels.`)
+      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udccf *CARD COLLECTION*\n\nYou hold no cards yet.\nWatch registered groups for six-hour card drops, or receive one from AXYON.`)
     }
     const lines = rows.map(c => {
       const exp = c.expires_at ? new Date(c.expires_at).toISOString().slice(0, 10) : 'never'
@@ -382,7 +382,49 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       ].join('\n')
     })
     const defs = rows.slice(0, 6).map(c => [`\ud83c\udccf ${c.name}`, `ax_claim_${c.slot}`])
-    return buttons(sock, ctx.jid, m, [WATERMARK, '', '\ud83c\udccf *CARD COLLECTION*', '', lines.join('\n\n'), '', `Card abilities: *${ctx.settings.cardAbilitiesPerDay}* per day.`].join('\n'), WATERMARK, defs)
+    await buttons(sock, ctx.jid, m, [WATERMARK, '', '\ud83c\udccf *CARD COLLECTION*', '', lines.join('\n\n'), '', `Card abilities: *${ctx.settings.cardAbilitiesPerDay}* per day.`].join('\n'), WATERMARK, defs)
+    for (const c of rows) {
+      if (Buffer.isBuffer(c.image_data) && c.image_data.length) {
+        await sock.sendMessage(ctx.jid, {
+          image: c.image_data,
+          caption: `\ud83c\udccf *${c.name}*\nWeapon: ${c.weapon || '\u2014'} \u2022 Damage: ${c.damage}\nAbility: ${c.ability || '\u2014'} \u2022 Ability damage: ${c.ability_damage}\nRating: ${c.rating}/6`
+        }, { quoted: m })
+      }
+    }
+    return true
+  }
+
+  async function claimDrop (sock, m, ctx, code) {
+    const result = await store.claimCardDrop(ctx.userId, code)
+    if (!result.ok) {
+      const messages = {
+        not_registered: 'Use !arise before claiming a card.',
+        not_found: 'That claim code does not exist. Check the code and try again.',
+        claimed: 'Someone already claimed that card. The first successful claim wins.',
+        full: 'Your two card slots are full. You cannot claim another card yet.'
+      }
+      return send(sock, ctx.jid, m, `\u274c ${messages[result.reason] || 'The card could not be claimed.'}`)
+    }
+    const c = result.card
+    await store.log(ctx.userId, 'claim_spawned_card', c.drop_code || code, { name: c.name, slot: result.slot })
+    const caption = [
+      `${WATERMARK}`, '', '\u2705 *CARD ACQUIRED*', '',
+      `*${c.name}*`,
+      `Slot: *${result.slot}/2*`,
+      `Weapon: *${c.weapon || '\u2014'}*`,
+      `Damage: *${c.damage}*`,
+      `Ability: *${c.ability || '\u2014'}*`,
+      `Ability damage: *${c.ability_damage}*`,
+      `Rating: *${c.rating}/6*`,
+      '',
+      'This card is now in your collection and ready for battle.'
+    ].join('\n')
+    if (Buffer.isBuffer(c.image_data) && c.image_data.length) {
+      await sock.sendMessage(ctx.jid, { image: c.image_data, caption }, { quoted: m })
+    } else {
+      await send(sock, ctx.jid, m, caption)
+    }
+    return true
   }
 
   async function claimCard (sock, m, ctx, slot) {
@@ -786,7 +828,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
-    cardPanel, claimCard, beginDuel, answerDuel, daily, zenWallet, play,
+    cardPanel, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
   }
