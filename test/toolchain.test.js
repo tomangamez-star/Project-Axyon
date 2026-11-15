@@ -233,3 +233,57 @@ test('music: an age-restricted video is named as such, not as a generic failure'
   assert.match(src, /age-restricted, so YouTube will only serve it to a signed-in account/)
   assert.match(src, /reason: ytReason \|\| 'download-failed'/)
 })
+
+/*
+ * TUBEGRAB FALLBACK
+ * -----------------
+ * The operator's downloader is a separate deployment, so the tests assert the
+ * two things that decide whether it helps or hurts: it must sit between yt-dlp
+ * and Audius, and a dead worker must not stall the chain.
+ */
+test('tubegrab: sits between the yt-dlp ladder and the Audius fallback', () => {
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  const ytAt = src.indexOf('const r = await downloadYt(')
+  const tgAt = src.indexOf('await tubegrabDownload(')
+  const audiusAt = src.indexOf('await audiusSearch(')
+  assert.ok(ytAt > 0 && tgAt > 0 && audiusAt > 0, 'one of the three sources is missing from resolve()')
+  assert.ok(ytAt < tgAt, 'yt-dlp must stay first')
+  assert.ok(tgAt < audiusAt, 'TubeGrab must be tried before Audius')
+})
+
+test('tubegrab: a job stuck in queued gives up instead of waiting the full budget', () => {
+  const src = fs.readFileSync(require.resolve('../src/music'), 'utf8')
+  assert.match(src, /TUBEGRAB_QUEUE_GRACE_MS/, 'the queue grace period is gone')
+  assert.match(src, /no worker claimed the job/, 'the dead-worker guard is gone')
+  /* The grace must be well under the overall job budget, or it does nothing. */
+  const grace = Number(src.match(/TUBEGRAB_QUEUE_GRACE_MS = (\d+)/)[1])
+  const total = Number(src.match(/TUBEGRAB_JOB_TIMEOUT_MS = (\d+)/)[1])
+  assert.ok(grace < total / 2, `queue grace ${grace}ms is not meaningfully shorter than ${total}ms`)
+})
+
+test('tubegrab: the file extension follows the real content, not a guess', () => {
+  const mp3 = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(20)])
+  const m4a = Buffer.concat([Buffer.alloc(4), Buffer.from('ftypM4A '), Buffer.alloc(20)])
+  assert.equal(music.sniffAudioExt('application/octet-stream', mp3), 'mp3')
+  assert.equal(music.sniffAudioExt('application/octet-stream', m4a), 'm4a')
+  assert.equal(music.sniffAudioExt('audio/mpeg', null), 'mp3')
+  assert.equal(music.sniffAudioExt('audio/mp4', null), 'm4a')
+  assert.equal(music.sniffAudioExt('audio/webm', null), 'webm')
+  /* An unknown type with no usable bytes must still yield a playable name. */
+  assert.equal(music.sniffAudioExt('', null), 'mp3')
+})
+
+test('tubegrab: a failure returns null rather than throwing', async () => {
+  /* Point at a host that cannot answer, so this never touches the network. */
+  const prev = process.env.TUBEGRAB_URL
+  process.env.TUBEGRAB_URL = 'http://127.0.0.1:9'
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-test-'))
+    const r = await music.tubegrabDownload('anything', '', dir, {})
+    assert.equal(r, null, 'a dead service must resolve to null, not throw')
+    fs.rmSync(dir, { recursive: true, force: true })
+  } finally {
+    if (prev === undefined) delete process.env.TUBEGRAB_URL
+    else process.env.TUBEGRAB_URL = prev
+  }
+})

@@ -43,7 +43,10 @@
  * FALLBACK ORDER
  * --------------
  *   1. yt-dlp (YouTube)      — the normal path, full track
- *   2. Audius                — full track, used when yt-dlp is missing or
+ *   2. TubeGrab              — the operator's own downloader on another host,
+ *                              tried when yt-dlp fails for a host-specific
+ *                              reason (PO token, age gate, bot check)
+ *   3. Audius                — full track, used when yt-dlp is missing or
  *                              YouTube is blocking the host
  *
  * Everything is bounded: a hard timeout on each call, a size cap, and a temp
@@ -510,6 +513,194 @@ async function downloadAudius (track, dir) {
   } catch { return null } finally { clearTimeout(t) }
 }
 
+/* --------------------------------------------------------------- tubegrab */
+
+/*
+ * TUBEGRAB — the operator's own downloader, used as a second opinion.
+ * ---------------------------------------------------------------------
+ * When yt-dlp fails on this host (PO token, age gate, bot check) the same
+ * video may still be downloadable from a different machine. TubeGrab is that
+ * machine: a small service the operator runs, which does its own yt-dlp run
+ * and hands back a finished file.
+ *
+ * Its API is asynchronous, so this is not a one-shot fetch:
+ *
+ *   POST /api/download {url, type:'audio'}  -> {id, status:'queued', ...}
+ *   GET  /api/jobs/:id                      -> {status, phase, progress, ...}
+ *   GET  /api/jobs/:id/file                 -> the finished bytes
+ *
+ * Two things about it shape the code below:
+ *
+ *   1. It is a SEPARATE deployment and can be down, cold, or out of workers.
+ *      A job that never leaves `queued` is the normal symptom. So the poll is
+ *      bounded twice: a hard overall budget, and a shorter grace period for
+ *      "still queued, no worker picked it up". Without the second one a dead
+ *      worker would add 90 seconds of dead air to every single !play.
+ *   2. It returns whatever it produced, which may be mp3, m4a or a muxed mp4.
+ *      The extension is chosen from the real content-type (and the magic bytes
+ *      when the type is generic), so the mimetype WhatsApp gets stays honest.
+ *
+ * A failure here is never fatal: it returns null and the chain moves on to
+ * Audius. Nothing about this path can make !play worse than it was.
+ */
+const TUBEGRAB_BASE = String(process.env.TUBEGRAB_URL || 'https://tubegrab-m1r2.onrender.com').replace(/\/+$/, '')
+const TUBEGRAB_JOB_TIMEOUT_MS = 90000
+const TUBEGRAB_QUEUE_GRACE_MS = 12000
+const TUBEGRAB_POLL_MS = 2000
+
+/** One JSON call against TubeGrab. Never throws; a dead host is `ok:false`. */
+async function tubegrabJson (pathname, { method = 'GET', body = null, ms = SEARCH_TIMEOUT_MS } = {}) {
+  const c = new AbortController()
+  const t = setTimeout(() => c.abort(), ms)
+  try {
+    const r = await fetch(`${TUBEGRAB_BASE}${pathname}`, {
+      method,
+      signal: c.signal,
+      headers: body ? { 'content-type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    })
+    const data = await r.json().catch(() => null)
+    return { ok: r.ok, status: r.status, data }
+  } catch {
+    return { ok: false, status: 0, data: null }
+  } finally { clearTimeout(t) }
+}
+
+/** True when the service answers its health route. Cheap, so it runs first. */
+async function tubegrabAlive () {
+  const r = await tubegrabJson('/api/health', { ms: 8000 })
+  return Boolean(r.ok && r.data && r.data.ok)
+}
+
+/**
+ * Picks the file extension from what the service actually sent.
+ *
+ * The content-type is trusted when it is specific. When it is
+ * `application/octet-stream` the first bytes decide: `ID3` or an MPEG frame
+ * sync is mp3, `ftyp` at offset 4 is an mp4/m4a container.
+ */
+function sniffAudioExt (contentType, buf) {
+  const ct = String(contentType || '').toLowerCase()
+  if (ct.includes('mpeg') || ct.includes('mp3')) return 'mp3'
+  if (ct.includes('m4a') || ct.includes('mp4') || ct.includes('aac')) return 'm4a'
+  if (ct.includes('webm')) return 'webm'
+  if (ct.includes('ogg') || ct.includes('opus')) return 'ogg'
+  if (ct.includes('wav')) return 'wav'
+  if (buf && buf.length > 12) {
+    if (buf.slice(0, 3).toString('latin1') === 'ID3') return 'mp3'
+    if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return 'mp3'
+    if (buf.slice(4, 8).toString('latin1') === 'ftyp') return 'm4a'
+    if (buf.slice(0, 4).toString('latin1') === 'OggS') return 'ogg'
+  }
+  return 'mp3'
+}
+
+/**
+ * Downloads a full track through TubeGrab, or returns null.
+ *
+ * @param {string} query  the user's search text
+ * @param {string} url    a known YouTube URL, when the search already found one
+ * @param {string} dir    the run's temp directory
+ * @returns {Promise<{file:string, title:string, duration:number}|null>}
+ */
+async function tubegrabDownload (query, url, dir, { logger } = {}) {
+  if (!(await tubegrabAlive())) {
+    logger?.warn?.({ base: TUBEGRAB_BASE }, 'tubegrab: health check failed, skipping')
+    return null
+  }
+
+  /* The service wants a video URL. Reuse the one the search found; otherwise
+   * ask its own search, which is a different code path and may still work. */
+  let target = String(url || '').trim()
+  let title = ''
+  if (!target) {
+    const s = await tubegrabJson('/api/search', { method: 'POST', body: { q: query }, ms: 30000 })
+    const first = Array.isArray(s.data?.results) ? s.data.results[0] : null
+    if (!first?.url) {
+      logger?.warn?.({ query }, 'tubegrab: search returned no result')
+      return null
+    }
+    target = first.url
+    title = first.title || ''
+  }
+
+  const created = await tubegrabJson('/api/download', {
+    method: 'POST',
+    body: { url: target, type: 'audio' },
+    ms: 30000
+  })
+  const id = created.data?.id
+  if (!id) {
+    logger?.warn?.({ status: created.status, err: created.data?.error }, 'tubegrab: job not created')
+    return null
+  }
+
+  /* Poll to completion, bounded by both a total budget and a queue grace. */
+  const startedAt = Date.now()
+  let queuedSince = Date.now()
+  let job = null
+  for (;;) {
+    if (Date.now() - startedAt > TUBEGRAB_JOB_TIMEOUT_MS) {
+      logger?.warn?.({ id, phase: job?.phase }, 'tubegrab: job timed out')
+      return null
+    }
+    const r = await tubegrabJson(`/api/jobs/${encodeURIComponent(id)}`, { ms: 15000 })
+    job = r.data
+    if (!job) return null
+
+    if (job.status === 'complete') break
+    if (job.status === 'failed' || job.status === 'expired') {
+      logger?.warn?.({ id, err: job.error }, 'tubegrab: job failed')
+      return null
+    }
+
+    /*
+     * A job that sits in `queued` is a job no worker has claimed. That is the
+     * signature of a dead or cold worker, and waiting the full budget for it
+     * would stall every !play. Give up early and let Audius try.
+     */
+    if (job.phase === 'queued') {
+      if (Date.now() - queuedSince > TUBEGRAB_QUEUE_GRACE_MS) {
+        logger?.warn?.({ id }, 'tubegrab: no worker claimed the job, giving up')
+        return null
+      }
+    } else {
+      queuedSince = Date.now()
+    }
+
+    await new Promise(resolve => setTimeout(resolve, TUBEGRAB_POLL_MS))
+  }
+
+  /* Fetch the finished bytes. */
+  const c = new AbortController()
+  const t = setTimeout(() => c.abort(), DOWNLOAD_TIMEOUT_MS)
+  try {
+    const r = await fetch(`${TUBEGRAB_BASE}/api/jobs/${encodeURIComponent(id)}/file`, { signal: c.signal })
+    if (!r.ok) {
+      logger?.warn?.({ id, status: r.status }, 'tubegrab: file fetch failed')
+      return null
+    }
+    const buf = Buffer.from(await r.arrayBuffer())
+    if (!buf.length || buf.length > MAX_BYTES) {
+      logger?.warn?.({ id, bytes: buf.length }, 'tubegrab: file empty or over the size cap')
+      return null
+    }
+
+    const ext = sniffAudioExt(r.headers.get('content-type'), buf)
+    const file = path.join(dir, `track.${ext}`)
+    await fs.writeFile(file, buf)
+
+    return {
+      file,
+      title: job.title || title || '',
+      duration: Number(job.duration) || 0
+    }
+  } catch (e) {
+    logger?.warn?.({ id, err: e?.message }, 'tubegrab: file download threw')
+    return null
+  } finally { clearTimeout(t) }
+}
+
 /* ------------------------------------------------------------------ output */
 
 /** The mimetype WhatsApp needs for a given file extension. */
@@ -603,7 +794,30 @@ async function resolve (query, { logger } = {}) {
     }
 
     /*
-     * 2. Audius — full track, when yt-dlp is missing or YouTube is blocking.
+     * 2. TubeGrab — the operator's own downloader, on a different host.
+     *
+     * This sits between yt-dlp and Audius on purpose. It is the only fallback
+     * that can return the SAME recording the user asked for: Audius is a
+     * different catalogue, so it can only ever offer a different upload of the
+     * song. When yt-dlp fails here for a host-specific reason (PO token, age
+     * gate, bot check) another machine often succeeds, and that is exactly
+     * what this is for.
+     *
+     * It is skipped entirely when yt-dlp already worked, and a failure here is
+     * silent — the chain simply continues to Audius.
+     */
+    if (!file) {
+      const tg = await tubegrabDownload(q, yt?.url, dir, { logger }).catch(() => null)
+      if (tg?.file) {
+        file = tg.file
+        source = 'tubegrab'
+        if (!track.duration && tg.duration) track.duration = tg.duration
+        if (!track.title && tg.title) track.title = tg.title
+      }
+    }
+
+    /*
+     * 3. Audius — full track, when yt-dlp is missing or YouTube is blocking.
      *
      * The raw query is often a YouTube title ("Don Toliver - TORE UP [Official
      * Music Video]"), which matches nothing on Audius. So the cleaned form is
@@ -660,6 +874,7 @@ async function resolve (query, { logger } = {}) {
       }
       if (!ffmpeg) parts.push('ffmpeg is not installed, so MP3 conversion is unavailable.')
       if (!ffprobe) parts.push('ffprobe is not installed, so the track length cannot be verified.')
+      parts.push('The TubeGrab fallback did not return the track either.')
       parts.push('The Audius fallback had no full-length match either.')
 
       return {
@@ -734,6 +949,9 @@ module.exports = {
   search: deezerMeta,
   ytSearch,
   audiusSearch,
+  tubegrabDownload,
+  tubegrabAlive,
+  sniffAudioExt,
   cleanup,
   mmss,
   hasBinary,
