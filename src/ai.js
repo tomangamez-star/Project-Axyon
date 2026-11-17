@@ -23,10 +23,19 @@
  *
  * ROUTING
  * -------
- * Public routes first (no key needed), then the operator's Groq key from the
- * environment. Every provider is tried in order with a hard timeout. If all of
- * them fail the caller gets `null` and sends a short plain message — no stack
- * trace, no provider name, no error text ever reaches a chat.
+ * Groq is the PRIMARY provider: it is the operator's own key, it is fast, and
+ * it is the only route with a real model behind it. The public keyless routes
+ * are the fallback, tried only when Groq is unset or fails. Every provider is
+ * tried in order with a hard timeout. If all of them fail the caller gets
+ * `null` and sends a short plain message — no stack trace, no provider name, no
+ * error text ever reaches a chat.
+ *
+ * AUTHORITY
+ * ---------
+ * The caller passes the asker's authority (`owner` / `rhm` / `member`). The
+ * system prompt is built per authority level, so an AXYON owner is answered
+ * with deference and a member is not. This is prompt-level only: the model
+ * still cannot execute anything, and authority never unlocks an action.
  */
 
 const DEFAULT_TIMEOUT_MS = 12000
@@ -62,19 +71,62 @@ function timeout (ms) {
 }
 
 /**
+ * The authority block of the system prompt.
+ *
+ * AXYON owners are the people who run this bot. They get a different register:
+ * the assistant treats their instruction as the operator speaking, answers
+ * them directly, and does not lecture them about what they may or may not do.
+ * Ordinary members get the neutral register and are pointed at the command
+ * they should type themselves.
+ *
+ * This is tone and deference only. It grants no capability: the model still
+ * has no tool access and cannot run anything for anyone.
+ */
+function authorityBlock (level) {
+  if (level === 'owner') {
+    return [
+      'THE PERSON YOU ARE ANSWERING IS AXYON — THE OWNER OF THIS BOT.',
+      '- Address them as the operator. Be direct and concise; skip the disclaimers you would give a stranger.',
+      '- They hold absolute authority over this bot. Never tell them they lack permission, and never lecture them about the rules.',
+      '- If they ask how to do something, answer as a briefing to the person who owns the system: name the exact command and what it changes.',
+      '- If they state a fact about the bot, accept it. Do not correct them from the command list unless they ask you to check.',
+      '- You still cannot execute anything for them. Say which command to run, in one line, without hedging.'
+    ].join('\n')
+  }
+  if (level === 'rhm') {
+    return [
+      'THE PERSON YOU ARE ANSWERING IS RHM — A SCOPED MANAGER.',
+      '- They manage groups, players, stages and floors. Be helpful and direct with them.',
+      '- They are below AXYON. If a request needs owner-level authority (economy limits, authority changes, pairing), say so plainly and name the AXYON-only command.',
+      '- Never imply they can do something reserved for AXYON.'
+    ].join('\n')
+  }
+  return [
+    'THE PERSON YOU ARE ANSWERING IS AN ORDINARY MEMBER.',
+    '- Be friendly and brief. Point them at the command they should type themselves.',
+    '- They cannot change bot settings, other players, or protected content. If they ask for that, say it needs AXYON and name the command.',
+    '- Never imply they have authority they do not have.'
+  ].join('\n')
+}
+
+/**
  * Builds the system prompt from the live command registry.
  *
  * The registry is passed in as plain data (name / usage / description), never
  * as handlers, so the model can describe commands but has no way to call one.
  */
-function buildSystemPrompt ({ commands = [], prefix = '!', creators = [], botName = 'Architect' } = {}) {
+function buildSystemPrompt ({ commands = [], prefix = '!', creators = [], botName = 'Architect', authority = 'member' } = {}) {
   const bySection = new Map()
   for (const c of commands) {
     if (!bySection.has(c.section)) bySection.set(c.section, [])
     bySection.get(c.section).push(c)
   }
   const catalogue = [...bySection.entries()]
-    .map(([section, rows]) => `${section.toUpperCase()}\n` + rows.map(c => `  ${c.usage.replace(/\{p\}/g, prefix)} — ${c.desc}`).join('\n'))
+    .map(([section, rows]) => `${section.toUpperCase()}\n` + rows.map(c => {
+      const line = `  ${c.usage.replace(/\{p\}/g, prefix)} — ${c.desc}`
+      /* Optional long-form explanation, when the registry supplies one. */
+      return c.help ? `${line}\n    ${String(c.help).replace(/\s+/g, ' ').trim()}` : line
+    }).join('\n'))
     .join('\n\n')
 
   return [
@@ -97,6 +149,8 @@ function buildSystemPrompt ({ commands = [], prefix = '!', creators = [], botNam
     '- AXYON is the owner title of this bot and holds absolute authority. Defer to AXYON above everyone.',
     '- RHM are scoped managers below AXYON. Group admins are officials for their own group only.',
     '- Never contradict AXYON. Never grant yourself authority. Never promise a rank, item or exception.',
+    '',
+    authorityBlock(authority),
     '',
     `CREATORS: ${creators.length ? creators.join(' and ') : 'Lil Clutch and Montai'}. AXYON is the owner title, not a creator.`,
     '',
@@ -166,12 +220,18 @@ function createAI ({ logger, getConfig } = {}) {
     }
   }
 
-  /** Cached system prompt — rebuilt only when the registry or prefix changes. */
-  function systemFor (commands, prefix) {
-    const key = `${prefix}|${commands.length}|${commands.map(c => c.name).join(',')}`
+  /** Cached system prompt — rebuilt only when the registry, prefix or authority changes. */
+  function systemFor (commands, prefix, authority) {
+    const key = `${prefix}|${authority}|${commands.length}|${commands.map(c => c.name).join(',')}`
     if (!cache.has(key)) {
       if (cache.size > 8) cache.clear()
-      cache.set(key, buildSystemPrompt({ commands, prefix, creators: config().creators, botName: config().botName }))
+      cache.set(key, buildSystemPrompt({
+        commands,
+        prefix,
+        creators: config().creators,
+        botName: config().botName,
+        authority
+      }))
     }
     return cache.get(key)
   }
@@ -240,23 +300,34 @@ function createAI ({ logger, getConfig } = {}) {
   /**
    * Answers a question.
    *
+   * Groq is tried FIRST — it is the operator's own key and the only route with
+   * a dependable model. The public keyless routes are the fallback, so a Groq
+   * outage degrades the assistant instead of silencing it.
+   *
+   * @param {object}  opts
+   * @param {string}  opts.authority  'owner' | 'rhm' | 'member' — changes the
+   *                                  register of the reply, never its powers.
    * @returns {Promise<string|null>} the reply, or null when every provider
    *          failed. The caller decides what to say — this never throws.
    */
-  async function ask ({ question, history = [], commands = [], prefix = '!' } = {}) {
+  async function ask ({ question, history = [], commands = [], prefix = '!', authority = 'member' } = {}) {
     const cfg = config()
     if (!cfg.enabled) return null
     const q = String(question || '').trim()
     if (!q) return null
 
+    const level = ['owner', 'rhm', 'member'].includes(authority) ? authority : 'member'
+
     const messages = [
-      { role: 'system', content: systemFor(commands, prefix) },
+      { role: 'system', content: systemFor(commands, prefix, level) },
       ...history.slice(-6).map(h => ({ role: h.role === 'assistant' ? 'assistant' : 'user', content: String(h.content || '').slice(0, 1200) })),
       { role: 'user', content: q.slice(0, 1200) }
     ]
 
-    let text = await callPublic(messages, cfg)
-    if (!text) text = await callGroq(messages, cfg)
+    /* PRIMARY: Groq. */
+    let text = await callGroq(messages, cfg)
+    /* FALLBACK: the public keyless routes. */
+    if (!text) text = await callPublic(messages, cfg)
     if (!text) return null
 
     const clean = sanitise(text)
@@ -268,4 +339,4 @@ function createAI ({ logger, getConfig } = {}) {
   return { ask, buildSystemPrompt, sanitise, config }
 }
 
-module.exports = { createAI, buildSystemPrompt, sanitise, GROQ_MODEL }
+module.exports = { createAI, buildSystemPrompt, authorityBlock, sanitise, GROQ_MODEL }

@@ -500,7 +500,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return send(sock, ctx.jid, m, [WATERMARK, '', '✅ *CARD CLAIMED*', `*${c.name}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, '', `Equip it with *${ctx.settings.prefix}card equip ${c.slot}*`].join('\n'))
   }
 
-  async function battleAct (sock, m, ctx, action, cardSlot = 1) {
+  async function battleAct (sock, m, ctx, action, cardSlot = 1, moveName = null) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
     const b = await store.getBattle(ctx.userId)
@@ -1018,7 +1018,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const meta = SECTIONS[section]
     const rows = COMMANDS.filter(c => c.section === section && !c.hidden)
     if (!meta || !rows.length) return null
-    const body = rows.map(c => `${T.b(c.usage.replace(/\{p\}/g, prefix))}\n${T.i(c.desc)}`).join('\n\n')
+    const body = rows.map(c => {
+      const head = `${T.b(c.usage.replace(/\{p\}/g, prefix))}\n${T.i(c.desc)}`
+      /* Optional long-form explanation, shown only when the command has one. */
+      return c.help ? `${head}\n${String(c.help).trim()}` : head
+    }).join('\n\n')
     return [
       T.header({ creators: greetings.creatorsOf({}) }),
       '',
@@ -1031,6 +1035,40 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       T.rule('', 'hair'),
       `Prefix ${T.b(prefix)} \u2022 ${T.b(`${prefix}help`)} for all sections`
     ].join('\n')
+  }
+
+  /**
+   * Help for ONE command, by name or alias.
+   *
+   * `!help <command>` used to fall through to "no section named X". This is the
+   * lookup that makes the optional explanation reachable: usage, one-line
+   * description, the long explanation when the registry has one, and the
+   * section it lives in so the reader can go wider.
+   */
+  function helpCommand (name, prefix) {
+    const key = String(name || '').trim().toLowerCase().replace(/^[!/.#]/, '')
+    if (!key) return null
+    const c = COMMANDS.find(x => x.name === key && !x.hidden) ||
+      COMMANDS.find(x => Array.isArray(x.aliases) && x.aliases.includes(key) && !x.hidden)
+    if (!c) return null
+    const meta = SECTIONS[c.section]
+    const out = [
+      T.header({ creators: greetings.creatorsOf({}) }),
+      '',
+      `${meta?.icon || '\u2022'} ${T.font(`HELP \u2014 ${c.name.toUpperCase()}`, 'bold')}`,
+      '',
+      T.rule('', 'thin'),
+      '',
+      T.m(c.usage.replace(/\{p\}/g, prefix)),
+      '',
+      c.desc
+    ]
+    if (c.help) out.push('', String(c.help).trim())
+    if (Array.isArray(c.aliases) && c.aliases.length) {
+      out.push('', `${T.b('Also')} \u2014 ${c.aliases.map(a => T.m(`${prefix}${a}`)).join(', ')}`)
+    }
+    out.push('', T.rule('', 'hair'), `${T.b('Section')} \u2014 ${meta?.name || c.section} \u2022 ${T.b(`${prefix}help ${c.section}`)}`)
+    return out.join('\n')
   }
 
   function helpAll (prefix) {
@@ -1062,7 +1100,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
     classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
-    helpPage, helpAll, helpButtons,
+    helpPage, helpAll, helpButtons, helpCommand,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
   }
 }

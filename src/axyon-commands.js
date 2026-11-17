@@ -16,6 +16,7 @@ const T = require('./theme')
 const items = require('./axyon-items')
 const cardSpawner = require('./card-spawn')
 const classes = require('./axyon-classes')
+const modesLib = require('./axyon-modes')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -37,7 +38,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -100,16 +101,44 @@ const GAME_MODES = {
  */
 const MODE_FREE = new Set([
   'shop', 'buy', 'inventory', 'inv', 'use', 'items',
-  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard', 'card', 'cards', 'cardadmin'
+  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard', 'card', 'cards', 'cardadmin',
+  /*
+   * THE BATTLE ACTIONS.
+   *
+   * These are the actions you take once a battle exists — they are not a way
+   * to START one. `!stages` and `!fight` open a stage battle; `!floor` opens a
+   * dungeon battle. The actions themselves must work in whichever mode the
+   * battle was started from, otherwise a player can enter a dungeon floor and
+   * then be refused every action with "WRONG MODE" — enterable but unfightable.
+   *
+   * They are safe to free because each one requires an active battle and
+   * returns "you are not in a battle" otherwise, so they cannot be used to
+   * bypass the mode gate on the commands that actually start a fight.
+   */
+  'attack', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle'
 ])
 
-/** Which mode owns a command, or null when it is mode-free. */
-function modeOf (commandName, section) {
-  if (MODE_FREE.has(commandName)) return null
+/**
+ * Which mode owns a command, or null when it is mode-free.
+ *
+ * A section can belong to more than one mode — `battle` is shared by Combat and
+ * Dungeon, because dungeon combat uses the same actions. When that happens the
+ * command is reachable from ANY of those modes, so this returns the list and
+ * the gate accepts a match against any entry.
+ */
+function modesOf (commandName, section) {
+  if (MODE_FREE.has(commandName)) return []
+  const out = []
   for (const [key, meta] of Object.entries(GAME_MODES)) {
-    if (meta.sections.includes(section)) return key
+    if (meta.sections.includes(section)) out.push(key)
   }
-  return null
+  return out
+}
+
+/** Back-compat: the first owning mode, or null. */
+function modeOf (commandName, section) {
+  const all = modesOf(commandName, section)
+  return all.length ? all[0] : null
 }
 
 function parseNum (v) {
@@ -147,11 +176,18 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   cmd('arise', 'core', '{p}arise', 'Register with the System and awaken your hunter.', async (s, m, ctx) => axyon.arise(s, m, ctx))
   cmd('profile', 'core', '{p}profile', 'Your rank, grade, stats, energy and stage.', async (s, m, ctx) => axyon.profile(s, m, ctx))
-  cmd('help', 'core', '{p}help [section]', 'Every command, grouped by section.', async (s, m, ctx, args) => {
+  cmd('help', 'core', '{p}help [section|command]', 'Every command, grouped by section. Name a command for detail.', async (s, m, ctx, args) => {
     const section = String(args[0] || '').toLowerCase()
     if (section && axyon.SECTIONS[section]) return axyon.send(s, ctx.jid, m, axyon.helpPage(section, ctx.prefix))
     if (section && section !== 'all') {
-      return axyon.send(s, ctx.jid, m, `${W}\n\nNo section named *${section}*.\nSections: ${Object.keys(axyon.SECTIONS).join(', ')}`)
+      /*
+       * Not a section — try it as a command name before giving up. This is what
+       * makes `!help fight` and `!help dungeon` work, and it is where the
+       * optional long-form explanation is surfaced.
+       */
+      const one = axyon.helpCommand(section, ctx.prefix)
+      if (one) return axyon.send(s, ctx.jid, m, one)
+      return axyon.send(s, ctx.jid, m, `${W}\n\nNo section or command named *${section}*.\nSections: ${Object.keys(axyon.SECTIONS).join(', ')}`)
     }
     return axyon.send(s, ctx.jid, m, axyon.helpAll(ctx.prefix))
   })
@@ -299,6 +335,166 @@ function createCommands ({ axyon, economy, logger, ai }) {
       `Members: *${(open.members || []).length}/${settings.partyMax}* \u2022 minimum *${settings.partyMin}*`, '',
       `*${ctx.prefix}party join* \u2022 *${ctx.prefix}party leave*`
     ].join('\n'))
+  })
+
+  /* ----------------------------------------------------------------- rooms */
+
+  /*
+   * ROOMS — the session space a mode runs in.
+   *
+   * A room hosts one mode; it is not a mode itself. These commands are the
+   * command-controlled management surface the Modes & Room spec requires, and
+   * every one of them is permission-checked through `ctx.auth` before it
+   * touches a row.
+   */
+  cmd('room', 'dungeon', '{p}room <create|list|join|leave|start|close|view> ...', 'Open and manage a game room for a mode.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'list').toLowerCase()
+    const modes = modesLib.createModeRegistry()
+
+    if (sub === 'list') {
+      const rows = await store.roomsFor(ctx.jid)
+      const live = rows.filter(r => !['completed', 'cancelled', 'expired'].includes(String(r.status)))
+      if (!live.length) {
+        return axyon.send(s, ctx.jid, m, [
+          `${W}`, '', '\ud83c\udf9f\ufe0f *ROOMS*', '',
+          'No open rooms here.', '',
+          `Open one with *${ctx.prefix}room create <mode> [solo|multiplayer|party]*`,
+          `Modes: ${modes.ordered().filter(x => x.enabled).map(x => x.id).join(', ')}`
+        ].join('\n'))
+      }
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '\ud83c\udf9f\ufe0f *ROOMS*', '',
+        live.map(r => {
+          const parts = Array.isArray(r.participants) ? r.participants.length : 0
+          const lock = r.privacy === 'private' ? '\ud83d\udd12' : '\ud83c\udf10'
+          return `${lock} *${r.name}* \u2014 ${modes.get(r.mode_id)?.name || r.mode_id}\n   ${r.status} \u2022 ${parts}/${r.capacity} \u2022 ${r.participation}\n   \`${r.room_key}\``
+        }).join('\n\n'),
+        '', `Join with *${ctx.prefix}room join <key>*`
+      ].join('\n'))
+    }
+
+    if (sub === 'create') {
+      const p = await store.player(ctx.userId)
+      if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+
+      const modeId = String(args[1] || '').toLowerCase()
+      const check = modes.canEnter(modeId)
+      if (!check.ok) {
+        return axyon.send(s, ctx.jid, m, [
+          `${W}`, '', `\u274c *CANNOT OPEN THAT MODE*`, '', check.message, '',
+          `Available: ${modes.ordered().filter(x => x.enabled && !x.placeholder).map(x => x.id).join(', ')}`
+        ].join('\n'))
+      }
+
+      const participation = String(args[2] || 'solo').toLowerCase()
+      if (!modesLib.modeType(participation)) {
+        return axyon.send(s, ctx.jid, m, `Participation must be one of: ${modesLib.MODE_TYPE_IDS.join(', ')}`)
+      }
+      if (!check.mode.participation.includes(participation)) {
+        return axyon.send(s, ctx.jid, m, `\u274c *${check.mode.name}* does not support *${participation}*.\nSupported: ${check.mode.participation.join(', ')}`)
+      }
+
+      const privacy = String(args[3] || 'public').toLowerCase() === 'private' ? 'private' : 'public'
+      const capacity = modesLib.capacityFor(participation, ctx.settings.partyMax)
+      const name = `${check.mode.name.toUpperCase()} \u2014 ROOM ${String(Date.now()).slice(-3)}`
+
+      const room = await store.createRoom({
+        name,
+        groupJid: ctx.jid,
+        ownerId: ctx.userId,
+        modeId: check.mode.id,
+        participation,
+        privacy,
+        capacity
+      })
+      await store.log(ctx.userId, 'room_create', room.room_key, { mode: check.mode.id, participation, privacy })
+
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '\ud83c\udf9f\ufe0f *ROOM OPENED*', '',
+        `*${room.name}*`,
+        `Mode: *${check.mode.name}*`,
+        `Type: *${modesLib.modeType(participation).name}*`,
+        `Privacy: *${privacy}*`,
+        `Capacity: *${capacity}*`,
+        '', `Key: \`${room.room_key}\``, '',
+        `Others join with *${ctx.prefix}room join ${room.room_key}*`,
+        `Start it with *${ctx.prefix}room start ${room.room_key}*`
+      ].join('\n'))
+    }
+
+    const key = String(args[1] || '').trim()
+    if (!key) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room ${sub} <key>*`)
+    const room = await store.room(key)
+    if (!room) return axyon.send(s, ctx.jid, m, `\u274c No room with key \`${key}\`.`)
+
+    /* A room belongs to its group. A key from elsewhere is not a way in. */
+    if (String(room.group_jid) !== String(ctx.jid)) {
+      return axyon.send(s, ctx.jid, m, '\u274c That room belongs to another group.')
+    }
+
+    if (sub === 'view') {
+      const parts = Array.isArray(room.participants) ? room.participants : []
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', `\ud83c\udf9f\ufe0f *${room.name}*`, '',
+        `Mode: *${modes.get(room.mode_id)?.name || room.mode_id}*`,
+        `Type: *${room.participation}* \u2022 Privacy: *${room.privacy}*`,
+        `Status: *${room.status}*`,
+        `Players: *${parts.length}/${room.capacity}*`,
+        parts.length ? `\n${parts.map(x => `\u2022 ${x.userId}${x.role === 'leader' ? ' \ud83d\udc51' : ''}`).join('\n')}` : '',
+        room.result ? `\nResult: *${room.result}*` : ''
+      ].filter(Boolean).join('\n'))
+    }
+
+    if (sub === 'join') {
+      const check = modesLib.canJoin(room, ctx.userId)
+      if (!check.ok) return axyon.send(s, ctx.jid, m, `\u274c ${check.message}`)
+      const participants = modesLib.addParticipant(room, ctx.userId)
+      const next = modesLib.isReady({ ...room, participants }) && room.status === 'waiting' ? 'ready' : room.status
+      await store.updateRoom(room.room_key, { participants, status: next })
+      await store.log(ctx.userId, 'room_join', room.room_key)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *JOINED*\n\n*${room.name}*\nPlayers: *${participants.length}/${room.capacity}*${next === 'ready' ? '\n\n\ud83d\udfe2 Room is *READY*.' : ''}`)
+    }
+
+    if (sub === 'leave') {
+      const participants = modesLib.removeParticipant(room, ctx.userId)
+      if (participants.length === 0) {
+        await store.updateRoom(room.room_key, { participants, status: 'cancelled', result: 'abandoned' })
+        return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udc4b You left. The room was empty, so it is now *cancelled*.`)
+      }
+      await store.updateRoom(room.room_key, { participants })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udc4b You left *${room.name}*. *${participants.length}* remain.`)
+    }
+
+    if (sub === 'start') {
+      if (!modesLib.canManage(room, ctx.userId, ctx.auth)) {
+        return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only the room leader or AXYON can start this room.')
+      }
+      if (!modesLib.canTransition(room.status, 'active')) {
+        return axyon.send(s, ctx.jid, m, `\u274c A room that is *${room.status}* cannot be started.`)
+      }
+      if (!modesLib.isReady(room)) {
+        const t = modesLib.modeType(room.participation)
+        return axyon.send(s, ctx.jid, m, `\u274c Not enough players. *${room.participation}* needs at least *${t?.minPlayers || 1}*.`)
+      }
+      await store.updateRoom(room.room_key, { status: 'active' })
+      await store.log(ctx.userId, 'room_start', room.room_key)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udfe2 *ROOM ACTIVE*\n\n*${room.name}* is now in progress.`)
+    }
+
+    if (sub === 'close') {
+      if (!modesLib.canManage(room, ctx.userId, ctx.auth)) {
+        return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only the room leader or AXYON can close this room.')
+      }
+      const to = room.status === 'active' ? 'completed' : 'cancelled'
+      if (!modesLib.canTransition(room.status, to)) {
+        return axyon.send(s, ctx.jid, m, `\u274c A room that is *${room.status}* cannot be closed.`)
+      }
+      await store.updateRoom(room.room_key, { status: to, result: to })
+      await store.log(ctx.userId, 'room_close', room.room_key, { to })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udd12 *ROOM ${to.toUpperCase()}*\n\n*${room.name}* is closed. The mode itself is untouched.`)
+    }
+
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room <create|list|join|leave|start|close|view>*`)
   })
 
   /* ----------------------------------------------------------------- duels */
@@ -495,10 +691,19 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!ai) return false
 
     const catalogue = axyon.COMMANDS.filter(c => !c.hidden).map(c => ({
-      name: c.name, section: c.section, usage: c.usage, desc: c.desc
+      name: c.name, section: c.section, usage: c.usage, desc: c.desc, help: c.help
     }))
 
-    const text = await ai.ask({ question: q, commands: catalogue, prefix: ctx.prefix })
+    /*
+     * AUTHORITY-AWARE.
+     * The asker's level decides the register of the reply: an AXYON owner is
+     * answered as the operator, a member as a member. It is derived from the
+     * same `ctx.auth` every command gate uses, so the assistant can never be
+     * more permissive than the command layer.
+     */
+    const authority = ctx.auth?.axyon ? 'owner' : ctx.auth?.rhm ? 'rhm' : 'member'
+
+    const text = await ai.ask({ question: q, commands: catalogue, prefix: ctx.prefix, authority })
 
     /*
      * NO ERRORS IN CHAT.
@@ -1419,11 +1624,12 @@ function createCommands ({ axyon, economy, logger, ai }) {
      * The shop and the inventory are in MODE_FREE and skip this entirely — they
      * are required to work in all four modes.
      */
-    const owner = modeOf(parsed.command, command.section)
-    if (owner) {
+    const owners = modesOf(parsed.command, command.section)
+    if (owners.length) {
       const p = await store.player(ctx.userId).catch(() => null)
       const current = p?.gameMode || 'general'
-      if (current !== owner) {
+      if (!owners.includes(current)) {
+        const owner = owners[0]
         const meta = GAME_MODES[owner]
         const here = GAME_MODES[current]
         await axyon.send(sock, ctx.jid, m, [

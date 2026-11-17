@@ -52,6 +52,26 @@ const ORIGINAL_STAGES = [
   { key: 'stage_3', name: 'Hollow Threshold', ordinal: 3, hp: 180, atk: 14, def: 7, xp: 140, zen: 220 }
 ]
 
+/*
+ * ORIGINAL DUNGEON FLOORS
+ * -----------------------
+ * `axyon_floors` was created but never seeded, so `!dungeon` always reported
+ * "No floors configured" and `!floor` refused to start anything. Players could
+ * not fight in the dungeon at all — the table existed and stayed empty.
+ *
+ * These are the same hardcoded numbers the stage ladder uses, scaled up per
+ * floor, so dungeon combat is a real fight with real XP rather than a stub.
+ * They are seeded with ON CONFLICT DO NOTHING, so an operator's own floors and
+ * any edits to these are never overwritten on restart.
+ */
+const ORIGINAL_FLOORS = [
+  { key: 'floor_1', name: 'Sunken Vestibule', ordinal: 1, boss: false, hp: 80, atk: 6, def: 3, xp: 55, zen: 80 },
+  { key: 'floor_2', name: 'Cracked Colonnade', ordinal: 2, boss: false, hp: 140, atk: 11, def: 5, xp: 100, zen: 150 },
+  { key: 'floor_3', name: 'Drowned Archive', ordinal: 3, boss: false, hp: 210, atk: 16, def: 8, xp: 170, zen: 260 },
+  { key: 'floor_4', name: 'The Black Stair', ordinal: 4, boss: false, hp: 300, atk: 22, def: 11, xp: 260, zen: 400 },
+  { key: 'floor_5', name: 'Warden of the Deep', ordinal: 5, boss: true, hp: 460, atk: 30, def: 15, xp: 420, zen: 700 }
+]
+
 let ready = false
 function db () {
   const d = database()
@@ -247,6 +267,37 @@ async function ensureSchema () {
       status TEXT NOT NULL DEFAULT 'open',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
+    /*
+     * ROOMS — the session space a mode runs in.
+     *
+     * A mode defines the rules; a room hosts one session of it. Kept in its own
+     * table so closing a room can never touch the mode, and so a room always
+     * carries the mode id it was opened with (spec Part 14 rule 16).
+     *
+     * The state column holds the recoverable session payload (current floor,
+     * round, combat snapshot) so a restart does not silently erase progress.
+     */
+    CREATE TABLE IF NOT EXISTS axyon_rooms(
+      id BIGSERIAL PRIMARY KEY,
+      room_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      group_jid TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      mode_id TEXT NOT NULL,
+      participation TEXT NOT NULL DEFAULT 'solo',
+      privacy TEXT NOT NULL DEFAULT 'public',
+      status TEXT NOT NULL DEFAULT 'waiting',
+      capacity INT NOT NULL DEFAULT 1,
+      participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+      entry_requirements JSONB NOT NULL DEFAULT '{}'::jsonb,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb,
+      result TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_activity TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
+    CREATE INDEX IF NOT EXISTS axyon_rooms_group ON axyon_rooms(group_jid, status);
+    CREATE INDEX IF NOT EXISTS axyon_rooms_owner ON axyon_rooms(owner_id);
+
     CREATE TABLE IF NOT EXISTS axyon_duels(
       id BIGSERIAL PRIMARY KEY,
       group_jid TEXT NOT NULL,
@@ -324,6 +375,13 @@ async function ensureSchema () {
       `INSERT INTO axyon_stages(key,name,ordinal,original,hp,atk,def,xp,zen)
        VALUES($1,$2,$3,TRUE,$4,$5,$6,$7,$8) ON CONFLICT(key) DO NOTHING`,
       [s.key, s.name, s.ordinal, s.hp, s.atk, s.def, s.xp, s.zen]
+    )
+  }
+  for (const f of ORIGINAL_FLOORS) {
+    await db().query(
+      `INSERT INTO axyon_floors(key,name,ordinal,boss,hp,atk,def,xp,zen)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(key) DO NOTHING`,
+      [f.key, f.name, f.ordinal, f.boss, f.hp, f.atk, f.def, f.xp, f.zen]
     )
   }
   for (const m of ['duel', 'solo', 'multiplayer', 'party']) {
@@ -1076,6 +1134,53 @@ async function updateParty (id, members, status) {
   return r.rows[0] || null
 }
 
+/* ------------------------------------------------------------------ rooms */
+
+async function createRoom ({ name, groupJid, ownerId, modeId, participation, privacy, capacity, entryRequirements }) {
+  await ensureSchema()
+  const roomKey = `room_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+  const r = await db().query(
+    `INSERT INTO axyon_rooms(room_key,name,group_jid,owner_id,mode_id,participation,privacy,capacity,participants,entry_requirements)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb) RETURNING *`,
+    [roomKey, name, groupJid, ownerId, modeId, participation, privacy, capacity,
+      JSON.stringify([{ userId: ownerId, role: 'leader' }]), JSON.stringify(entryRequirements || {})]
+  )
+  return r.rows[0]
+}
+
+async function room (roomKey) {
+  await ensureSchema()
+  return (await db().query('SELECT * FROM axyon_rooms WHERE room_key=$1', [roomKey])).rows[0] || null
+}
+
+async function roomsFor (groupJid, { status = null } = {}) {
+  await ensureSchema()
+  if (status) {
+    return (await db().query('SELECT * FROM axyon_rooms WHERE group_jid=$1 AND status=$2 ORDER BY id DESC', [groupJid, status])).rows
+  }
+  return (await db().query('SELECT * FROM axyon_rooms WHERE group_jid=$1 ORDER BY id DESC', [groupJid])).rows
+}
+
+async function updateRoom (roomKey, patch) {
+  await ensureSchema()
+  const r = await db().query(
+    `UPDATE axyon_rooms SET
+       status=COALESCE($2,status),
+       privacy=COALESCE($3,privacy),
+       capacity=COALESCE($4,capacity),
+       participants=COALESCE($5::jsonb,participants),
+       state=COALESCE($6::jsonb,state),
+       result=COALESCE($7,result),
+       last_activity=NOW()
+     WHERE room_key=$1 RETURNING *`,
+    [roomKey, patch.status ?? null, patch.privacy ?? null, patch.capacity ?? null,
+      patch.participants ? JSON.stringify(patch.participants) : null,
+      patch.state ? JSON.stringify(patch.state) : null,
+      patch.result ?? null]
+  )
+  return r.rows[0] || null
+}
+
 /* ------------------------------------------------------------------- duels */
 
 async function createDuel (jid, challenger, opponent) {
@@ -1305,6 +1410,7 @@ module.exports = {
   BASE_SPD,
   DEFAULT_SETTINGS,
   ORIGINAL_STAGES,
+  ORIGINAL_FLOORS,
   ensureSchema,
   settings,
   getSetting,
@@ -1381,6 +1487,10 @@ module.exports = {
   createParty,
   openParty,
   updateParty,
+  createRoom,
+  room,
+  roomsFor,
+  updateRoom,
   createDuel,
   duel,
   updateDuel,
