@@ -14,24 +14,34 @@ const cardSpawner = require('./card-spawn')
 const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
+const classes = require('./axyon-classes')
 const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
 
-const CLASSES = [
-  { key: 'fighter', name: 'Fighter', blurb: 'Balanced striker. Reliable damage.' },
-  { key: 'guardian', name: 'Guardian', blurb: 'High defence, slower kills.' },
-  { key: 'assassin', name: 'Assassin', blurb: 'Fast and fragile.' },
-  { key: 'mystic', name: 'Mystic', blurb: 'Strong class moves, weaker basics.' }
-]
+/*
+ * CLASSES and CLASS_MOVES are now DERIVED from the class catalogue.
+ *
+ * They used to be two hard-coded objects here: four classes, one move each.
+ * The catalogue in axyon-classes.js is the single source of truth, and these
+ * two exports are kept only so existing callers and tests that read
+ * `rpg.CLASSES` / `rpg.CLASS_MOVES` keep working.
+ *
+ * CLASS_MOVES is keyed by class id and holds that class's move list, which is
+ * a shape change from the old one-move-per-class object. Anything that used
+ * `CLASS_MOVES[p.class].damage` must go through classes.classDamage() instead.
+ */
+const CLASSES = classes.ALL_CLASSES.map(c => ({
+  key: c.id,
+  name: c.name,
+  blurb: c.specialization,
+  legacy: !!c.legacy,
+  moves: c.moves.map(m => m.name)
+}))
 
-/* Class moves: 3 uses per day, shared pool per player. */
-const CLASS_MOVES = {
-  fighter: { name: 'Cleaving Strike', damage: 26, cost: 12 },
-  guardian: { name: 'Bulwark Slam', damage: 18, cost: 10 },
-  assassin: { name: 'Shadow Step', damage: 30, cost: 15 },
-  mystic: { name: 'Arcane Lance', damage: 34, cost: 18 }
-}
+const CLASS_MOVES = Object.fromEntries(
+  classes.ALL_CLASSES.map(c => [c.id, c.moves.map(m => ({ ...m, class_id: c.id }))])
+)
 
 const MODES = {
   duel: { name: 'Duel', blurb: 'One player against another.' },
@@ -505,12 +515,56 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       return send(sock, ctx.jid, m, `\u2764\ufe0f *NO HEALS LEFT*\n\nYou have used all ${ctx.settings.selfHealPerCombat} self-heals this combat.`)
     }
 
+    /*
+     * CLASS MOVE — resolved and validated BEFORE anything is mutated.
+     *
+     * The old code read `CLASS_MOVES[p.class]` with p.class = 'Fighter' (the
+     * DB default, capitalised) against lowercase keys, so it silently fell
+     * through to the fighter move for every player. It also never rolled the
+     * daily counter, so after three class moves ever the command was dead
+     * forever. Both are fixed here: the class id is normalised through the
+     * catalogue, and the counter is a per-UTC-day row.
+     */
+    let classMove = null
+    let classMastery = 0
+    let classGrade = null
     if (action === 'class') {
-      if (p.classMovesUsed >= ctx.settings.classMovesPerDay) {
-        return send(sock, ctx.jid, m, `\ud83e\udde0 *CLASS MOVES SPENT*\n\nYou have used all *${ctx.settings.classMovesPerDay}* class moves today.`)
+      const classId = classes.normalizeClassId(p.class)
+      if (!classId) {
+        return send(sock, ctx.jid, m, `\ud83c\udfad *NO CLASS*\n\nYou have no class assigned. Ask AXYON to set one with *${ctx.settings.prefix}classadmin set @you <class>*.`)
       }
-      const move = CLASS_MOVES[p.class] || CLASS_MOVES.fighter
-      if (b.energy < move.cost) return send(sock, ctx.jid, m, `\u26a1 Not enough Power Energy. *${move.name}* costs *${move.cost}*.`)
+      const catalogue = classes.movesForClass(classId)
+      classMastery = await store.classMastery(ctx.userId, classId)
+      classGrade = classes.classGradeFor(classMastery)
+
+      /* Named move, or the strongest unlocked damaging move by default. */
+      if (moveName) {
+        classMove = classes.moveByName(classId, moveName)
+        if (!classMove) {
+          return send(sock, ctx.jid, m, `\u274c *${classes.classById(classId).name}* has no move called *${moveName}*.\n\nSee them with *${ctx.settings.prefix}class*.`)
+        }
+      } else {
+        const unlocked = catalogue.filter(mv => mv.unlock == null || classMastery >= Number(mv.unlock))
+        classMove = unlocked.filter(mv => Number(mv.damage) > 0).pop() || unlocked[0] || catalogue[0]
+      }
+
+      const usesToday = await store.classMovesUsedToday(ctx.userId)
+      const check = classes.validateMoveUse({
+        player: p,
+        move: classMove,
+        mastery: classMastery,
+        usesToday,
+        dailyLimit: ctx.settings.classMovesPerDay,
+        inBattle: true,
+        energy: b.energy
+      })
+      if (!check.ok) {
+        const head = check.reason === 'daily_limit' ? '\ud83e\udde0 *CLASS MOVES SPENT*'
+          : check.reason === 'energy' ? '\u26a1 *NOT ENOUGH POWER ENERGY*'
+            : check.reason === 'locked' ? '\ud83d\udd12 *MOVE LOCKED*'
+              : '\u274c *CANNOT USE THAT MOVE*'
+        return send(sock, ctx.jid, m, `${head}\n\n${check.message}`)
+      }
     }
 
     let selectedAbility = null
@@ -548,12 +602,64 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       await store.savePlayer(p)
       note = `\u2764\ufe0f You recover *${amount}* HP. *${b.healsLeft}* heals left.`
     } else if (action === 'class') {
-      const move = CLASS_MOVES[p.class] || CLASS_MOVES.fighter
-      b.energy -= move.cost
-      dealt = playerHit(p, b.enemy, 1.0, move.damage)
-      p.classMovesUsed += 1
+      /*
+       * Consume the daily use ATOMICALLY, before applying anything. If the
+       * limit was already reached the statement matches no row and we bail
+       * without touching energy, HP or the enemy.
+       */
+      const spend = await store.consumeClassMove(ctx.userId, ctx.settings.classMovesPerDay)
+      if (!spend.ok) {
+        return send(sock, ctx.jid, m, `\ud83e\udde0 *CLASS MOVES SPENT*\n\nYou have used all *${ctx.settings.classMovesPerDay}* class moves today. Resets at 00:00 UTC.`)
+      }
+
+      const cost = Number(classMove.cost) || 0
+      if (cost > 0) b.energy = Math.max(0, b.energy - cost)
+
+      const dmg = classes.classDamage({
+        move: classMove,
+        mastery: classMastery,
+        gradeBonus: classGrade.bonus
+      })
+
+      if (dmg.damaging) {
+        dealt = dmg.final
+        note = `\ud83e\udde0 *${classMove.name}* lands for *${dealt}*.`
+        if (dmg.bonus) note += `\n> base ${dmg.scaled} + class ${classGrade.grade} bonus ${dmg.bonus}`
+      } else if (classMove.type === 'defensive') {
+        b.guard = 0.6
+        note = `\ud83d\udee1\ufe0f *${classMove.name}* \u2014 you brace.`
+      } else if (classMove.type === 'support' && Number(classMove.heal) > 0) {
+        const before = b.playerHp
+        b.playerHp = Math.min(p.maxHp, b.playerHp + Number(classMove.heal))
+        note = `\u2764\ufe0f *${classMove.name}* restores *${b.playerHp - before}* HP.`
+      } else {
+        note = `\u2728 *${classMove.name}* \u2014 ${classMove.desc || 'the effect takes hold.'}`
+      }
+
+      /* Keep the legacy column in step so the profile card stays truthful. */
+      p.classMovesUsed = spend.used
       await store.savePlayer(p)
-      note = `\ud83e\udde0 *${move.name}* lands for *${dealt}*.`
+
+      await store.log(ctx.userId, 'class_move', classMove.id, {
+        classId: classes.normalizeClassId(p.class),
+        move: classMove.name,
+        type: classMove.type,
+        mastery: classMastery,
+        grade: classGrade.grade,
+        bonus: classGrade.bonus,
+        base: dmg.base,
+        scaled: dmg.scaled,
+        final: dmg.final,
+        cost,
+        usedToday: spend.used,
+        remaining: spend.remaining
+      })
+
+      /* Mastery award is 0 until the owner approves the values. */
+      const award = classes.masteryFor('classMove')
+      if (award > 0) await store.addClassMastery(ctx.userId, classes.normalizeClassId(p.class), award)
+
+      note += `\n> \ud83e\udde0 ${spend.remaining}/${ctx.settings.classMovesPerDay} class moves left today`
     } else if (action === 'card') {
       dealt = playerHit(p, b.enemy, 1.0, Number(selectedAbility?.ability_damage) || 0)
       note = `\ud83c\udccf *${selectedAbility.name} · ${selectedAbility.ability}* erupts for *${dealt}*. (${selectedAbility.ability_uses}/3 today)`
@@ -575,6 +681,78 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.setBattle(ctx.userId, b)
 
     return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
+  }
+
+  /* ------------------------------------------------------------ class sheet */
+
+  /**
+   * The player's class dossier: class, specialization, mastery, class grade,
+   * attack bonus, the full move list with unlock/energy state, and today's
+   * remaining uses.
+   *
+   * Deliberately separate from the profile card: the profile shows Level, Rank
+   * and overall Grade, which are different progressions. The note is explicit
+   * that class grade must not be confused with any of them, so they are never
+   * printed in the same block.
+   */
+  async function classSheet (sock, m, ctx) {
+    const p = await store.player(ctx.userId)
+    if (!p) return arise(sock, m, ctx)
+
+    const classId = classes.normalizeClassId(p.class)
+    if (!classId) {
+      return send(sock, ctx.jid, m, [
+        `${WATERMARK}`, '', '\ud83c\udfad *NO CLASS ASSIGNED*', '',
+        `Your stored class is *${p.class || '\u2014'}*, which is not in the catalogue.`,
+        `AXYON can set one with *${ctx.settings.prefix}classadmin set @you <class>*.`,
+        '', `See every class with *${ctx.settings.prefix}classadmin list*.`
+      ].join('\n'))
+    }
+
+    const def = classes.classById(classId)
+    const mastery = await store.classMastery(ctx.userId, classId)
+    const grade = classes.classGradeFor(mastery)
+    const used = await store.classMovesUsedToday(ctx.userId)
+    const limit = ctx.settings.classMovesPerDay
+    const remaining = Math.max(0, limit - used)
+    const moves = classes.movesForClass(classId)
+
+    const moveLines = moves.map(mv => {
+      const locked = mv.unlock != null && mastery < Number(mv.unlock)
+      const icon = locked ? '\ud83d\udd12' : mv.ultimate ? '\ud83d\udc80' : mv.type === 'defensive' ? '\ud83d\udee1\ufe0f' : mv.type === 'support' ? '\u2764\ufe0f' : mv.type === 'special' ? '\u2728' : '\u2694\ufe0f'
+      const dmg = Number(mv.damage) > 0 ? `${mv.damage} dmg` : mv.type
+      const cost = mv.cost != null ? ` \u2022 \u26a1${mv.cost}` : ''
+      const lock = locked ? ` \u2022 needs ${Number(mv.unlock).toLocaleString('en-US')} mastery` : ''
+      return `${icon} *${mv.name}* \u2014 ${dmg}${cost}${lock}`
+    })
+
+    const nextLine = grade.next
+      ? `\ud83d\udcc8 Next: *${grade.next.grade}* at *${grade.next.mastery.toLocaleString('en-US')}* \u2014 ${grade.next.remaining.toLocaleString('en-US')} to go`
+      : '\ud83d\udcc8 *SS* \u2014 maximum class mastery reached.'
+
+    const lines = [
+      `${WATERMARK}`, '',
+      `\ud83c\udfad *${def.name.toUpperCase()}*${def.legacy ? ' \u00b7 legacy' : ''}`,
+      `_${def.specialization}_`, '',
+      T.rule('CLASS MASTERY', 'thin'),
+      `\ud83e\udde0 Mastery \u2014 *${mastery.toLocaleString('en-US')}*`,
+      `\ud83c\udf96\ufe0f Class grade \u2014 *${grade.grade}*`,
+      `\u2694\ufe0f Class attack bonus \u2014 *+${grade.bonus}*`,
+      nextLine, '',
+      T.rule('TODAY', 'thin'),
+      `\ud83e\udde0 Class moves \u2014 *${remaining}/${limit}* left`,
+      `\u26a1 Power Energy \u2014 *${p.powerEnergy}/${p.maxPowerEnergy}*`,
+      '', T.rule('MOVES', 'thin'),
+      ...moveLines, '',
+      `Use one in battle with *${ctx.settings.prefix}class <move>* or *${ctx.settings.prefix}classmove <move>*.`,
+      `Class grade is separate from your Level, Rank and overall Grade.`
+    ]
+
+    if (classes.masteryAwardPending()) {
+      lines.push('', '> \u26a0\ufe0f Mastery award values are pending owner approval \u2014 mastery does not increase yet.')
+    }
+
+    return send(sock, ctx.jid, m, lines.join('\n'))
   }
 
   async function finishBattle (sock, m, ctx, p, b, won) {
@@ -882,6 +1060,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
+    classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons,
     applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard

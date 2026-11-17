@@ -15,6 +15,7 @@ const lore = require('./lore')
 const T = require('./theme')
 const items = require('./axyon-items')
 const cardSpawner = require('./card-spawn')
+const classes = require('./axyon-classes')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -36,7 +37,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'top', 'story', 'aura', 'feedback'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -193,7 +194,25 @@ function createCommands ({ axyon, economy, logger, ai }) {
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('heal', 'battle', '{p}heal', 'Recover 25% HP. 5 uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
-  cmd('class', 'battle', '{p}class', 'Use your class move. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'class'), { hidden: true })
+  cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
+    /*
+     * `!class` is BOTH the class sheet and the in-battle move command.
+     *
+     * The old command was hidden and only ever fired a move, so a player had
+     * no way to see their class, mastery, grade or remaining uses. Now: with
+     * no argument and no active battle it shows the sheet; with an argument it
+     * uses that named move; with no argument inside a battle it uses the
+     * default move, which is the old behaviour.
+     */
+    const b = await store.getBattle(ctx.userId)
+    const moveName = args && args.length ? args.join(' ') : null
+    if (b || moveName) return axyon.battleAct(s, m, ctx, 'class', 1, moveName)
+    return axyon.classSheet(s, m, ctx)
+  })
+  cmd('classmove', 'battle', '{p}classmove <move>', 'Use a named class move in battle.', async (s, m, ctx, args) => {
+    if (!args || !args.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}classmove <move name>* \u2014 see *${ctx.prefix}class*.`)
+    return axyon.battleAct(s, m, ctx, 'class', 1, args.join(' '))
+  }, { hidden: true })
   cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
   cmd('retreat', 'battle', '{p}retreat', 'Leave the fight with no rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
 
@@ -669,6 +688,187 @@ function createCommands ({ axyon, economy, logger, ai }) {
       return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udee1\ufe0f *RHM REMOVED*\n\n+${target} lost management access.`)
     }
     return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}rhm add|remove|list*`)
+  })
+
+  /* ------------------------------------------------------ class management */
+
+  /*
+   * `!classadmin` — the AXYON-only class surface.
+   *
+   * Authorization is `ctx.auth.axyon`, which is the bot's existing trusted
+   * identity check (original owner, OWNER_NUMBERS, or a number registered in
+   * AXYON_NUMBERS). It is NOT derived from a display name or message text, as
+   * the note requires.
+   *
+   * Every mutating subcommand writes an audit row through store.log with the
+   * actor, the target and the before/after values.
+   */
+  cmd('classadmin', 'management', '{p}classadmin <list|info|set|mastery|reset|balance|moves> ...', 'Manage classes, mastery and balance (AXYON only).', async (s, m, ctx, args, content) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*\n\nClass management is restricted to AXYON.')
+
+    const sub = String(args[0] || 'list').toLowerCase()
+    const P = ctx.prefix
+
+    if (sub === 'list') {
+      const rows = classes.ALL_CLASSES.map(c => {
+        const ult = c.moves.find(mv => mv.ultimate)
+        return `\u2022 *${c.name}* \u2014 ${c.moves.length} moves${ult ? ` \u2022 ult: ${ult.name}` : ''}${c.legacy ? ' \u2022 legacy' : ''}`
+      })
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\ud83c\udfad *CLASS CATALOGUE*', '',
+        `${classes.OFFICIAL_CLASSES.length} official \u2022 ${classes.LEGACY_CLASSES.length} legacy`, '',
+        ...rows, '',
+        `Inspect one with *${P}classadmin info <class>*.`
+      ].join('\n'))
+    }
+
+    if (sub === 'info') {
+      const name = args.slice(1).join(' ')
+      const def = classes.classById(name)
+      if (!def) return axyon.send(s, ctx.jid, m, `\u274c No class called *${name || '\u2014'}*. See *${P}classadmin list*.`)
+      const lines = [
+        W, '', `\ud83c\udfad *${def.name.toUpperCase()}*${def.legacy ? ' \u00b7 legacy' : ''}`,
+        `_${def.specialization}_`, '',
+        ...def.moves.map(mv => {
+          const dmg = Number(mv.damage) > 0 ? `${mv.damage} dmg` : mv.type
+          const cost = mv.cost != null ? ` \u2022 \u26a1${mv.cost}` : ' \u2022 \u26a1 pending'
+          const unlock = mv.unlock != null ? ` \u2022 unlock ${mv.unlock}` : ' \u2022 unlock pending'
+          return `\u2022 *${mv.name}* \u2014 ${dmg}${cost}${unlock}${mv.ultimate ? ' \u2022 ULTIMATE' : ''}`
+        })
+      ]
+      return axyon.send(s, ctx.jid, m, lines.join('\n'))
+    }
+
+    if (sub === 'set') {
+      const target = mentionedId(content) || norm(args[1] || '')
+      if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin set @player <class>*`)
+      const classArg = args.slice(2).join(' ')
+      const def = classes.classById(classArg)
+      if (!def) return axyon.send(s, ctx.jid, m, `\u274c No class called *${classArg || '\u2014'}*. See *${P}classadmin list*.`)
+
+      const p = await store.player(target)
+      if (!p) return axyon.send(s, ctx.jid, m, `\u274c +${target} has not arisen yet.`)
+
+      const before = p.class
+      p.class = def.id
+      await store.savePlayer(p)
+      await store.log(ctx.userId, 'class_set', target, { from: before, to: def.id })
+
+      /*
+       * Mastery is NOT transferred. The note is explicit: switching class must
+       * not carry mastery across, and the old class's mastery is kept so it
+       * resumes if the player switches back.
+       */
+      const kept = await store.classMastery(target, def.id)
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\u2705 *CLASS SET*', '',
+        `+${target} \u2014 *${before || '\u2014'}* \u2192 *${def.name}*`,
+        `Mastery in ${def.name}: *${kept.toLocaleString('en-US')}*`,
+        '', '> Mastery is per class and is never transferred on a switch.'
+      ].join('\n'))
+    }
+
+    if (sub === 'mastery') {
+      const target = mentionedId(content) || norm(args[1] || '')
+      if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin mastery @player <class> <value>*`)
+      const classArg = args.slice(2, -1).join(' ')
+      const value = parseNum(args[args.length - 1])
+      const def = classes.classById(classArg)
+      if (!def) return axyon.send(s, ctx.jid, m, `\u274c No class called *${classArg || '\u2014'}*.`)
+      if (value == null || value < 0) return axyon.send(s, ctx.jid, m, `\u274c Mastery must be a number \u2265 0.`)
+
+      const before = await store.classMastery(target, def.id)
+      const after = await store.setClassMastery(target, def.id, value)
+      const g = classes.classGradeFor(after)
+      await store.log(ctx.userId, 'class_mastery_set', target, { classId: def.id, from: before, to: after })
+
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\u2705 *MASTERY SET*', '',
+        `+${target} \u2022 *${def.name}*`,
+        `${before.toLocaleString('en-US')} \u2192 *${after.toLocaleString('en-US')}*`,
+        `Class grade: *${g.grade}* \u2022 bonus *+${g.bonus}*`
+      ].join('\n'))
+    }
+
+    if (sub === 'reset') {
+      const target = mentionedId(content) || norm(args[1] || '')
+      if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin reset @player <class> confirm*`)
+      const classArg = args.slice(2, -1).join(' ')
+      const confirm = String(args[args.length - 1] || '').toLowerCase()
+      const def = classes.classById(classArg)
+      if (!def) return axyon.send(s, ctx.jid, m, `\u274c No class called *${classArg || '\u2014'}*.`)
+      if (confirm !== 'confirm') {
+        return axyon.send(s, ctx.jid, m, `\u26a0\ufe0f *CONFIRM REQUIRED*\n\nThis wipes +${target}'s *${def.name}* mastery.\n\nRepeat with:\n*${P}classadmin reset @player ${def.id} confirm*`)
+      }
+      const before = await store.classMastery(target, def.id)
+      await store.setClassMastery(target, def.id, 0)
+      await store.log(ctx.userId, 'class_mastery_reset', target, { classId: def.id, from: before, to: 0 })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *MASTERY RESET*\n\n+${target} \u2022 *${def.name}*\n${before.toLocaleString('en-US')} \u2192 *0*\n\n> Logged to the audit trail.`)
+    }
+
+    if (sub === 'balance') {
+      const key = String(args[1] || '').toLowerCase()
+      const value = Number(args[2])
+      if (!key) {
+        const b = classes.BALANCE
+        return axyon.send(s, ctx.jid, m, [
+          W, '', '\u2696\ufe0f *CLASS BALANCE*', '',
+          `cMinusScale \u2014 *${b.cMinusScale}*`,
+          `maxScale \u2014 *${b.maxScale}*`,
+          `ultimateTarget \u2014 *${b.ultimateTarget}*`,
+          `masteryAward.classMove \u2014 *${b.masteryAward.classMove ?? 'pending'}*`,
+          `masteryAward.battleWin \u2014 *${b.masteryAward.battleWin ?? 'pending'}*`,
+          '', `Set with *${P}classadmin balance <key> <value>*.`,
+          '> These are PENDING owner approval. Changing them is a live rebalance.'
+        ].join('\n'))
+      }
+      if (!Number.isFinite(value)) return axyon.send(s, ctx.jid, m, `\u274c *${key}* needs a numeric value.`)
+      const patch = {}
+      if (key === 'cminusscale') patch.cMinusScale = value
+      else if (key === 'maxscale') patch.maxScale = value
+      else if (key === 'ultimatetarget') patch.ultimateTarget = value
+      else if (key === 'masteryaward.classmove') patch.masteryAward = { classMove: value }
+      else if (key === 'masteryaward.battlewin') patch.masteryAward = { battleWin: value }
+      else return axyon.send(s, ctx.jid, m, `\u274c Unknown key *${key}*.`)
+      const after = classes.setBalance(patch)
+      await store.log(ctx.userId, 'class_balance_set', key, { value, after })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *BALANCE UPDATED*\n\n*${key}* \u2192 *${value}*\n\n> In-memory only \u2014 resets on restart until approved and committed.`)
+    }
+
+    if (sub === 'moves') {
+      const target = mentionedId(content) || norm(args[1] || '')
+      if (!/^\d{8,15}$/.test(target || '')) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin moves @player*`)
+      const p = await store.player(target)
+      if (!p) return axyon.send(s, ctx.jid, m, `\u274c +${target} has not arisen yet.`)
+      const classId = classes.normalizeClassId(p.class)
+      if (!classId) return axyon.send(s, ctx.jid, m, `\u274c +${target} has no valid class.`)
+      const mastery = await store.classMastery(target, classId)
+      const g = classes.classGradeFor(mastery)
+      const used = await store.classMovesUsedToday(target)
+      const moves = classes.movesForClass(classId)
+      return axyon.send(s, ctx.jid, m, [
+        W, '', `\ud83d\udc64 *+${target}* \u2014 ${p.name || 'unnamed'}`, '',
+        `Class: *${classes.classById(classId).name}*`,
+        `Mastery: *${mastery.toLocaleString('en-US')}* \u2022 Grade *${g.grade}* \u2022 Bonus *+${g.bonus}*`,
+        `Class moves today: *${used}/${ctx.settings.classMovesPerDay}*`,
+        `Power Energy: *${p.powerEnergy}/${p.maxPowerEnergy}*`, '',
+        ...moves.map(mv => {
+          const locked = mv.unlock != null && mastery < Number(mv.unlock)
+          return `${locked ? '\ud83d\udd12' : '\u2705'} *${mv.name}* \u2014 ${Number(mv.damage) > 0 ? `${mv.damage} dmg` : mv.type}`
+        })
+      ].join('\n'))
+    }
+
+    return axyon.send(s, ctx.jid, m, [
+      `\ud83c\udfad *CLASS ADMIN*`, '',
+      `*${P}classadmin list* \u2014 every class`,
+      `*${P}classadmin info <class>* \u2014 moves and costs`,
+      `*${P}classadmin set @player <class>* \u2014 assign a class`,
+      `*${P}classadmin mastery @player <class> <n>* \u2014 set mastery`,
+      `*${P}classadmin reset @player <class> confirm* \u2014 wipe mastery`,
+      `*${P}classadmin moves @player* \u2014 inspect a player`,
+      `*${P}classadmin balance [key value]* \u2014 view or set balance`
+    ].join('\n'))
   })
 
   /* ------------------------------------------------------- stage management */

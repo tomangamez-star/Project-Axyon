@@ -272,9 +272,43 @@ async function ensureSchema () {
       detail JSONB NOT NULL DEFAULT '{}'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
+    /*
+     * CLASS MASTERY \u2014 one row per player per class.
+     *
+     * Keyed by (user_id, class_id) rather than a single column on the player,
+     * because the note requires that switching class does not transfer mastery
+     * and that progress resumes if the player switches back. A single column
+     * would force a destructive choice on every class change.
+     */
+    CREATE TABLE IF NOT EXISTS axyon_class_mastery(
+      user_id TEXT NOT NULL,
+      class_id TEXT NOT NULL,
+      mastery BIGINT NOT NULL DEFAULT 0,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(user_id, class_id));
+
+    /*
+     * CLASS-MOVE DAILY USAGE \u2014 one row per player per UTC day.
+     *
+     * A separate table, not a counter on the player, so the limit is enforced
+     * by a single atomic UPSERT. Two simultaneous requests cannot both read
+     * "2 used" and both write "3": the UPDATE ... WHERE used < limit either
+     * matches the row or it does not, and the caller sees which.
+     *
+     * Card abilities keep their own counter (axyon_cards.ability_uses) and are
+     * deliberately NOT in this table \u2014 the note requires the two limits to be
+     * independent.
+     */
+    CREATE TABLE IF NOT EXISTS axyon_class_usage(
+      user_id TEXT NOT NULL,
+      day_key TEXT NOT NULL,
+      used INT NOT NULL DEFAULT 0,
+      PRIMARY KEY(user_id, day_key));
+
     CREATE INDEX IF NOT EXISTS axyon_players_rank ON axyon_players(rank, level DESC);
     CREATE INDEX IF NOT EXISTS axyon_cards_owner ON axyon_cards(owner_id);
     CREATE INDEX IF NOT EXISTS axyon_log_created ON axyon_log(created_at DESC);
+    CREATE INDEX IF NOT EXISTS axyon_class_mastery_user ON axyon_class_mastery(user_id);
   `)
   /*
    * MIGRATION — the active game mode.
@@ -1126,6 +1160,124 @@ async function consumeItem (userId, key) {
 
 /* --------------------------------------------------------------------- log */
 
+/* ------------------------------------------------------- class mastery */
+
+/**
+ * The player's mastery in one class. Missing row means 0 — a player who has
+ * never trained a class has no mastery in it, which is not an error.
+ */
+async function classMastery (userId, classId) {
+  await ensureSchema()
+  const r = await db().query(
+    'SELECT mastery FROM axyon_class_mastery WHERE user_id=$1 AND class_id=$2',
+    [userId, String(classId || '')]
+  )
+  return r.rows[0] ? Number(r.rows[0].mastery) : 0
+}
+
+/** Every class the player has mastery in, for the class view. */
+async function classMasteries (userId) {
+  await ensureSchema()
+  const r = await db().query(
+    'SELECT class_id, mastery FROM axyon_class_mastery WHERE user_id=$1 ORDER BY mastery DESC',
+    [userId]
+  )
+  return r.rows.map(x => ({ classId: x.class_id, mastery: Number(x.mastery) }))
+}
+
+/**
+ * Adds mastery to one class. Never negative, never touches another class.
+ *
+ * `amount` of 0 is a no-op that still returns the current value, so callers do
+ * not need to branch on whether awarding is configured yet.
+ */
+async function addClassMastery (userId, classId, amount) {
+  await ensureSchema()
+  const delta = Math.max(0, Math.floor(Number(amount) || 0))
+  if (!delta) return classMastery(userId, classId)
+  const r = await db().query(
+    `INSERT INTO axyon_class_mastery(user_id,class_id,mastery) VALUES($1,$2,$3)
+     ON CONFLICT(user_id,class_id) DO UPDATE SET
+       mastery = axyon_class_mastery.mastery + $3,
+       updated_at = NOW()
+     RETURNING mastery`,
+    [userId, String(classId || ''), delta]
+  )
+  return Number(r.rows[0].mastery)
+}
+
+/** Sets mastery outright. Admin-only path; the caller must audit it. */
+async function setClassMastery (userId, classId, mastery) {
+  await ensureSchema()
+  const value = Math.max(0, Math.floor(Number(mastery) || 0))
+  const r = await db().query(
+    `INSERT INTO axyon_class_mastery(user_id,class_id,mastery) VALUES($1,$2,$3)
+     ON CONFLICT(user_id,class_id) DO UPDATE SET mastery=$3, updated_at=NOW()
+     RETURNING mastery`,
+    [userId, String(classId || ''), value]
+  )
+  return Number(r.rows[0].mastery)
+}
+
+/* --------------------------------------------------- class-move daily use */
+
+/** Class moves already used today (UTC). */
+async function classMovesUsedToday (userId, day = dayKey()) {
+  await ensureSchema()
+  const r = await db().query(
+    'SELECT used FROM axyon_class_usage WHERE user_id=$1 AND day_key=$2',
+    [userId, day]
+  )
+  return r.rows[0] ? Number(r.rows[0].used) : 0
+}
+
+/**
+ * Atomically consumes one class-move use.
+ *
+ * This is the concurrency guard the note asks for. The INSERT ... ON CONFLICT
+ * DO UPDATE ... WHERE used < $3 is a single statement, so Postgres serialises
+ * it: of two simultaneous calls with limit 3 and 2 already used, exactly one
+ * gets a row back and the other gets none. There is no read-then-write window
+ * for a second request to slip through.
+ *
+ * Returns { ok, used, remaining }. `ok: false` means the limit was already
+ * reached and NOTHING was consumed.
+ */
+async function consumeClassMove (userId, limit = 3, day = dayKey()) {
+  await ensureSchema()
+  const cap = Math.max(0, Math.floor(Number(limit) || 0))
+  const r = await db().query(
+    `INSERT INTO axyon_class_usage(user_id,day_key,used) VALUES($1,$2,1)
+     ON CONFLICT(user_id,day_key) DO UPDATE SET used = axyon_class_usage.used + 1
+       WHERE axyon_class_usage.used < $3
+     RETURNING used`,
+    [userId, day, cap]
+  )
+  if (!r.rows[0]) {
+    const used = await classMovesUsedToday(userId, day)
+    return { ok: false, used, remaining: Math.max(0, cap - used) }
+  }
+  const used = Number(r.rows[0].used)
+  return { ok: true, used, remaining: Math.max(0, cap - used) }
+}
+
+/**
+ * Gives a consumed use back. Used when a move passed the counter but then
+ * failed downstream (the enemy died to a prior effect, the battle vanished).
+ * The note is explicit that a rejected action must not consume a use.
+ */
+async function refundClassMove (userId, day = dayKey()) {
+  await ensureSchema()
+  const r = await db().query(
+    `UPDATE axyon_class_usage SET used = GREATEST(0, used - 1)
+     WHERE user_id=$1 AND day_key=$2 RETURNING used`,
+    [userId, day]
+  )
+  return r.rows[0] ? Number(r.rows[0].used) : 0
+}
+
+/* --------------------------------------------------------------------- log */
+
 async function log (actor, action, target = '', detail = {}) {
   await ensureSchema()
   await db().query(
@@ -1236,6 +1388,13 @@ module.exports = {
   inventoryQty,
   addItem,
   consumeItem,
+  classMastery,
+  classMasteries,
+  addClassMastery,
+  setClassMastery,
+  classMovesUsedToday,
+  consumeClassMove,
+  refundClassMove,
   log,
   recentLog
 }
