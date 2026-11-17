@@ -15,6 +15,7 @@ const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
 const classes = require('./axyon-classes')
+const display = require('./axyon-combat-display')
 const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
@@ -214,32 +215,75 @@ function profileCard (p, extra = {}) {
  */
 function battleCard (b, p, note = '') {
   const e = b.enemy
-  const enemy = T.frame([
-    `\ud83d\udc79 ${T.b(e.name)}`,
-    T.barLine(Math.max(0, b.enemyHp), e.hp),
-    T.field('\u2694\ufe0f', 'ATK', T.m(e.atk)),
-    T.field('\ud83d\udee1\ufe0f', 'DEF', T.m(e.def))
-  ], { kind: 'heavy', title: T.font('ENEMY', 'smallcaps'), width: 22 })
 
-  const hunter = T.frame([
-    `\ud83d\udc64 ${T.hunterName(p.name)}`,
-    T.barLine(Math.max(0, b.playerHp), p.maxHp),
-    `\ud83d\udd0b ${T.barLine(b.energy, p.maxPowerEnergy)}`
-  ], { kind: 'round', title: T.font('HUNTER', 'smallcaps'), width: 22 })
+  /*
+   * RENDERED THROUGH THE SPEC'S DISPLAY LAYER.
+   *
+   * The engine has already computed every number by the time we get here, so
+   * this only formats them: a 20-segment HP/PE bar beside the exact values,
+   * the enemy and hunter panels, and the live usage tracker. Nothing below
+   * rolls a die or clamps a stat — if a value is absent it is omitted rather
+   * than filled with something plausible.
+   */
+  const playerPanel = display.combatantPanel({
+    name: p.name,
+    rank: p.rank,
+    level: p.level,
+    class: p.class,
+    hp: Math.max(0, b.playerHp),
+    maxHp: p.maxHp,
+    pe: Math.max(0, b.energy),
+    maxPe: p.maxPowerEnergy,
+    atk: p.atk,
+    def: p.def
+  }, 'player')
+
+  const enemyPanel = display.combatantPanel({
+    name: e.name,
+    type: e.boss ? 'BOSS' : 'MONSTER',
+    hp: Math.max(0, b.enemyHp),
+    maxHp: e.hp,
+    pe: e.pe != null ? e.pe : undefined,
+    maxPe: e.maxPe != null ? e.maxPe : undefined,
+    atk: e.atk,
+    def: e.def,
+    abilities: Array.isArray(e.abilities) ? e.abilities : undefined
+  }, 'enemy')
+
+  const tracker = display.usageTracker({
+    moves: liveClassMoves(p).map(m => ({ name: m.name, used: p.classMovesUsed || 0, limit: 3 })),
+    heals: { used: Math.max(0, 5 - Math.max(0, b.healsLeft ?? 5)), limit: 5 }
+  })
 
   return [
     T.header({ creators: greetings.creatorsOf({}) }),
     '',
-    `\u2694\ufe0f ${T.b('BATTLE')} \u2022 ${T.i(`turn ${b.turn}`)}`,
+    `${T.b('BATTLE')} \u2022 ${T.i(`turn ${b.turn}`)}${e.boss ? ` \u2022 ${T.b('BOSS')}` : ''}`,
     '',
     note ? `${note}\n` : null,
-    enemy,
+    enemyPanel,
     '',
-    hunter,
+    playerPanel,
     '',
-    T.rule('', 'dotted'),
-    `Uses \u2014 heal ${T.m(Math.max(0, b.healsLeft))} \u2022 class ${T.m(Math.max(0, 3 - p.classMovesUsed))} \u2022 card abilities ${T.m('3 per card/day')}`
+    tracker
   ].filter(x => x !== null && x !== undefined).join('\n')
+}
+
+/**
+ * The class moves a player can use right now.
+ *
+ * Returns an empty list when the player's class has no catalogue entry (a legacy
+ * class, or one an operator has not configured). The card then shows no move
+ * rows rather than inventing names.
+ */
+function liveClassMoves (p) {
+  try {
+    const moves = classes.movesForClass ? classes.movesForClass(p.class) : null
+    if (!Array.isArray(moves)) return []
+    return moves.slice(0, 3)
+  } catch {
+    return []
+  }
 }
 
 /* ------------------------------------------------------------------ engine */
