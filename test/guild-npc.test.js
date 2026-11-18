@@ -296,3 +296,40 @@ test('class crud: the command surface exposes the CRUD subcommands', () => {
   /* Deleting a class must require confirmation. */
   assert.match(src, /delclass <id> confirm/)
 })
+
+/* --------------------------------------------------- wiring, not just code */
+
+test('wiring: the guild engine is reachable from the room command', () => {
+  /*
+   * A module nothing calls is dead code, and a green unit suite does not prove
+   * a feature is live. These assert the COMMAND layer actually uses it.
+   */
+  const fs = require('fs')
+  const src = fs.readFileSync(require.resolve('../src/axyon-commands'), 'utf8')
+  assert.match(src, /require\('\.\/axyon-guild'\)/, 'the command layer must import the guild engine')
+  assert.match(src, /guild\.createRun\(/, 'room start must build a run')
+  assert.match(src, /guild\.strike\(/, 'room act must resolve a strike')
+  assert.match(src, /guild\.runStatus\(/, 'the run must be shown to the player')
+  assert.match(src, /guild\.splitReward\(/, 'a won run must pay out')
+  assert.match(src, /sub === 'act'/, 'there must be a way to take a turn')
+})
+
+test('wiring: custom room types are reachable from a command and reloaded at boot', () => {
+  const fs = require('fs')
+  const cmds = fs.readFileSync(require.resolve('../src/axyon-commands'), 'utf8')
+  assert.match(cmds, /cmd\('roomtype'/, 'there must be a roomtype command')
+  assert.match(cmds, /modesLib\.registerRoomType\(/, 'it must register the type')
+  assert.match(cmds, /store\.upsertRoomType\(/, 'it must persist the type')
+
+  const server = fs.readFileSync(require.resolve('../src/server'), 'utf8')
+  assert.match(server, /store\.roomTypes\(\)/, 'boot must reload persisted room types')
+  assert.match(server, /modesLib\.registerRoomType\(/, 'and register them in memory')
+})
+
+test('wiring: an NPC is used by the combat engine, not just defined', () => {
+  const fs = require('fs')
+  const rpg = fs.readFileSync(require.resolve('../src/axyon-rpg'), 'utf8')
+  assert.match(rpg, /require\('\.\/axyon-npc'\)/, 'the engine must import the NPC module')
+  assert.match(rpg, /npc\.buildNpc\(/, 'buildEnemy must build a real NPC')
+  assert.match(rpg, /npc\.npcMoveDamage\(/, 'the NPC must actually use its class move')
+})

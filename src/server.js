@@ -262,6 +262,35 @@ class WhatsAppConnection {
         this.pairingReady = true
         this.log.info('WhatsApp connected')
         if (this.primary) cardSpawner.start(sock)
+        /*
+         * Reload the operator's custom room types.
+         *
+         * They live in the database so they survive a restart, but the
+         * capacity rules are enforced in memory by `axyon-modes`. Without this
+         * reload a custom type would exist in the table and be invisible to
+         * `capacityFor()` after every deploy — the room would silently fall
+         * back to a capacity of 1.
+         */
+        if (this.primary) {
+          void (async () => {
+            try {
+              const rows = await store.roomTypes()
+              const modesLib = require('./axyon-modes')
+              for (const r of rows) {
+                modesLib.registerRoomType({
+                  id: r.type_id,
+                  name: r.name,
+                  minPlayers: r.min_players,
+                  defaultMax: r.default_max,
+                  hardMax: r.hard_max
+                })
+              }
+              if (rows.length) this.log.info({ count: rows.length }, 'custom room types loaded')
+            } catch (err) {
+              this.log.warn({ err: err.message }, 'could not load custom room types')
+            }
+          })()
+        }
       }
       if (connection === 'close') void this.onClose(sock, g, lastDisconnect)
     })

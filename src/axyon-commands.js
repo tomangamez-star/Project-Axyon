@@ -17,6 +17,7 @@ const items = require('./axyon-items')
 const cardSpawner = require('./card-spawn')
 const classes = require('./axyon-classes')
 const modesLib = require('./axyon-modes')
+const guild = require('./axyon-guild')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -38,7 +39,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -476,9 +477,90 @@ function createCommands ({ axyon, economy, logger, ai }) {
         const t = modesLib.modeType(room.participation)
         return axyon.send(s, ctx.jid, m, `\u274c Not enough players. *${room.participation}* needs at least *${t?.minPlayers || 1}*.`)
       }
+
+      /*
+       * A GUILD MODE OR THE CO-OP TRIAL ACTUALLY STARTS A RUN HERE.
+       *
+       * Without this the modes would be enterable but unplayable — the same
+       * dead-code trap as a module nothing calls. The run is built from the
+       * room's real participants and stored in the room's `state` column, so
+       * it survives a restart and every member sees the same run.
+       */
+      const modeDef = modes.get(room.mode_id)
+      const ruleId = modeDef && modeDef.rules
+      if (ruleId) {
+        const participants = Array.isArray(room.participants) ? room.participants : []
+        const members = []
+        for (const part of participants) {
+          const pl = await store.player(part.userId)
+          if (!pl) continue
+          members.push({ userId: part.userId, name: pl.name || part.userId, hp: pl.hp, maxHp: pl.maxHp })
+        }
+        const run = guild.createRun({ modeId: ruleId, members })
+        if (!run.ok) return axyon.send(s, ctx.jid, m, `\u274c ${run.message}`)
+
+        await store.updateRoom(room.room_key, { status: 'active', state: run.state })
+        await store.log(ctx.userId, 'room_start', room.room_key, { mode: room.mode_id, run: ruleId })
+        return axyon.send(s, ctx.jid, m, [
+          `${W}`, '', `\ud83d\udfe2 *${run.state.modeName.toUpperCase()} \u2014 STARTED*`, '',
+          ...guild.runStatus(run.state), '',
+          `Strike with *${ctx.prefix}room act <damage>*`
+        ].join('\n'))
+      }
+
       await store.updateRoom(room.room_key, { status: 'active' })
       await store.log(ctx.userId, 'room_start', room.room_key)
       return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udfe2 *ROOM ACTIVE*\n\n*${room.name}* is now in progress.`)
+    }
+
+    /*
+     * `room act` — one strike in a guild-mode or co-op run.
+     *
+     * The damage is the player's own class damage, computed by the same
+     * `classes.classDamage()` the rest of combat uses. The run decides what
+     * that damage MEANS (shared pool, boss HP, pair knockout); this handler
+     * only supplies the number and persists the result.
+     */
+    if (sub === 'act' || sub === 'strike') {
+      const run = room.state && room.state.modeId ? room.state : null
+      if (!run) return axyon.send(s, ctx.jid, m, `\u274c This room has no run in progress. Start it with *${ctx.prefix}room start ${room.room_key}*.`)
+      if (run.done) return axyon.send(s, ctx.jid, m, `\u274c That run is already over.`)
+
+      const p = await store.player(ctx.userId)
+      if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+
+      const classId = classes.normalizeClassId(p.class)
+      const mastery = classId ? await store.classMastery(ctx.userId, classId) : 0
+      const g = classes.classGradeFor(mastery)
+      const moves = classId ? classes.movesForClass(classId) : []
+      const move = moves.find(mv => Number(mv.damage) > 0) || null
+      const dmg = move
+        ? classes.classDamage({ move, mastery, gradeBonus: g.bonus }).final
+        : Math.max(1, Math.round(Number(p.atk) || 5))
+
+      const res = guild.strike(run, { userId: ctx.userId, damage: dmg })
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+
+      await store.updateRoom(room.room_key, {
+        state: res.state,
+        status: res.done ? 'completed' : 'active',
+        result: res.done ? (res.won ? 'won' : 'lost') : ''
+      })
+
+      const lines = [
+        `${W}`, '', `\u2694\ufe0f *${res.state.modeName}*`, '',
+        ...res.log, '',
+        ...guild.runStatus(res.state)
+      ]
+      if (res.done) {
+        lines.push('', res.won ? '\ud83c\udfc6 *VICTORY*' : '\ud83d\udc80 *DEFEAT*')
+        if (res.won && Array.isArray(res.state.members)) {
+          const split = guild.splitReward(res.state, 200)
+          lines.push('', '*Rewards by contribution:*')
+          for (const x of split) lines.push(`\u2022 ${x.name} \u2014 *${x.share}* Zen`)
+        }
+      }
+      return axyon.send(s, ctx.jid, m, lines.join('\n'))
     }
 
     if (sub === 'close') {
@@ -495,6 +577,80 @@ function createCommands ({ axyon, economy, logger, ai }) {
     }
 
     return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room <create|list|join|leave|start|close|view>*`)
+  })
+
+  /*
+   * CUSTOM ROOM TYPES
+   * -----------------
+   * The three built-in participation types are fixed. This lets AXYON define
+   * their own — a raid, a tournament lobby — with their own capacity bounds,
+   * so a large room does not have to pretend to be a party.
+   *
+   * The bounds are enforced in `modesLib.capacityFor()`, not here, so a custom
+   * type cannot bypass the clamping that protects the built-in ones.
+   */
+  cmd('roomtype', 'dungeon', '{p}roomtype <list|add|del> ...', 'Define custom room types and their capacity.', async (s, m, ctx, args) => {
+    if (ctx.auth !== 'owner') {
+      return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only AXYON can manage room types.')
+    }
+    const sub = String(args[0] || 'list').toLowerCase()
+
+    if (sub === 'list') {
+      const rows = await store.roomTypes()
+      const builtin = modesLib.MODE_TYPE_IDS.map(id => {
+        const t = modesLib.modeType(id)
+        return `\u2022 *${t.name}* \u2014 \`${id}\` \u2022 ${t.minPlayers}-${t.defaultMax} \u2022 built-in`
+      })
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '\ud83c\udf9f\ufe0f *ROOM TYPES*', '',
+        ...builtin,
+        ...(rows.length ? ['', '*Custom:*', ...rows.map(r => `\u2022 *${r.name}* \u2014 \`${r.type_id}\` \u2022 ${r.min_players}-${r.default_max} (max ${r.hard_max})`)] : ['', 'No custom types yet.']),
+        '', `Add one with *${ctx.prefix}roomtype add <id> <Name> <min> <default> <max>*`
+      ].join('\n'))
+    }
+
+    if (sub === 'add') {
+      const id = String(args[1] || '').trim().toLowerCase()
+      const name = args[2] || ''
+      if (!id || !name) {
+        return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}roomtype add <id> <Name> <min> <default> <max>*\nExample: *${ctx.prefix}roomtype add raid Raid 3 8 12*`)
+      }
+      const min = Number(args[3]) || 1
+      const def = Number(args[4]) || 4
+      const hard = Number(args[5]) || 50
+
+      /* Register in memory first: it rejects a reserved id before we persist. */
+      const reg = modesLib.registerRoomType({ id, name, minPlayers: min, defaultMax: def, hardMax: hard })
+      if (!reg.ok) return axyon.send(s, ctx.jid, m, `\u274c ${reg.message}`)
+
+      const saved = await store.upsertRoomType({ typeId: reg.type.id, name: reg.type.name, minPlayers: reg.type.minPlayers, defaultMax: reg.type.defaultMax, hardMax: reg.type.hardMax })
+      if (!saved.ok) {
+        modesLib.unregisterRoomType(reg.type.id)
+        return axyon.send(s, ctx.jid, m, `\u274c ${saved.message}`)
+      }
+      await store.log(ctx.userId, 'roomtype_add', reg.type.id, { min, def, hard })
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '\u2705 *ROOM TYPE ADDED*', '',
+        `*${reg.type.name}* \u2014 \`${reg.type.id}\``,
+        `Players: *${reg.type.minPlayers}* min \u2022 *${reg.type.defaultMax}* default \u2022 *${reg.type.hardMax}* max`,
+        '', `Open one with *${ctx.prefix}room create <mode> ${reg.type.id}*`
+      ].join('\n'))
+    }
+
+    if (sub === 'del') {
+      const id = String(args[1] || '').trim().toLowerCase()
+      if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}roomtype del <id>*`)
+      if (modesLib.MODE_TYPE_IDS.includes(id)) {
+        return axyon.send(s, ctx.jid, m, `\u274c *${id}* is a built-in type and cannot be removed.`)
+      }
+      const gone = await store.deleteRoomType(id)
+      modesLib.unregisterRoomType(id)
+      if (!gone) return axyon.send(s, ctx.jid, m, `\u274c No custom room type \`${id}\`.`)
+      await store.log(ctx.userId, 'roomtype_del', id)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *ROOM TYPE REMOVED*\n\n\`${id}\` is gone. Existing rooms keep their stored capacity.`)
+    }
+
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}roomtype <list|add|del>*`)
   })
 
   /* ----------------------------------------------------------------- duels */
