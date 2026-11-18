@@ -218,7 +218,7 @@ function createAI ({ logger, getConfig } = {}) {
       model: c.aiModel || '',
       groqKey: String(process.env.GROQ_API_KEY || '').trim(),
       groqModel: String(process.env.GROQ_MODEL || GROQ_MODEL).trim(),
-      apiUrl: String(process.env.AI_API_URL || (/^https?:\/\//i.test(String(process.env.AI_API || '').trim()) ? process.env.AI_API : '')).trim(),
+      apiUrl: String(process.env.AI_API_URL || (/^https?:\/\//i.test(String(process.env.AI_API || '').trim()) ? process.env.AI_API : (process.env.AI_API ? 'https://api.openai.com/v1/chat/completions' : ''))).trim(),
       apiKey: String(process.env.AI_API_KEY || (!/^https?:\/\//i.test(String(process.env.AI_API || '').trim()) ? process.env.AI_API : '')).trim(),
       apiModel: String(process.env.AI_API_MODEL || 'gpt-4o-mini').trim(),
       creators: Array.isArray(c.creators) && c.creators.length ? c.creators : ['Lil Clutch', 'Montai'],

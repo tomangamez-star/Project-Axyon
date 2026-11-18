@@ -196,7 +196,7 @@ function profileCard (p, extra = {}) {
     '',
     T.rule('HOLDINGS', 'thin'),
     `\ud83d\udcb0 ${T.b('Zen')} — ${T.m(fmt(p.zen))}   \ud83d\udc8e ${T.b('Coins')} — ${T.m(fmt(p.coins))}`,
-    `\ud83d\udeaa ${T.b('Stage')} — ${T.m(p.stage)}`
+    `\ud83d\udeaa ${T.b('Floor')} — ${T.m(p.stage)}`
   ].filter(x => x !== null && x !== undefined)
 
   return [
@@ -364,9 +364,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const r = await store.arise(userId, name)
     await store.log(userId, 'arise', userId, { created: r.created })
     const p = r.player
-    const caption = r.created
-      ? greetings.firstGreeting(p, settings.prefix, settings)
-      : greetings.returnGreeting(p, settings.prefix, settings)
+    if (!r.created) {
+      return send(sock, jid, m, `${WATERMARK}\n\n✨ *YOU ARE ALREADY RISEN*\n\nYour hunter profile is already registered with AXYON.\nUse *${settings.prefix}menu* to view your status or *${settings.prefix}explore* to continue your journey.`)
+    }
+    const caption = greetings.firstGreeting(p, settings.prefix, settings)
     return withVisual(sock, jid, m, 'arise', caption)
   }
 
@@ -386,54 +387,191 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
   async function listStages (sock, m, ctx) {
     const p = await store.player(ctx.userId)
-    const rows = await store.stages()
-    const lines = rows.map(s => {
-      const mark = s.locked ? '\ud83d\udd12' : Number(s.ordinal) === p.stage ? '\u25b6\ufe0f' : '\u25ab\ufe0f'
-      return `${mark} *${s.ordinal}. ${s.name}*\n   \u2764\ufe0f ${s.hp} \u2022 \u2694\ufe0f ${s.atk} \u2022 \ud83d\udee1\ufe0f ${s.def} \u2022 \u2728 ${s.xp} XP \u2022 \ud83e\ude99 ${s.zen}`
+    if (!p) return arise(sock, m, ctx)
+    let rows = await store.floors().catch(() => [])
+    if (!rows.length) rows = store.ORIGINAL_FLOORS || []
+    const current = Math.max(1, Number(p.stage) || 1)
+    const lines = rows.slice(0, 8).map(f => {
+      const mark = Number(f.ordinal) === current ? '▶️' : Number(f.ordinal) < current ? '✅' : '▫️'
+      return `${mark} *Floor ${f.ordinal}: ${f.name}*${f.boss ? ' · Guardian' : ''}`
     })
-    const defs = rows.filter(s => !s.locked).slice(0, 6).map(s => [`\u2694\ufe0f ${s.name}`, `ax_fight_${s.ordinal}`])
-    defs.push(['\ud83d\udc64 Profile', 'ax_profile'])
-    return buttons(sock, ctx.jid, m, [
-      `${WATERMARK}`, '', '\ud83d\udeaa *BATTLE STAGES*', '',
-      lines.join('\n'), '', `You are at stage *${p.stage}*.`
-    ].join('\n'), WATERMARK, defs)
+    if (current > rows.length) lines.push(`▶️ *Floor ${current}: The Unmapped Depths*`)
+    return tapButtons(sock, ctx.jid, m, [
+      `${WATERMARK}`, '', '🧭 *YOUR ADVENTURE*', '',
+      `Current progression: *Floor ${current}*`,
+      `Hunter level: *${p.level}*`, '',
+      lines.join('\n') || 'Your next encounter is waiting.', '',
+      `Use *${ctx.settings.prefix}explore* to continue. The System advances your floor automatically.`
+    ].join('\n'), WATERMARK, [['🧭 Explore', 'ax_explore'], ['👤 Menu', 'ax_profile']])
   }
 
   /* --------------------------------------------------------------- battles */
 
-  async function beginBattle (sock, m, ctx, ordinal) {
+  async function beginBattle (sock, m, ctx, ordinal, generatedStory = null) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
-    const stage = await store.stage(Number(ordinal) || p.stage)
-    if (!stage) return send(sock, ctx.jid, m, `\u274c There is no stage *${ordinal}*. Use *${ctx.settings.prefix}stages*.`)
-    if (stage.locked) return send(sock, ctx.jid, m, '\ud83d\udd12 That stage is locked.')
-    const enemy = buildEnemy(stage)
+    const active = await store.getBattle(ctx.userId)
+    if (active) {
+      if (active.mode === 'diversion') {
+        return tapButtons(sock, ctx.jid, m, diversionPrompt(active), WATERMARK, battleButtons(active))
+      }
+      return withVisual(sock, ctx.jid, m, active.enemy?.boss ? 'boss' : 'battle', battleCard(active, p, active.story || 'Your encounter is still underway.'), battleButtons(active), true)
+    }
+
+    const floorNo = Math.max(1, Number(p.stage) || 1)
+    let floors = await store.floors().catch(() => [])
+    if (!floors.length) floors = store.ORIGINAL_FLOORS || []
+    const configured = floors.find(f => Number(f.ordinal) === floorNo)
+    const base = floors.length ? floors[floors.length - 1] : { hp: 80, atk: 6, def: 3, xp: 55, zen: 80, name: 'The Unmapped Depths' }
+    const boss = floorNo % 5 === 0 || !!configured?.boss
+    const scale = Math.max(1, floorNo - Math.max(1, floors.length))
+    const floor = configured || {
+      key: `endless_floor_${floorNo}`, ordinal: floorNo,
+      name: ['The Unmapped Depths', 'Ashen Gallery', 'Moonless Passage', 'Shattered Sanctum', 'Veil of Echoes'][(floorNo - 1) % 5],
+      hp: Math.round(Number(base.hp || 80) * (1 + scale * 0.16)),
+      atk: Math.round(Number(base.atk || 6) * (1 + scale * 0.10)),
+      def: Math.round(Number(base.def || 3) * (1 + scale * 0.08)),
+      xp: Math.round(Number(base.xp || 55) * (1 + scale * 0.12)),
+      zen: Math.round(Number(base.zen || 80) * (1 + scale * 0.12)),
+      boss
+    }
+    if (floor.locked) return send(sock, ctx.jid, m, '🔒 Your next floor is currently locked. Ask an AXYON manager to review the progression settings.')
+    const encounter = { ...floor, boss, name: boss && !/warden|guardian|boss/i.test(floor.name) ? `Guardian of ${floor.name}` : floor.name }
+    const enemy = buildEnemy(encounter)
+    const eventIndex = Math.floor(floorNo / 3) - 1
+    const diversions = [
+      {
+        kind: 'combat',
+        title: 'THE WRATH HAS UNLEASHED A HAILSTORM',
+        scene: 'A violent hailstorm tears through a nearby village. The Wrath gathers power above the rooftops. You have only moments to decide how to respond.'
+      },
+      {
+        kind: 'rescue',
+        title: 'VOICES BENEATH THE RUBBLE',
+        scene: 'A passage has collapsed. You hear survivors calling from beneath the stone while the creature ahead moves closer. Your decision could save lives or give the enemy an advantage.'
+      },
+      {
+        kind: 'mystery',
+        title: 'THE WHISPERING RELIC',
+        scene: 'A strange relic pulses in the centre of the chamber. Symbols shift across its surface, and the enemy watches your every move. It may hold a weakness, power, or a trap.'
+      },
+      {
+        kind: 'treasure',
+        title: 'THE SEALED TREASURE',
+        scene: 'An old treasure chest rests beside the path. Its lock is covered in unfamiliar markings. You can risk opening it, study the mechanism, or leave it untouched.'
+      }
+    ]
+    const event = floorNo % 3 === 0 ? diversions[((eventIndex % diversions.length) + diversions.length) % diversions.length] : null
+    if (event?.kind === 'combat') enemy.name = 'The Wrath'
+    const classId = classes.normalizeClassId(p.class)
+    const moves = classId ? classes.movesForClass(classId) : []
+    const usable = (moves || []).filter(mv => mv.unlock == null || Number(mv.unlock) <= 0).filter(mv => Number(mv.cost || 0) <= Number(p.powerEnergy || 0))
+    const preferredMove = usable.filter(mv => Number(mv.damage) > 0).pop() || usable[0] || null
+    const choiceOptions = !event ? [] : event.kind === 'combat' ? [
+      preferredMove ? `Use ${preferredMove.name}` : 'Use a Power Burst',
+      'Stop the blast',
+      'Ignore it and fight head-on',
+      'Trust your instincts'
+    ] : event.kind === 'rescue' ? [
+      'Rescue the survivors', 'Track the approaching enemy', 'Search for supplies', 'Leave them behind'
+    ] : event.kind === 'mystery' ? [
+      'Study the strange symbols', 'Absorb the relic energy', 'Break the relic', 'Leave it alone'
+    ] : [
+      'Open the treasure chest', 'Disarm the lock', 'Smash it open', 'Ignore the chest'
+    ]
+    const story = [generatedStory, event?.scene].filter(Boolean).join('\n\n') || `The air changes as you enter *${floor.name}*. A presence stirs ahead. Defeat *${enemy.name}* to continue deeper into the unknown.`
     const b = {
-      mode: 'stage',
-      ordinal: Number(stage.ordinal),
-      enemy,
-      enemyHp: enemy.hp,
-      playerHp: p.hp,
-      energy: p.powerEnergy,
-      turn: 1,
-      healsLeft: ctx.settings.selfHealPerCombat,
-      guard: 0
+      mode: event && event.kind !== 'combat' ? 'diversion' : 'floor',
+      ordinal: floorNo, floorName: floor.name,
+      enemy: event && event.kind !== 'combat' ? null : enemy,
+      enemyHp: event && event.kind !== 'combat' ? 0 : enemy.hp,
+      playerHp: p.hp, energy: p.powerEnergy, turn: 1,
+      healsLeft: ctx.settings.selfHealPerCombat, guard: 0, story,
+      event: event ? { kind: event.kind, title: event.title, scene: event.scene } : null,
+      pendingChoice: !!event, choiceOptions, preferredMove: preferredMove?.name || null
     }
     await store.setBattle(ctx.userId, b)
-    await store.log(ctx.userId, 'battle_start', String(stage.ordinal), { enemy: enemy.name })
-    return withVisual(sock, ctx.jid, m, enemy.boss ? 'boss' : 'battle',
-      battleCard(b, p, `You step into *${enemy.name}*.`), battleButtons(), true)
+    await store.log(ctx.userId, 'adventure_enter', String(floorNo), { name: floor.name, event: !!event, boss })
+    if (b.mode === 'diversion') {
+      return tapButtons(sock, ctx.jid, m, diversionPrompt(b), WATERMARK, battleButtons(b))
+    }
+    const optionText = b.pendingChoice ? `\n\n${choiceOptions.map((label, i) => `${i + 1}. ${label}`).join('\n')}\n\nTap an option or use *!choose 1–4*.` : ''
+    const opening = `${event ? `*${event.title}*\n\n` : ''}${story}${optionText}`
+    return withVisual(sock, ctx.jid, m, boss ? 'boss' : 'dungeon', battleCard(b, p, opening), battleButtons(b), true)
   }
 
-  function battleButtons () {
+  function diversionPrompt (battle) {
+    const choices = (battle.choiceOptions || []).map((label, i) => `${i + 1}. ${label}`).join('\n')
+    return `${WATERMARK}\n\n🧭 *FLOOR ${battle.ordinal} · STORY DIVERSION*\n\n*${battle.event?.title || 'An unexpected event'}*\n\n${battle.story || battle.event?.scene || 'A decision awaits.'}\n\n${choices}\n\nTap an option or use *!choose 1–4*.`
+  }
+
+  function battleButtons (battle = null) {
+    if (battle?.pendingChoice) {
+      return (battle.choiceOptions || []).slice(0, 4).map((label, i) => [label.slice(0, 20), `ax_choice_${i + 1}`])
+    }
     return [
-      ['\u2694\ufe0f Attack', 'ax_b_attack'],
-      ['\ud83e\udde0 Class Move', 'ax_b_class'],
-      ['\u2764\ufe0f Self-Heal', 'ax_b_heal'],
-      ['\ud83c\udccf Card', 'ax_b_card'],
-      ['\ud83d\udee1\ufe0f Guard', 'ax_b_guard'],
-      ['\ud83c\udfc3 Retreat', 'ax_b_retreat']
+      ['⚔️ Attack', 'ax_b_attack'],
+      ['🧠 Ability', 'ax_b_class'],
+      ['❤️ Heal', 'ax_b_heal'],
+      ['🃏 Card', 'ax_b_card'],
+      ['🛡️ Defend', 'ax_b_guard'],
+      ['🏃 Retreat', 'ax_b_retreat']
     ]
+  }
+
+  async function resolveChoice (sock, m, ctx, choice) {
+    const p = await store.player(ctx.userId)
+    const b = await store.getBattle(ctx.userId)
+    if (!p || !b) return send(sock, ctx.jid, m, 'There is no active story choice right now. Use *!explore* to continue.')
+    if (!b.pendingChoice) return send(sock, ctx.jid, m, 'That encounter has already moved on. Choose an available battle action.')
+    const n = Number(choice)
+    if (![1, 2, 3, 4].includes(n)) return send(sock, ctx.jid, m, 'Choose an option from 1 to 4.')
+    b.pendingChoice = false
+
+    if (b.mode === 'diversion') {
+      let result = 'You make your choice and continue onward.'
+      let xpReward = 0
+      let zenReward = 0
+      if (b.event?.kind === 'rescue') {
+        if (n === 1) { zenReward = 25; xpReward = 15; result = 'You free the survivors. They thank you and give you *25 Zen*.' }
+        if (n === 2) { xpReward = 30; result = 'You follow the tracks and learn the enemy’s weakness. Gain *30 XP*.' }
+        if (n === 3) { p.hp = Math.min(p.maxHp, p.hp + 20); result = 'You find supplies and recover *20 HP*.' }
+        if (n === 4) { result = 'You leave the rubble behind. The path is clear, but the survivors remain trapped.' }
+      } else if (b.event?.kind === 'mystery') {
+        if (n === 1) { xpReward = 35; result = 'You decipher the symbols and uncover an old secret. Gain *35 XP*.' }
+        if (n === 2) { p.powerEnergy = Math.min(p.maxPowerEnergy, p.powerEnergy + 15); result = 'The relic releases stored energy. Recover *15 Power Energy*.' }
+        if (n === 3) { p.hp = Math.max(1, p.hp - 10); zenReward = 30; result = 'The relic breaks with a pulse. You take a small hit but recover *30 Zen*.' }
+        if (n === 4) { result = 'You leave the relic untouched. Some mysteries are better left alone.' }
+      } else if (b.event?.kind === 'treasure') {
+        if (n === 1) { zenReward = 60; result = 'The chest opens. You collect *60 Zen*.' }
+        if (n === 2) { p.hp = Math.min(p.maxHp, p.hp + 25); result = 'You disarm the lock and find a healing charm. Recover *25 HP*.' }
+        if (n === 3) { xpReward = 25; result = 'You break the chest seal and discover a hidden inscription. Gain *25 XP*.' }
+        if (n === 4) { result = 'You ignore the chest and keep moving. No risk, no reward.' }
+      }
+      const xp = Math.min(xpReward, Math.max(0, Number(ctx.settings.xpDailyLimit || 5000) - Number(p.xpToday || 0)))
+      const zen = Math.min(zenReward, Math.max(0, Number(ctx.settings.zenDailyLimit || 5000) - Number(p.zenToday || 0)))
+      p.xpToday = Number(p.xpToday || 0) + xp
+      p.zenToday = Number(p.zenToday || 0) + zen
+      p.stage = Math.max(Number(p.stage || 1), Number(b.ordinal) + 1)
+      const progress = applyProgress(p, { xp, zen })
+      await store.savePlayer(progress.player)
+      await store.setBattle(ctx.userId, null)
+      await store.log(ctx.userId, 'story_diversion_complete', String(b.ordinal), { kind: b.event?.kind, choice: n, xp, zen })
+      const rewardLine = [xp ? `+${fmt(xp)} XP` : '', zen ? `+${fmt(zen)} Zen` : ''].filter(Boolean).join(' · ')
+      return tapButtons(sock, ctx.jid, m, `${WATERMARK}\n\n✨ *DIVERSION COMPLETE*\n\n${result}${rewardLine ? `\n\n${rewardLine}` : ''}\n\nYou advance to *Floor ${progress.player.stage}*.\nUse *${ctx.settings.prefix}explore* when you're ready for the next encounter.`, WATERMARK, [['🧭 Explore Next', 'ax_explore'], ['👤 Menu', 'ax_profile']])
+    }
+
+    if (b.event?.kind === 'combat') {
+      await store.setBattle(ctx.userId, b)
+      if (n === 1) return b.preferredMove
+        ? battleAct(sock, m, ctx, 'class', 1, b.preferredMove)
+        : battleAct(sock, m, ctx, 'burst')
+      if (n === 2) return battleAct(sock, m, ctx, 'interrupt')
+      if (n === 3) return battleAct(sock, m, ctx, 'attack')
+      return battleAct(sock, m, ctx, 'instinct')
+    }
+
+    return send(sock, ctx.jid, m, 'That story choice is no longer available. Use *!explore* to continue.')
   }
 
   function cardExpiryText (value) {
@@ -562,7 +700,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
     const b = await store.getBattle(ctx.userId)
-    if (!b) return send(sock, ctx.jid, m, `\u2694\ufe0f You are not in a battle. Use *${ctx.settings.prefix}stages*.`)
+    if (!b) return send(sock, ctx.jid, m, `\u2694\ufe0f You are not in a battle. Use *${ctx.settings.prefix}explore* to enter the next encounter.`)
+    if (b.mode === 'diversion') return send(sock, ctx.jid, m, `🧭 This is a story diversion, not a fight. Choose *1–4* with *${ctx.settings.prefix}choose 1* (or tap a button).`)
+    if (b.pendingChoice) { b.pendingChoice = false; await store.setBattle(ctx.userId, b) }
 
     if (action === 'retreat') {
       await store.setBattle(ctx.userId, null)
@@ -643,7 +783,19 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     let note = ''
     let dealt = 0
 
-    if (action === 'attack') {
+    if (action === 'interrupt') {
+      b.guard = 0.7
+      note = '🛡️ You break the Wrath’s rhythm and brace. Its next strike is heavily weakened.'
+    } else if (action === 'instinct') {
+      const chance = clamp(0.45 + Number(p.spd || 0) * 0.025, 0.45, 0.85)
+      if (Math.random() < chance) { dealt = playerHit(p, b.enemy, 1.35); note = `✨ Your instincts take over. You slip through the danger and strike for *${dealt}*.` }
+      else { b.guard = 0.35; note = '⚡ Your instincts hesitate, but you recover your stance and soften the incoming blow.' }
+    } else if (action === 'burst') {
+      const cost = 12
+      if (Number(b.energy || 0) < cost) return send(sock, ctx.jid, m, '⚡ Not enough Power Energy for a burst. Choose another action.')
+      b.energy -= cost; p.powerEnergy = b.energy; await store.savePlayer(p)
+      dealt = playerHit(p, b.enemy, 1.5); note = `⚡ You release a Power Burst for *${dealt}* damage. (-${cost} PE)`
+    } else if (action === 'attack') {
       const equipped = await store.equippedCards(ctx.userId)
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
@@ -767,7 +919,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
     await store.setBattle(ctx.userId, b)
 
-    return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
+    return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(b), true)
   }
 
   /* ------------------------------------------------------------ class sheet */
@@ -853,7 +1005,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       p.wins += 1
       p.xpToday += xp
       p.zenToday += zen
-      if (b.mode === 'stage' && b.ordinal >= p.stage) p.stage = b.ordinal + 1
+      if (Number(b.ordinal) >= Number(p.stage || 1)) p.stage = Number(b.ordinal) + 1
       const { player: after, events } = applyProgress(p, { xp, zen })
       await store.savePlayer(after)
       await store.log(ctx.userId, 'battle_win', b.enemy.name, { xp, zen, ordinal: b.ordinal })
@@ -863,9 +1015,6 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
       const capped = (b.enemy.xp > xp || b.enemy.zen > zen) ? `\n\n> Daily cap reached \u2014 see *${ctx.settings.prefix}economy view*.` : ''
 
-      const continueButton = ['floor', 'floor_boss'].includes(b.mode)
-        ? ['\ud83c\udff9 Dungeon', 'ax_dungeon']
-        : ['\u2694\ufe0f Next Stage', 'ax_stages']
       return buttons(sock, ctx.jid, m, [
         `${WATERMARK}`, '', '\ud83c\udfc6 *VICTORY*', '',
         `*${b.enemy.name}* falls.`, '',
@@ -873,22 +1022,19 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         notes.length ? `\n${notes.join('\n')}` : '',
         capped, '',
         `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`
-      ].filter(Boolean).join('\n'), WATERMARK, [continueButton, ['\ud83d\udc64 Profile', 'ax_profile']])
+      ].filter(Boolean).join('\n'), WATERMARK, [['\u2694\ufe0f Next Stage', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
     }
 
     p.losses += 1
     p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
     await store.savePlayer(p)
     await store.log(ctx.userId, 'battle_loss', b.enemy.name, { ordinal: b.ordinal })
-    const retryButton = ['floor', 'floor_boss'].includes(b.mode)
-      ? ['\ud83d\udd04 Dungeon', 'ax_dungeon']
-      : ['\ud83d\udd04 Try Again', 'ax_stages']
     return buttons(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '\ud83d\udc80 *DEFEAT*', '',
       `*${b.enemy.name}* overwhelms you.`, '',
       `\u2764\ufe0f You wake with *${p.hp}/${p.maxHp}* HP.`,
       'No Zen was lost \u2014 only time.'
-    ].join('\n'), WATERMARK, [retryButton, ['\ud83d\udc64 Profile', 'ax_profile']])
+    ].join('\n'), WATERMARK, [['\ud83d\udd04 Try Again', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
   }
 
   /* ----------------------------------------------------------------- duels */
@@ -1190,7 +1336,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
-    arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
+    arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons, resolveChoice,
     classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons, helpCommand,

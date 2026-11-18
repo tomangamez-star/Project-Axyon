@@ -35,10 +35,10 @@ function harness ({ player = null, battle = null, floors = [] } = {}) {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
-  const state = { player: player ? { ...player } : null, battle, floors, groupMode: player?.gameMode || 'general' }
+  const state = { player: player ? { ...player } : null, battle, floors }
 
   const saved = {}
-  for (const k of ['player', 'group', 'setGroupMode', 'getBattle', 'setBattle', 'savePlayer', 'log',
+  for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
     'settings', 'axyonNumberMode', 'roleOf', 'partnerOf', 'floors', 'stage', 'stages',
     'classMastery', 'classMovesUsedToday', 'consumeClassMove', 'addClassMastery',
     'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'modes']) {
@@ -46,8 +46,7 @@ function harness ({ player = null, battle = null, floors = [] } = {}) {
   }
 
   store.player = async () => state.player
-  store.group = async () => ({ group_jid: '123@g.us', enabled: true, registered_by: 'u1', game_mode: state.groupMode })
-  store.setGroupMode = async (jid, mode) => { state.groupMode = mode; return { group_jid: jid, game_mode: mode } }
+  store.group = async () => ({ group_jid: '123@g.us', enabled: true, registered_by: 'u1', game_mode: player?.gameMode || 'general' })
   store.getBattle = async () => state.battle
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
@@ -96,11 +95,11 @@ const basePlayer = () => ({
 
 /* ------------------------------------------------------- stage combat */
 
-test('combat: a player can enter a stage and start a real battle', async () => {
+test('adventure: !fight starts the next automatic floor without a stage number', async () => {
   const h = harness({ player: basePlayer() })
   const { out } = await h.send('!fight 1')
   h.restore()
-  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
+  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected the first floor battle card, got: ${out.slice(0, 200)}`)
 })
 
 test('combat: attacking damages the enemy and the enemy answers', async () => {
@@ -146,7 +145,7 @@ test('dungeon: the seeded floor ladder is non-empty and fightable', async () => 
   assert.ok(/Sunken Vestibule/i.test(out), `expected the seeded floors, got: ${out.slice(0, 300)}`)
 })
 
-test('dungeon: a player can enter a floor and start a real battle', async () => {
+test('adventure: !floor ignores manual numbering and enters the current floor', async () => {
   const h = harness({ player: { ...basePlayer(), gameMode: 'dungeon' }, floors: store.ORIGINAL_FLOORS })
   const { out } = await h.send('!floor 1')
   const b = h.state.battle
@@ -155,20 +154,6 @@ test('dungeon: a player can enter a floor and start a real battle', async () => 
   assert.strictEqual(b.mode, 'floor')
   assert.ok(b.enemyHp > 0, 'the floor enemy must have HP')
   assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
-})
-
-test('dungeon: every unlocked floor has a separate boss encounter with boosted rewards', async () => {
-  const h = harness({ player: { ...basePlayer(), gameMode: 'dungeon' }, floors: store.ORIGINAL_FLOORS })
-  const { out } = await h.send('!boss 1')
-  const b = h.state.battle
-  h.restore()
-  assert.ok(b, 'boss challenge must create a battle')
-  assert.strictEqual(b.mode, 'floor_boss')
-  assert.strictEqual(b.enemy.boss, true)
-  assert.match(b.enemy.name, /Guardian of Sunken Vestibule/)
-  assert.ok(b.enemy.hp > store.ORIGINAL_FLOORS[0].hp)
-  assert.ok(b.enemy.xp > store.ORIGINAL_FLOORS[0].xp)
-  assert.ok(/Guardian of Sunken Vestibule|BOSS/i.test(out))
 })
 
 test('dungeon: winning a floor awards XP and can level the player up', async () => {
@@ -277,4 +262,78 @@ test('rooms: a guild mode is now real and can be opened', async () => {
   h.restore()
   assert.ok(/ROOM OPENED/i.test(out), `expected a room, got: ${out.slice(0, 300)}`)
   assert.ok(/Guild Raid/i.test(out), 'the room must name the guild mode')
+})
+
+
+test('adventure: !explore is an alias for automatic floor entry', async () => {
+  const h = harness({ player: { ...basePlayer(), gameMode: 'general' }, floors: store.ORIGINAL_FLOORS })
+  const { out } = await h.send('!explore')
+  const b = h.state.battle
+  h.restore()
+  assert.ok(b, 'explore must create an active encounter')
+  assert.strictEqual(b.ordinal, 1, 'new players begin at floor one')
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(/Sunken Vestibule/i.test(out))
+})
+
+test('adventure: numbered floor arguments cannot skip progression', async () => {
+  const h = harness({ player: { ...basePlayer(), stage: 1 }, floors: store.ORIGINAL_FLOORS })
+  await h.send('!floor 1000000')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(b.ordinal, 1, 'the game chooses the saved progression, not the supplied number')
+})
+
+test('adventure: a special floor opens four contextual story choices', async () => {
+  const h = harness({ player: { ...basePlayer(), stage: 3 }, floors: store.ORIGINAL_FLOORS })
+  const { out } = await h.send('!explore')
+  const b = h.state.battle
+  h.restore()
+  assert.ok(b.pendingChoice, 'third floor should open a story diversion')
+  assert.strictEqual(b.choiceOptions.length, 4)
+  assert.ok(/HAILSTORM/i.test(out))
+  assert.strictEqual(b.enemy.name, 'The Wrath', 'the story threat should be the actual combat enemy')
+})
+
+test('adventure: non-combat diversions offer meaningful rewards and consequences', async () => {
+  const h = harness({ player: { ...basePlayer(), stage: 6 }, floors: store.ORIGINAL_FLOORS })
+  const intro = await h.send('!explore')
+  assert.ok(h.state.battle?.pendingChoice, 'sixth floor should open a rescue diversion')
+  assert.ok(/VOICES BENEATH THE RUBBLE/i.test(intro.out))
+  const attack = await h.send('!attack')
+  assert.match(attack.out, /story diversion/i, 'ordinary combat actions must not run inside a non-combat diversion')
+  await h.send('!choose 1')
+  const after = h.state.player
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(after.zen, 25, 'rescuing survivors should grant the stated Zen reward')
+  assert.strictEqual(after.stage, 7, 'resolving the diversion should advance progression')
+  assert.strictEqual(battle, null, 'the non-combat diversion should finish without forcing a battle')
+})
+
+test('adventure: winning any floor advances the single progression counter', async () => {
+  const h = harness({
+    player: { ...basePlayer(), stage: 2 },
+    floors: store.ORIGINAL_FLOORS,
+    battle: {
+      mode: 'floor', ordinal: 2, turn: 1, healsLeft: 5, guard: 0, energy: 50,
+      enemyHp: 1, playerHp: 100,
+      enemy: { name: 'Cracked Colonnade', hp: 100, atk: 5, def: 2, xp: 500, zen: 60 }
+    }
+  })
+  await h.send('!attack')
+  const after = h.state.player
+  h.restore()
+  assert.strictEqual(after.stage, 3)
+})
+
+test('registration: repeating !arise clearly says the player is already risen', async () => {
+  const h = harness({ player: basePlayer() })
+  const savedArise = store.arise
+  store.arise = async () => ({ created: false, player: h.state.player })
+  const { out } = await h.send('!arise')
+  store.arise = savedArise
+  h.restore()
+  assert.match(out, /YOU ARE ALREADY RISEN/)
+  assert.match(out, /!menu/)
 })

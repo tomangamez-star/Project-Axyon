@@ -6,3 +6,6 @@ session/
 sessions/
 npm-debug.log*
 documents/
+
+# Local yt-dlp browser/session cookies contain authentication tokens.
+data/cookies.txt

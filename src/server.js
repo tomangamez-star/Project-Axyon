@@ -171,6 +171,7 @@ class WhatsAppConnection {
     this.lastMessageAt = null
     this.messagesHandled = 0
     this.seen = new Map()
+    this.ownMessageIds = new Set()
     this.outputGuard = new GlobalOutputGuard(this.log)
     this.replyLimiter = new ReplyRateLimiter()
   }
@@ -232,7 +233,12 @@ class WhatsAppConnection {
 
     const rawSend = sock.sendMessage.bind(sock)
     this.outputGuard.setRawSend(rawSend)
-    sock.sendMessage = (jid, content, opts) => this.outputGuard.run(jid, () => rawSend(jid, content, opts))
+    sock.sendMessage = async (jid, content, opts) => {
+      const sent = await this.outputGuard.run(jid, () => rawSend(jid, content, opts))
+      const sentId = sent?.key?.id
+      if (sentId) { this.ownMessageIds.add(String(sentId)); if (this.ownMessageIds.size > 4000) this.ownMessageIds.delete(this.ownMessageIds.values().next().value) }
+      return sent
+    }
     sock.__sendNativeButtons = (s, j, body, footer, defs, ownerId) => this.sendNativeButtons(s, j, body, footer, defs, ownerId)
 
     sock.ev.on('creds.update', async () => {
@@ -438,41 +444,48 @@ class WhatsAppConnection {
   /** True when this message is addressed to the assistant. */
   isAITrigger (sock, m, content) {
     if (aiConfig?.aiEnabled === false) return false
-    const self = String(sock?.user?.id || '').split(':')[0].split('@')[0]
-    if (!self) return false
+    const cleanId = value => String(value || '').split(':')[0].split('@')[0].replace(/\D/g, '')
+    const selfIds = new Set([sock?.user?.id, sock?.user?.lid, sock?.user?.jid].map(cleanId).filter(Boolean))
+    if (!selfIds.size) return false
+    const contexts = [
+      content?.extendedTextMessage?.contextInfo,
+      content?.imageMessage?.contextInfo,
+      content?.videoMessage?.contextInfo,
+      content?.documentMessage?.contextInfo,
+      content?.audioMessage?.contextInfo,
+      content?.stickerMessage?.contextInfo,
+      content?.buttonsResponseMessage?.contextInfo,
+      content?.templateButtonReplyMessage?.contextInfo
+    ].filter(Boolean)
+    const mentioned = contexts.flatMap(ci => ci.mentionedJid || []).map(cleanId)
+    if (mentioned.some(id => selfIds.has(id))) return true
 
-    const ci = content?.extendedTextMessage?.contextInfo ||
-      content?.imageMessage?.contextInfo ||
-      content?.videoMessage?.contextInfo || {}
+    // Replies to our messages: Baileys may expose the quoted author as participant,
+    // participantAlt, or (in a direct chat) the chat JID. Check every context shape.
+    for (const ci of contexts) {
+      if (ci.stanzaId && this.ownMessageIds?.has(String(ci.stanzaId))) return true
+      const authors = [ci.participant, ci.participantAlt, ci.remoteJid, ci.remoteJidAlt].map(cleanId).filter(Boolean)
+      if (authors.some(id => selfIds.has(id))) return true
+    }
 
-    /* 1. @-mention of the bot's own number. */
-    const mentioned = (ci.mentionedJid || []).map(x => String(x).split(':')[0].split('@')[0])
-    if (mentioned.includes(self)) return true
-
-    /* 2. A reply to a message the bot itself sent. */
-    const quotedAuthor = String(ci.participant || '').split(':')[0].split('@')[0]
-    if (quotedAuthor && quotedAuthor === self) return true
-
-    /* 3. Address Architect by name, even without an @mention. */
-    const raw = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    // Address Architect by name even when the sender doesn't use an @mention.
+    const raw = String(content?.conversation || content?.extendedTextMessage?.text || content?.imageMessage?.caption || content?.videoMessage?.caption || '').trim()
     const name = String(aiConfig?.botName || 'Architect').trim()
     if (name && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(raw)) return true
-
     return false
   }
 
-  /** Strips the @mention out of the text so the model gets a clean question. */
   aiQuestion (content) {
-    const raw = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    const raw = String(content?.conversation || content?.extendedTextMessage?.text || content?.imageMessage?.caption || content?.videoMessage?.caption || '').trim()
     if (!raw) return ''
     const assistantName = String(aiConfig?.botName || 'Architect').trim()
     const escapedName = assistantName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return raw
-      .replace(/@\d{6,20}/g, ' ')
+      .replace(/@\d{5,20}/g, ' ')
       .replace(assistantName ? new RegExp(`\\b${escapedName}\\b`, 'gi') : /$^/, ' ')
       .replace(/^[\s,:-]+/, '')
       .replace(/\s+/g, ' ')
-      .trim()
+      .trim() || 'You were addressed by name or mentioned. Respond naturally, greet the person, and ask what they need.'
   }
 
   async answerWithAI (sock, m, question) {
@@ -514,6 +527,8 @@ class WhatsAppConnection {
         }
       }
     }, {})
+    this.ownMessageIds.add(String(g.key.id))
+    if (this.ownMessageIds.size > 4000) this.ownMessageIds.delete(this.ownMessageIds.values().next().value)
     await this.outputGuard.run(jid, () => sock.relayMessage(jid, g.message, { messageId: g.key.id }))
   }
 

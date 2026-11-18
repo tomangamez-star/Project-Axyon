@@ -1,42 +1,79 @@
-AXYON MODIFIED FILES — APPLY GUIDE
+PROJECT AXYON — UPDATED BUILD
 
-Copy the files in this ZIP over the matching paths in your Project-Axyon-main
-repository. This archive contains the complete modified files, not a patch.
+WHAT CHANGED
 
-Changes included:
-- Architect answers when addressed by name, by bot-number mention, or by reply.
-- Architect supports ordinary conversation and uses configured AXYON authority,
-  not WhatsApp group-admin status, when choosing its tone.
-- Groq is the primary AI provider using the current Groq production model.
-  AI_API / AI_API_URL / AI_API_KEY / AI_API_MODEL provide an optional
-  OpenAI-compatible fallback.
-- Registered groups store their own game mode independently; DMs retain
-  player-specific modes.
-- Dungeon floors show complete stats and rewards. Every unlocked floor has a
-  regular encounter and a separate guardian boss challenge with boosted stats
-  and rewards. Mission stories are AI-generated when a provider is reachable,
-  with a built-in fallback story so the encounter always starts.
-- Combat actions are exposed clearly in help, including attack, defend, heal,
-  class, carduse, retreat and battle resume. Dungeon victory/defeat buttons
-  return to the dungeon instead of the stage list.
-- Card-drop messages no longer send a generation announcement or show artwork
-  credits/source links.
-- Regression tests updated and expanded.
+1) Unified adventure progression
+- !explore, !floor and !fight now enter the player's saved next floor.
+- Number arguments are ignored; players cannot manually jump to a floor.
+- A win advances the one shared floor counter.
+- !stages is an optional progress view, not a required battle-selection menu.
+- The old separate !boss command has been removed. Guardian encounters occur
+  automatically on every fifth floor; later floors scale beyond the original five.
+- Missing built-in floor rows are re-seeded idempotently when floors are read.
 
-Environment:
-- Keep your existing GROQ_API_KEY value in your deployment environment.
-- GROQ_MODEL defaults to openai/gpt-oss-120b and can be overridden.
-- AI_API may be an OpenAI-compatible chat-completions URL OR an API key for
-  api.openai.com. Alternatively set AI_API_URL and AI_API_KEY separately.
-- AI_API_MODEL defaults to gpt-4o-mini.
+2) Story and diversion encounters
+- Groq-backed AI mission introductions are generated when available, with a
+  deterministic in-game fallback so the adventure still works during outages.
+- Every third floor introduces a story diversion.
+- The Wrath's hailstorm is a combat decision with four contextual choices:
+  use an available class ability (or Power Burst), interrupt the blast, fight
+  head-on, or trust your instincts.
+- Other diversions include rescue, mystery and treasure scenes. These are
+  non-combat choices with immediate consequences/rewards and automatic floor
+  progression.
+- WhatsApp quick-reply buttons are used where supported. !choose 1-4 is the
+  text-command fallback.
+- !attack, !defend, abilities, healing, cards and retreat remain available in
+  ordinary combat. A player can still use !attack instead of tapping options.
 
-Database:
-- The group game_mode column is added by the existing automatic schema
-  migration when the application starts. No manual SQL step is required.
+3) Player registration and menu
+- Repeating !arise now says the player is already risen and points to !menu.
+- !menu opens the player profile/status view, including current floor.
 
-Validation performed on this source tree:
-- npm run check: passed.
-- npm test: 241 passed, 0 failed.
+4) Architect AI
+- Responds to the configured bot name, direct WhatsApp mentions, and replies
+  to its own recent messages (including native-flow button messages).
+- Reply detection tracks bot-sent message IDs as well as quoted author IDs.
+- Personality is confident and playfully egotistical, while remaining respectful.
+- AXYON authority is based on configured owner/AXYON numbers, not group-admin
+  status.
+- Groq is primary; AI_API_URL / AI_API_KEY (or AI_API as URL/key) is the
+  OpenAI-compatible fallback; public routes are last resort.
 
-No GitHub push, commit, or deployment was performed. You can review the files,
-copy them into your repository, and push them yourself.
+5) Preserved earlier fixes
+- Registered-group modes remain independent per group; DM mode remains per player.
+- Card-drop captions no longer include artwork/source credits or generation chatter.
+
+COMMANDS
+- !arise — register once
+- !menu — player status
+- !explore — enter the next encounter
+- !floor — alias for !explore
+- !fight — alias for !explore
+- !stages — optional progression view
+- !choose 1-4 — resolve a story diversion if buttons are unavailable
+- !attack / !defend / !heal / !class / !carduse / !retreat — battle actions
+- !battle — resume the current encounter or story choice
+
+CONFIGURATION
+- Keep GROQ_API_KEY in the deployment environment.
+- GROQ_MODEL defaults to openai/gpt-oss-120b; set it explicitly only if needed.
+- Optional fallback: AI_API_URL, AI_API_KEY, AI_API_MODEL.
+- AI_API may also be set to an OpenAI-compatible URL or an API key. If it is
+  only a key, the default endpoint is https://api.openai.com/v1/chat/completions.
+
+VALIDATION RUN
+- npm run check: passed
+- npm test: 246 passed, 0 failed
+- node tools/verify-ai-routing.js: 16 passed, 0 failed
+
+IMPORTANT SECURITY NOTE
+The uploaded source archive contains data/cookies.txt with browser/session
+cookies, including authentication tokens. This build intentionally omits that
+file from the distributable archives and adds it to .gitignore. Before pushing,
+remove it from Git tracking with:
+  git rm --cached data/cookies.txt
+Then revoke/rotate the affected session tokens with their providers. Adding a
+.gitignore entry does not untrack a file that Git already tracks.
+
+No commit, push, deployment or live WhatsApp test was performed.

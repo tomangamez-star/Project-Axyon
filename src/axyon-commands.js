@@ -106,17 +106,13 @@ const MODE_FREE = new Set([
   /*
    * THE BATTLE ACTIONS.
    *
-   * These are the actions you take once a battle exists — they are not a way
-   * to START one. `!stages` and `!fight` open a stage battle; `!floor` opens a
-   * dungeon battle. The actions themselves must work in whichever mode the
-   * battle was started from, otherwise a player can enter a dungeon floor and
-   * then be refused every action with "WRONG MODE" — enterable but unfightable.
-   *
-   * They are safe to free because each one requires an active battle and
-   * returns "you are not in a battle" otherwise, so they cannot be used to
-   * bypass the mode gate on the commands that actually start a fight.
+   * The adventure entry points and turn actions are mode-free by design: the
+   * player's progression is one continuous campaign, not separate stage and
+   * dungeon command trees. Each action still validates its active encounter.
+   * `!stages` is an optional progress view; `!explore`, `!floor` and `!fight`
+   * all enter the same automatically selected next floor.
    */
-  'attack', 'defend', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle'
+  'attack', 'defend', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle', 'floor', 'explore', 'fight', 'stages', 'choose', 'menu', 'room'
 ])
 
 /**
@@ -176,7 +172,8 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* ---------------------------------------------------------- registration */
 
   cmd('arise', 'core', '{p}arise', 'Register with the System and awaken your hunter.', async (s, m, ctx) => axyon.arise(s, m, ctx))
-  cmd('profile', 'core', '{p}profile', 'Your rank, grade, stats, energy and stage.', async (s, m, ctx) => axyon.profile(s, m, ctx))
+  cmd('profile', 'core', '{p}profile', 'Your rank, grade, stats, energy and progression.', async (s, m, ctx) => axyon.profile(s, m, ctx))
+  cmd('menu', 'core', '{p}menu', 'Open your hunter dashboard and current progression.', async (s, m, ctx) => axyon.profile(s, m, ctx))
   cmd('help', 'core', '{p}help [section|command]', 'Every command, grouped by section. Name a command for detail.', async (s, m, ctx, args) => {
     const section = String(args[0] || '').toLowerCase()
     if (section && axyon.SECTIONS[section]) return axyon.send(s, ctx.jid, m, axyon.helpPage(section, ctx.prefix))
@@ -216,17 +213,33 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ---------------------------------------------------------------- stages */
 
-  cmd('stages', 'battle', '{p}stages', 'List battle stages and your position.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
-  cmd('fight', 'battle', '{p}fight <stage>', 'Enter a stage and fight.', async (s, m, ctx, args) => {
+  cmd('stages', 'battle', '{p}stages', 'View your current floor and the adventure progression.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
+  async function startAdventure (s, m, ctx) {
     const p = await store.player(ctx.userId)
-    const ordinal = parseNum(args[0]) ?? p?.stage ?? 1
-    return axyon.beginBattle(s, m, ctx, ordinal)
+    if (!p) return axyon.arise(s, m, ctx)
+    const active = await store.getBattle(ctx.userId)
+    if (active) return axyon.beginBattle(s, m, ctx, p.stage)
+    const ordinal = Math.max(1, Number(p.stage) || 1)
+    const floors = await store.floors().catch(() => [])
+    const floor = floors.find(x => Number(x.ordinal) === ordinal) || (store.ORIGINAL_FLOORS || []).find(x => Number(x.ordinal) === ordinal)
+    let story = null
+    if (typeof ai?.generateMissionStory === 'function') {
+      try { story = await ai.generateMissionStory({ name: floor?.name || `The Unmapped Depths ${ordinal}`, ordinal, boss: ordinal % 5 === 0 || !!floor?.boss }) } catch { /* the deterministic story fallback keeps play available */ }
+    }
+    return axyon.beginBattle(s, m, ctx, ordinal, story)
+  }
+  cmd('explore', 'battle', '{p}explore', 'Explore onward and enter your next encounter.', startAdventure)
+  cmd('floor', 'battle', '{p}floor', 'Enter your current floor automatically. Floor numbers are managed by the System.', startAdventure)
+  cmd('fight', 'battle', '{p}fight', 'Start or resume the next encounter in your adventure.', startAdventure)
+  cmd('choose', 'battle', '{p}choose <1-4>', 'Choose an option in a story encounter.', async (s, m, ctx, args) => {
+    const n = parseNum(args[0])
+    if (!n || n < 1 || n > 4) return axyon.send(s, ctx.jid, m, `Choose an option from *1* to *4*.`)
+    return axyon.resolveChoice(s, m, ctx, n)
   })
-  cmd('battle', 'battle', '{p}battle', 'Resume an active battle.', async (s, m, ctx) => {
+  cmd('battle', 'battle', '{p}battle', 'Resume your current encounter or story choice.', async (s, m, ctx) => {
     const b = await store.getBattle(ctx.userId)
-    const p = await store.player(ctx.userId)
-    if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
-    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p, b.story || ''), axyon.battleButtons(), true)
+    if (!b) return axyon.send(s, ctx.jid, m, `⚔️ No active encounter. Use *${ctx.prefix}explore* to continue.`)
+    return axyon.beginBattle(s, m, ctx, b.ordinal)
   })
   cmd('attack', 'battle', '{p}attack', 'Attack during an active fight.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'))
   cmd('defend', 'battle', '{p}defend', 'Brace and reduce the next incoming hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'))
@@ -256,61 +269,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* --------------------------------------------------------------- dungeon */
 
-  cmd('dungeon', 'dungeon', '{p}dungeon', 'Dungeon modes and floors.', async (s, m, ctx) => {
-    const modes = await store.modes()
-    const floors = await store.floors()
-    const lines = [
-      `${W}`, '', '\ud83c\udff9 *DUNGEON*', '',
-      '*MODES*',
-      modes.map(x => `${x.enabled ? '\u2705' : '\u274c'} *${MODE_LIST[x.mode]?.name || x.mode}* \u2014 max ${x.max_players}\n   ${MODE_LIST[x.mode]?.blurb || ''}`).join('\n'),
-      '',
-      '*FLOORS*',
-      floors.length ? floors.map(f => `${f.locked ? '\ud83d\udd12' : '\u25ab\ufe0f'} *${f.ordinal}. ${f.name}*\n   ❤️ ${f.hp} HP • ⚔️ ${f.atk} ATK • 🛡️ ${f.def} DEF • ✨ ${f.xp} XP • 🪙 ${f.zen} Zen`).join('\n') : 'No floors configured.',
-      '',
-      `Regular encounter: *${ctx.prefix}floor <n>*.`,
-      `Guardian boss: *${ctx.prefix}boss <n>* — each floor has its own boss challenge.`,
-      `Battle controls: *${ctx.prefix}attack*, *${ctx.prefix}defend*, *${ctx.prefix}heal*, *${ctx.prefix}class*, *${ctx.prefix}carduse*, *${ctx.prefix}retreat*.`
-    ]
-    return axyon.send(s, ctx.jid, m, lines.join('\n'))
-  })
-
-  async function enterDungeonEncounter (s, m, ctx, args, bossFight = false) {
-    const p = await store.player(ctx.userId)
-    if (!p) return axyon.arise(s, m, ctx)
-    const floors = await store.floors()
-    if (!floors.length) return axyon.send(s, ctx.jid, m, `🏹 No floors are configured. AXYON can add one with *${ctx.prefix}flooradmin add <name>*. The five original floors are seeded automatically.`)
-    const ordinal = parseNum(args[0]) ?? 1
-    const floor = floors.find(x => Number(x.ordinal) === ordinal)
-    if (!floor) return axyon.send(s, ctx.jid, m, `❌ No floor *${ordinal}*. Use *${ctx.prefix}dungeon* to see available floors.`)
-    if (floor.locked) return axyon.send(s, ctx.jid, m, '🔒 That floor is locked.')
-    const scale = (value, factor, min = 1) => Math.max(min, Math.round((Number(value) || min) * factor))
-    const encounter = bossFight ? {
-      ...floor,
-      key: `${floor.key || `floor_${ordinal}`}_boss`,
-      name: `Guardian of ${floor.name}`,
-      boss: true,
-      hp: scale(floor.hp, 1.65, 60),
-      atk: scale(floor.atk, 1.3, 5),
-      def: scale(floor.def, 1.2, 2),
-      xp: scale(floor.xp, 1.75, 30),
-      zen: scale(floor.zen, 1.75, 30)
-    } : { ...floor, boss: false }
-    const enemy = axyon.buildEnemy(encounter)
-    let story = null
-    if (typeof ai?.generateMissionStory === 'function') {
-      try { story = await ai.generateMissionStory({ name: enemy.name, ordinal, boss: bossFight }) } catch { /* story is optional; battle remains playable */ }
-    }
-    if (!story) story = bossFight
-      ? `A guardian rises before the sealed path of *${floor.name}*. Defeat it to claim the floor's greater reward.`
-      : `You enter *${floor.name}*. Clear the encounter and earn the XP and Zen shown for this floor.`
-    const b = { mode: bossFight ? 'floor_boss' : 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, story }
-    await store.setBattle(ctx.userId, b)
-    await store.log(ctx.userId, bossFight ? 'floor_boss_enter' : 'floor_enter', String(ordinal), { name: enemy.name })
-    return axyon.withVisual(s, ctx.jid, m, bossFight ? 'boss' : 'dungeon', axyon.battleCard(b, p, story), axyon.battleButtons(), true)
-  }
-
-  cmd('floor', 'dungeon', '{p}floor <n>', 'Enter a regular encounter on a dungeon floor.', async (s, m, ctx, args) => enterDungeonEncounter(s, m, ctx, args, false))
-  cmd('boss', 'dungeon', '{p}boss <n>', 'Challenge the guardian boss of any unlocked dungeon floor for greater rewards.', async (s, m, ctx, args) => enterDungeonEncounter(s, m, ctx, args, true))
+  cmd('dungeon', 'dungeon', '{p}dungeon', 'Show the adventure and your current floor.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
 
   /* ----------------------------------------------------------------- party */
 
@@ -1795,7 +1754,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       await store.log(ctx.userId, 'item_use', entry.key, { inBattle: true })
       return axyon.withVisual(s, ctx.jid, m, r.battle.enemy.boss ? 'boss' : 'battle',
         axyon.battleCard(r.battle, p, `${entry.icon} ${T.b(entry.name)}\n${r.note}\n\ud83d\udc79 ${r.battle.enemy.name} answers for *${hit}*.`),
-        axyon.battleButtons(), true)
+        axyon.battleButtons(r.battle), true)
     }
 
     /* Outside a battle the effect lands on the player row. */
@@ -2009,18 +1968,16 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const ctx = await buildContext(sock, m, {})
 
     if (id === 'ax_profile') { await axyon.profile(sock, m, ctx); return true }
+    if (id === 'ax_explore') { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
+    if (id.startsWith('ax_choice_')) { await axyon.resolveChoice(sock, m, ctx, parseNum(id.slice(10))); return true }
     if (id === 'ax_help') { await axyon.send(sock, ctx.jid, m, axyon.helpAll(ctx.prefix)); return true }
     if (id.startsWith('ax_help_')) { await axyon.send(sock, ctx.jid, m, axyon.helpPage(id.slice(8), ctx.prefix)); return true }
     if (id === 'ax_stages') { await axyon.listStages(sock, m, ctx); return true }
-    if (id.startsWith('ax_fight_')) { await axyon.beginBattle(sock, m, ctx, parseNum(id.slice(9))); return true }
+    if (id.startsWith('ax_fight_')) { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
     if (id === 'ax_cards') { await axyon.cardPanel(sock, m, ctx); return true }
     if (id.startsWith('ax_claim_')) { await axyon.claimCard(sock, m, ctx, parseNum(id.slice(9))); return true }
     if (id === 'ax_dungeon') { await BY_NAME.get('dungeon').handler(sock, m, ctx, [], {}); return true }
-    if (id === 'ax_dungeon_solo') {
-      const floors = await store.floors()
-      if (floors.length) { await BY_NAME.get('floor').handler(sock, m, ctx, ['1'], {}); return true }
-      await BY_NAME.get('stages').handler(sock, m, ctx, [], {}); return true
-    }
+    if (id === 'ax_dungeon_solo') { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
     if (id === 'ax_party_view') { await BY_NAME.get('party').handler(sock, m, ctx, ['view'], {}); return true }
     if (id === 'ax_party_join') { await BY_NAME.get('party').handler(sock, m, ctx, ['join'], {}); return true }
     if (id === 'ax_party_leave') { await BY_NAME.get('party').handler(sock, m, ctx, ['leave'], {}); return true }

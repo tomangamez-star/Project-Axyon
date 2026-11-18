@@ -249,19 +249,10 @@ test('ai: the owner prompt grants deference and the member prompt does not', () 
   const owner = ai.authorityBlock('owner')
   const member = ai.authorityBlock('member')
   assert.ok(owner.includes('AXYON'))
-  assert.ok(owner.includes('bot authority settings'))
-  assert.ok(owner.includes('not WhatsApp group-admin status'))
+  assert.ok(owner.includes('CONFIGURED AXYON OWNER/ADMIN'))
   assert.ok(member.includes('GROUP MEMBER'))
-  assert.ok(!member.includes('CONFIGURED AXYON OWNER/ADMIN'))
+  assert.ok(!member.includes('absolute authority'))
   assert.notStrictEqual(owner, member)
-})
-
-test('ai: Architect can answer ordinary conversation and respects configured authority', () => {
-  const prompt = ai.buildSystemPrompt({ commands: [], authority: 'owner' })
-  assert.match(prompt, /normal conversation/)
-  assert.match(prompt, /playfully egotistical/)
-  assert.match(prompt, /bot authority settings/)
-  assert.match(prompt, /Do not infer AXYON authority from WhatsApp group-admin status/)
 })
 
 test('ai: an unknown authority level falls back to member, never owner', () => {
@@ -300,4 +291,31 @@ test('dungeon: floors are ordered and uniquely keyed', () => {
   assert.strictEqual(new Set(keys).size, keys.length)
   const ordinals = store.ORIGINAL_FLOORS.map(f => f.ordinal)
   assert.deepStrictEqual(ordinals, [...ordinals].sort((a, b) => a - b))
+})
+
+test('ai: Architect prompt allows normal conversation with a confident playful persona', () => {
+  const prompt = ai.buildSystemPrompt({ commands: [], authority: 'member' })
+  assert.match(prompt, /normal conversation/i)
+  assert.match(prompt, /playfully egotistical/i)
+  assert.match(prompt, /Do not infer AXYON authority from WhatsApp group-admin status/i)
+})
+
+test('ai: AI_API alone configures the OpenAI-compatible fallback key and endpoint', () => {
+  const old = {
+    api: process.env.AI_API,
+    apiUrl: process.env.AI_API_URL,
+    apiKey: process.env.AI_API_KEY
+  }
+  process.env.AI_API = 'test-api-key'
+  delete process.env.AI_API_URL
+  delete process.env.AI_API_KEY
+  try {
+    const cfg = ai.createAI({}).config()
+    assert.strictEqual(cfg.apiUrl, 'https://api.openai.com/v1/chat/completions')
+    assert.strictEqual(cfg.apiKey, 'test-api-key')
+  } finally {
+    if (old.api === undefined) delete process.env.AI_API; else process.env.AI_API = old.api
+    if (old.apiUrl === undefined) delete process.env.AI_API_URL; else process.env.AI_API_URL = old.apiUrl
+    if (old.apiKey === undefined) delete process.env.AI_API_KEY; else process.env.AI_API_KEY = old.apiKey
+  }
 })

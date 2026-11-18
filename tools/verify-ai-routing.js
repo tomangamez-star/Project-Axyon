@@ -98,8 +98,21 @@ ok('extra whitespace is collapsed',
   conn.aiQuestion(extMsg('@2348011111111    what   is   zen  ')) === 'what is zen',
   conn.aiQuestion(extMsg('@2348011111111    what   is   zen  ')))
 
-ok('an empty mention yields an empty question',
-  conn.aiQuestion(extMsg('@2348011111111')) === '')
+ok('a bare mention receives a natural greeting prompt',
+  /addressed by name or mentioned/i.test(conn.aiQuestion(extMsg('@2348011111111'))))
+
+ok('calling Architect by name triggers',
+  conn.isAITrigger(sock, {}, textMsg('Architect, are you there?')) === true)
+
+ok('calling Architect by name is stripped from the question',
+  conn.aiQuestion(textMsg('Architect, tell me about the floors')) === 'tell me about the floors')
+
+ok('a reply with a quoted stanza id triggers',
+  conn.isAITrigger(sock, {}, extMsg('what now?', { participant: `${BOT}@s.whatsapp.net`, stanzaId: 'quoted-message-1' })) === true)
+
+conn.ownMessageIds = new Set(['native-flow-message-1'])
+ok('reply to a tracked native WhatsApp button message triggers',
+  conn.isAITrigger(sock, {}, extMsg('I chose option two', { stanzaId: 'native-flow-message-1', quotedMessage: { conversation: 'choose' } })) === true)
 
 console.log('\n=== 6. No socket means no crash ===')
 ok('a missing sock.user does not throw',

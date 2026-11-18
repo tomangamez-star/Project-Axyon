@@ -773,6 +773,15 @@ async function removeStage (ordinal) {
 
 async function floors () {
   await ensureSchema()
+  // Re-seed missing built-in floors idempotently. This repairs older live databases
+  // where the table exists but its initial seed was skipped or partially applied.
+  for (const f of ORIGINAL_FLOORS) {
+    await db().query(
+      `INSERT INTO axyon_floors(key,name,ordinal,boss,hp,atk,def,xp,zen)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(key) DO NOTHING`,
+      [f.key, f.name, f.ordinal, f.boss, f.hp, f.atk, f.def, f.xp, f.zen]
+    )
+  }
   return (await db().query('SELECT * FROM axyon_floors ORDER BY ordinal,id')).rows
 }
 
