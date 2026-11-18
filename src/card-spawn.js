@@ -121,9 +121,6 @@ async function createAndBroadcast (sock, options = {}) {
     const destinations = new Map(groups.map(g => [g.group_jid, null]))
     if (options.announceJid) destinations.set(options.announceJid, options.quoted || null)
 
-    const generating = '⌛ *AXYON CARD FORGE*\n\nA new collectible is being generated. The first hunter to claim its code will own it.'
-    for (const [jid, quoted] of destinations) await safeText(sock, jid, generating, quoted)
-
     const character = await fetchCharacter()
     const tier = rollTier()
     const card = buildCard(character, tier)
@@ -173,8 +170,6 @@ async function createAndBroadcast (sock, options = {}) {
       `Damage: *${card.damage}*`,
       `Ability: *${card.ability}* (${card.ability_damage} damage)`,
       `Rating: *${tier}/6*`,
-      `Artwork: *${art.source}*${art.sourceArtist ? ` • ${art.sourceArtist}` : ''}`,
-      ...(art.sourceUrl ? [`Source: ${art.sourceUrl}`] : []),
       '',
       `Claim code: *#${created.claim_code}*`,
       'First successful claim wins globally.',

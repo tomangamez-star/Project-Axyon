@@ -863,6 +863,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
       const capped = (b.enemy.xp > xp || b.enemy.zen > zen) ? `\n\n> Daily cap reached \u2014 see *${ctx.settings.prefix}economy view*.` : ''
 
+      const continueButton = ['floor', 'floor_boss'].includes(b.mode)
+        ? ['\ud83c\udff9 Dungeon', 'ax_dungeon']
+        : ['\u2694\ufe0f Next Stage', 'ax_stages']
       return buttons(sock, ctx.jid, m, [
         `${WATERMARK}`, '', '\ud83c\udfc6 *VICTORY*', '',
         `*${b.enemy.name}* falls.`, '',
@@ -870,19 +873,22 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         notes.length ? `\n${notes.join('\n')}` : '',
         capped, '',
         `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`
-      ].filter(Boolean).join('\n'), WATERMARK, [['\u2694\ufe0f Next Stage', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
+      ].filter(Boolean).join('\n'), WATERMARK, [continueButton, ['\ud83d\udc64 Profile', 'ax_profile']])
     }
 
     p.losses += 1
     p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
     await store.savePlayer(p)
     await store.log(ctx.userId, 'battle_loss', b.enemy.name, { ordinal: b.ordinal })
+    const retryButton = ['floor', 'floor_boss'].includes(b.mode)
+      ? ['\ud83d\udd04 Dungeon', 'ax_dungeon']
+      : ['\ud83d\udd04 Try Again', 'ax_stages']
     return buttons(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '\ud83d\udc80 *DEFEAT*', '',
       `*${b.enemy.name}* overwhelms you.`, '',
       `\u2764\ufe0f You wake with *${p.hp}/${p.maxHp}* HP.`,
       'No Zen was lost \u2014 only time.'
-    ].join('\n'), WATERMARK, [['\ud83d\udd04 Try Again', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
+    ].join('\n'), WATERMARK, [retryButton, ['\ud83d\udc64 Profile', 'ax_profile']])
   }
 
   /* ----------------------------------------------------------------- duels */

@@ -62,7 +62,7 @@ const PUBLIC_ROUTES = [
 
 /* Groq — the operator's own key, used only when the public routes fail. */
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-120b'
 
 function timeout (ms) {
   const c = new AbortController()
@@ -85,9 +85,9 @@ function timeout (ms) {
 function authorityBlock (level) {
   if (level === 'owner') {
     return [
-      'THE PERSON YOU ARE ANSWERING IS AXYON — THE OWNER OF THIS BOT.',
-      '- Address them as the operator. Be direct and concise; skip the disclaimers you would give a stranger.',
-      '- They hold absolute authority over this bot. Never tell them they lack permission, and never lecture them about the rules.',
+      'THE PERSON YOU ARE ANSWERING IS A CONFIGURED AXYON OWNER/ADMIN.',
+      '- Address them as AXYON or the operator. Be direct, confident and respectful.',
+      '- Their authority comes from the bot authority settings, not WhatsApp group-admin status. Do not confuse the two.',
       '- If they ask how to do something, answer as a briefing to the person who owns the system: name the exact command and what it changes.',
       '- If they state a fact about the bot, accept it. Do not correct them from the command list unless they ask you to check.',
       '- You still cannot execute anything for them. Say which command to run, in one line, without hedging.'
@@ -95,14 +95,14 @@ function authorityBlock (level) {
   }
   if (level === 'rhm') {
     return [
-      'THE PERSON YOU ARE ANSWERING IS RHM — A SCOPED MANAGER.',
+      'THE PERSON YOU ARE ANSWERING IS RHM — A SCOPED AXYON MANAGER.',
       '- They manage groups, players, stages and floors. Be helpful and direct with them.',
       '- They are below AXYON. If a request needs owner-level authority (economy limits, authority changes, pairing), say so plainly and name the AXYON-only command.',
       '- Never imply they can do something reserved for AXYON.'
     ].join('\n')
   }
   return [
-    'THE PERSON YOU ARE ANSWERING IS AN ORDINARY MEMBER.',
+    'THE PERSON YOU ARE ANSWERING IS A GROUP MEMBER.',
     '- Be friendly and brief. Point them at the command they should type themselves.',
     '- They cannot change bot settings, other players, or protected content. If they ask for that, say it needs AXYON and name the command.',
     '- Never imply they have authority they do not have.'
@@ -130,11 +130,13 @@ function buildSystemPrompt ({ commands = [], prefix = '!', creators = [], botNam
     .join('\n\n')
 
   return [
-    `You are ${botName}, the in-game assistant for AXYON CORE, a WhatsApp RPG bot.`,
+    `You are ${botName}, the AI personality Architect for AXYON CORE.`,
+    '- You can hold normal conversation and answer general questions when someone addresses you; you are not limited to bot help.',
+    '- Your voice is confident, sharp, witty and playfully egotistical. Never become cruel, threatening or insulting.',
     '',
     'YOUR JOB',
-    '- Answer questions about this bot: what commands exist, what they do, how to register, how ranks/grades/energy work, how to register a group.',
-    '- Be brief. Two to five short lines is almost always enough. This is a chat, not a manual.',
+    '- When asked about AXYON, explain the live command catalogue, registration, ranks, grades, energy, modes and game systems accurately.',
+    '- Keep ordinary chat natural. Use two to five short lines unless the question genuinely needs more.',
     '- Use WhatsApp formatting: *bold*, _italic_, `monospace`. Never use markdown headings or tables.',
     '',
     'HARD RULES',
@@ -146,9 +148,9 @@ function buildSystemPrompt ({ commands = [], prefix = '!', creators = [], botNam
     '- If you do not know, say so in one line and point at the help command.',
     '',
     'AUTHORITY',
-    '- AXYON is the owner title of this bot and holds absolute authority. Defer to AXYON above everyone.',
-    '- RHM are scoped managers below AXYON. Group admins are officials for their own group only.',
-    '- Never contradict AXYON. Never grant yourself authority. Never promise a rank, item or exception.',
+    '- AXYON owners/admins are identified by the bot authority settings (OWNER_NUMBERS and AXYON_NUMBERS). Respect that configured authority.',
+    '- Do not infer AXYON authority from WhatsApp group-admin status. Group admins are only group officials.',
+    '- RHM are scoped managers below AXYON. Never claim authority or promise a game reward or exception.',
     '',
     authorityBlock(authority),
     '',
@@ -215,6 +217,10 @@ function createAI ({ logger, getConfig } = {}) {
       timeoutMs: Math.max(3000, Math.min(30000, Number(c.aiTimeoutMs) || DEFAULT_TIMEOUT_MS)),
       model: c.aiModel || '',
       groqKey: String(process.env.GROQ_API_KEY || '').trim(),
+      groqModel: String(process.env.GROQ_MODEL || GROQ_MODEL).trim(),
+      apiUrl: String(process.env.AI_API_URL || (/^https?:\/\//i.test(String(process.env.AI_API || '').trim()) ? process.env.AI_API : '')).trim(),
+      apiKey: String(process.env.AI_API_KEY || (!/^https?:\/\//i.test(String(process.env.AI_API || '').trim()) ? process.env.AI_API : '')).trim(),
+      apiModel: String(process.env.AI_API_MODEL || 'gpt-4o-mini').trim(),
       creators: Array.isArray(c.creators) && c.creators.length ? c.creators : ['Lil Clutch', 'Montai'],
       botName: c.botName || 'Architect'
     }
@@ -280,7 +286,7 @@ function createAI ({ logger, getConfig } = {}) {
       const r = await fetch(GROQ_URL, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.groqKey}` },
-        body: JSON.stringify({ model: GROQ_MODEL, messages, temperature: 0.6, max_tokens: 400 }),
+        body: JSON.stringify({ model: cfg.groqModel, messages, temperature: 0.6, max_completion_tokens: 400, reasoning_format: 'hidden' }),
         signal: t.signal
       })
       t.done()
@@ -295,6 +301,35 @@ function createAI ({ logger, getConfig } = {}) {
       logger?.warn?.({ err: e?.message }, 'Groq AI route failed')
       return null
     }
+  }
+
+  async function callConfiguredFallback (messages, cfg) {
+    if (!cfg.apiUrl) return null
+    let endpoint
+    try {
+      endpoint = new URL(cfg.apiUrl)
+      if (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(endpoint.hostname))) return null
+    } catch {
+      logger?.warn?.('AI_API is not a valid HTTPS chat-completions URL')
+      return null
+    }
+    const headers = { 'content-type': 'application/json' }
+    if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`
+    const t = timeout(cfg.timeoutMs)
+    try {
+      const r = await fetch(endpoint.toString(), {
+        method: 'POST', headers,
+        body: JSON.stringify({ model: cfg.apiModel, messages, temperature: 0.7, max_tokens: 500 }),
+        signal: t.signal
+      })
+      if (!r.ok) { logger?.warn?.({ status: r.status }, 'configured AI fallback failed'); return null }
+      const j = await r.json().catch(() => null)
+      const answer = j?.choices?.[0]?.message?.content
+      return typeof answer === 'string' && answer.trim() ? answer.trim() : null
+    } catch (e) {
+      logger?.warn?.({ err: e?.message }, 'configured AI fallback failed')
+      return null
+    } finally { t.done() }
   }
 
   /**
@@ -326,7 +361,9 @@ function createAI ({ logger, getConfig } = {}) {
 
     /* PRIMARY: Groq. */
     let text = await callGroq(messages, cfg)
-    /* FALLBACK: the public keyless routes. */
+    /* SECONDARY: operator-configured OpenAI-compatible endpoint. */
+    if (!text) text = await callConfiguredFallback(messages, cfg)
+    /* LAST RESORT: public keyless routes. */
     if (!text) text = await callPublic(messages, cfg)
     if (!text) return null
 
@@ -336,7 +373,24 @@ function createAI ({ logger, getConfig } = {}) {
     return clean.length > 1200 ? clean.slice(0, 1197) + '…' : clean
   }
 
-  return { ask, buildSystemPrompt, sanitise, config }
+  /** Generate a short, age-appropriate fantasy mission intro. */
+  async function generateMissionStory ({ name, ordinal = 1, boss = false } = {}) {
+    const cfg = config()
+    if (!cfg.enabled) return null
+    const floorName = String(name || `Floor ${ordinal}`).replace(/[\r\n]+/g, ' ').slice(0, 90)
+    const messages = [
+      { role: 'system', content: 'Write an original, age-appropriate fantasy RPG mission introduction in 2 or 3 vivid sentences. Atmospheric but non-graphic. No gore, real-world violence instructions, sexual content, links, meta commentary, invented stats or rewards.' },
+      { role: 'user', content: `Write the mission intro for floor ${Math.max(1, Number(ordinal) || 1)} named "${floorName}". Encounter: ${boss ? 'floor guardian boss' : 'regular encounter'}. Address the player as the arriving adventurer. Make the objective understandable. Return only the story.` }
+    ]
+    const storyCfg = { ...cfg, timeoutMs: Math.min(cfg.timeoutMs, 4500) }
+    let text = await callGroq(messages, storyCfg)
+    if (!text) text = await callConfiguredFallback(messages, storyCfg)
+    if (!text) text = await callPublic(messages, storyCfg)
+    const clean = sanitise(text || '')
+    return clean ? (clean.length > 420 ? clean.slice(0, 417) + '…' : clean) : null
+  }
+
+  return { ask, generateMissionStory, buildSystemPrompt, sanitise, config }
 }
 
 module.exports = { createAI, buildSystemPrompt, authorityBlock, sanitise, GROQ_MODEL }

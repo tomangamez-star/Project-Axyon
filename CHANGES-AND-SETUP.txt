@@ -1,0 +1,42 @@
+AXYON MODIFIED FILES — APPLY GUIDE
+
+Copy the files in this ZIP over the matching paths in your Project-Axyon-main
+repository. This archive contains the complete modified files, not a patch.
+
+Changes included:
+- Architect answers when addressed by name, by bot-number mention, or by reply.
+- Architect supports ordinary conversation and uses configured AXYON authority,
+  not WhatsApp group-admin status, when choosing its tone.
+- Groq is the primary AI provider using the current Groq production model.
+  AI_API / AI_API_URL / AI_API_KEY / AI_API_MODEL provide an optional
+  OpenAI-compatible fallback.
+- Registered groups store their own game mode independently; DMs retain
+  player-specific modes.
+- Dungeon floors show complete stats and rewards. Every unlocked floor has a
+  regular encounter and a separate guardian boss challenge with boosted stats
+  and rewards. Mission stories are AI-generated when a provider is reachable,
+  with a built-in fallback story so the encounter always starts.
+- Combat actions are exposed clearly in help, including attack, defend, heal,
+  class, carduse, retreat and battle resume. Dungeon victory/defeat buttons
+  return to the dungeon instead of the stage list.
+- Card-drop messages no longer send a generation announcement or show artwork
+  credits/source links.
+- Regression tests updated and expanded.
+
+Environment:
+- Keep your existing GROQ_API_KEY value in your deployment environment.
+- GROQ_MODEL defaults to openai/gpt-oss-120b and can be overridden.
+- AI_API may be an OpenAI-compatible chat-completions URL OR an API key for
+  api.openai.com. Alternatively set AI_API_URL and AI_API_KEY separately.
+- AI_API_MODEL defaults to gpt-4o-mini.
+
+Database:
+- The group game_mode column is added by the existing automatic schema
+  migration when the application starts. No manual SQL step is required.
+
+Validation performed on this source tree:
+- npm run check: passed.
+- npm test: 241 passed, 0 failed.
+
+No GitHub push, commit, or deployment was performed. You can review the files,
+copy them into your repository, and push them yourself.

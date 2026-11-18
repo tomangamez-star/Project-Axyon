@@ -35,10 +35,10 @@ function harness ({ player = null, battle = null, floors = [] } = {}) {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
-  const state = { player: player ? { ...player } : null, battle, floors }
+  const state = { player: player ? { ...player } : null, battle, floors, groupMode: player?.gameMode || 'general' }
 
   const saved = {}
-  for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
+  for (const k of ['player', 'group', 'setGroupMode', 'getBattle', 'setBattle', 'savePlayer', 'log',
     'settings', 'axyonNumberMode', 'roleOf', 'partnerOf', 'floors', 'stage', 'stages',
     'classMastery', 'classMovesUsedToday', 'consumeClassMove', 'addClassMastery',
     'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'modes']) {
@@ -46,7 +46,8 @@ function harness ({ player = null, battle = null, floors = [] } = {}) {
   }
 
   store.player = async () => state.player
-  store.group = async () => ({ group_jid: '123@g.us', enabled: true, registered_by: 'u1' })
+  store.group = async () => ({ group_jid: '123@g.us', enabled: true, registered_by: 'u1', game_mode: state.groupMode })
+  store.setGroupMode = async (jid, mode) => { state.groupMode = mode; return { group_jid: jid, game_mode: mode } }
   store.getBattle = async () => state.battle
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
@@ -154,6 +155,20 @@ test('dungeon: a player can enter a floor and start a real battle', async () => 
   assert.strictEqual(b.mode, 'floor')
   assert.ok(b.enemyHp > 0, 'the floor enemy must have HP')
   assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: every unlocked floor has a separate boss encounter with boosted rewards', async () => {
+  const h = harness({ player: { ...basePlayer(), gameMode: 'dungeon' }, floors: store.ORIGINAL_FLOORS })
+  const { out } = await h.send('!boss 1')
+  const b = h.state.battle
+  h.restore()
+  assert.ok(b, 'boss challenge must create a battle')
+  assert.strictEqual(b.mode, 'floor_boss')
+  assert.strictEqual(b.enemy.boss, true)
+  assert.match(b.enemy.name, /Guardian of Sunken Vestibule/)
+  assert.ok(b.enemy.hp > store.ORIGINAL_FLOORS[0].hp)
+  assert.ok(b.enemy.xp > store.ORIGINAL_FLOORS[0].xp)
+  assert.ok(/Guardian of Sunken Vestibule|BOSS/i.test(out))
 })
 
 test('dungeon: winning a floor awards XP and can level the player up', async () => {

@@ -51,9 +51,9 @@ const MODE_LIST = {
 /*
  * GAME MODES
  * ----------
- * Four modes, and a command belongs to exactly one of them. The mode is a
- * property of the PLAYER, not of the chat: `!mode combat` switches you, and
- * every command you then send is checked against it.
+ * Four modes, and a command belongs to exactly one of them. In a registered
+ * group, `!mode combat` changes that group's mode; in DMs it changes the
+ * player's mode. Different groups never share their mode setting.
  *
  *   combat   — fighting: stages, monsters, CPU opponents, battle actions
  *   duels    — PvP duels and card fighting. Registered groups only.
@@ -116,7 +116,7 @@ const MODE_FREE = new Set([
    * returns "you are not in a battle" otherwise, so they cannot be used to
    * bypass the mode gate on the commands that actually start a fight.
    */
-  'attack', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle'
+  'attack', 'defend', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle'
 ])
 
 /**
@@ -226,11 +226,12 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const b = await store.getBattle(ctx.userId)
     const p = await store.player(ctx.userId)
     if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
-    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), axyon.battleButtons(), true)
-  }, { hidden: true })
-  cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
-  cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
-  cmd('heal', 'battle', '{p}heal', 'Recover 25% HP. 5 uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
+    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p, b.story || ''), axyon.battleButtons(), true)
+  })
+  cmd('attack', 'battle', '{p}attack', 'Attack during an active fight.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'))
+  cmd('defend', 'battle', '{p}defend', 'Brace and reduce the next incoming hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'))
+  cmd('guard', 'battle', '{p}guard', 'Legacy alias for defending.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
+  cmd('heal', 'battle', '{p}heal', 'Recover 10 HP. Uses per combat are limited.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'))
   cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
     /*
      * `!class` is BOTH the class sheet and the in-battle move command.
@@ -250,8 +251,8 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!args || !args.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}classmove <move name>* \u2014 see *${ctx.prefix}class*.`)
     return axyon.battleAct(s, m, ctx, 'class', 1, args.join(' '))
   }, { hidden: true })
-  cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
-  cmd('retreat', 'battle', '{p}retreat', 'Leave the fight with no rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
+  cmd('carduse', 'battle', '{p}carduse', 'Use your equipped card ability during a fight.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'))
+  cmd('retreat', 'battle', '{p}retreat', 'Leave the current fight without victory rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'))
 
   /* --------------------------------------------------------------- dungeon */
 
@@ -264,29 +265,52 @@ function createCommands ({ axyon, economy, logger, ai }) {
       modes.map(x => `${x.enabled ? '\u2705' : '\u274c'} *${MODE_LIST[x.mode]?.name || x.mode}* \u2014 max ${x.max_players}\n   ${MODE_LIST[x.mode]?.blurb || ''}`).join('\n'),
       '',
       '*FLOORS*',
-      floors.length ? floors.map(f => `${f.locked ? '\ud83d\udd12' : '\u25ab\ufe0f'} *${f.ordinal}. ${f.name}* ${f.boss ? '\ud83d\udc80' : ''}\n   \u2764\ufe0f ${f.hp} \u2022 \u2694\ufe0f ${f.atk} \u2022 \u2728 ${f.xp} XP`).join('\n') : 'No floors configured.',
+      floors.length ? floors.map(f => `${f.locked ? '\ud83d\udd12' : '\u25ab\ufe0f'} *${f.ordinal}. ${f.name}*\n   ❤️ ${f.hp} HP • ⚔️ ${f.atk} ATK • 🛡️ ${f.def} DEF • ✨ ${f.xp} XP • 🪙 ${f.zen} Zen`).join('\n') : 'No floors configured.',
       '',
-      `Enter a floor with *${ctx.prefix}floor <n>*.`,
-      'Gates control progression. Fillers are a separate system and never merged with gates.'
+      `Regular encounter: *${ctx.prefix}floor <n>*.`,
+      `Guardian boss: *${ctx.prefix}boss <n>* — each floor has its own boss challenge.`,
+      `Battle controls: *${ctx.prefix}attack*, *${ctx.prefix}defend*, *${ctx.prefix}heal*, *${ctx.prefix}class*, *${ctx.prefix}carduse*, *${ctx.prefix}retreat*.`
     ]
     return axyon.send(s, ctx.jid, m, lines.join('\n'))
   })
 
-  cmd('floor', 'dungeon', '{p}floor <n>', 'Enter a dungeon floor.', async (s, m, ctx, args) => {
+  async function enterDungeonEncounter (s, m, ctx, args, bossFight = false) {
     const p = await store.player(ctx.userId)
     if (!p) return axyon.arise(s, m, ctx)
     const floors = await store.floors()
-    if (!floors.length) return axyon.send(s, ctx.jid, m, `\ud83c\udff9 No dungeon floors exist yet. AXYON can add one with *${ctx.prefix}flooradmin add <name>*`)
+    if (!floors.length) return axyon.send(s, ctx.jid, m, `🏹 No floors are configured. AXYON can add one with *${ctx.prefix}flooradmin add <name>*. The five original floors are seeded automatically.`)
     const ordinal = parseNum(args[0]) ?? 1
-    const f = floors.find(x => Number(x.ordinal) === ordinal)
-    if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
-    if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
-    const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
-    const b = { mode: 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
+    const floor = floors.find(x => Number(x.ordinal) === ordinal)
+    if (!floor) return axyon.send(s, ctx.jid, m, `❌ No floor *${ordinal}*. Use *${ctx.prefix}dungeon* to see available floors.`)
+    if (floor.locked) return axyon.send(s, ctx.jid, m, '🔒 That floor is locked.')
+    const scale = (value, factor, min = 1) => Math.max(min, Math.round((Number(value) || min) * factor))
+    const encounter = bossFight ? {
+      ...floor,
+      key: `${floor.key || `floor_${ordinal}`}_boss`,
+      name: `Guardian of ${floor.name}`,
+      boss: true,
+      hp: scale(floor.hp, 1.65, 60),
+      atk: scale(floor.atk, 1.3, 5),
+      def: scale(floor.def, 1.2, 2),
+      xp: scale(floor.xp, 1.75, 30),
+      zen: scale(floor.zen, 1.75, 30)
+    } : { ...floor, boss: false }
+    const enemy = axyon.buildEnemy(encounter)
+    let story = null
+    if (typeof ai?.generateMissionStory === 'function') {
+      try { story = await ai.generateMissionStory({ name: enemy.name, ordinal, boss: bossFight }) } catch { /* story is optional; battle remains playable */ }
+    }
+    if (!story) story = bossFight
+      ? `A guardian rises before the sealed path of *${floor.name}*. Defeat it to claim the floor's greater reward.`
+      : `You enter *${floor.name}*. Clear the encounter and earn the XP and Zen shown for this floor.`
+    const b = { mode: bossFight ? 'floor_boss' : 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, story }
     await store.setBattle(ctx.userId, b)
-    await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
-    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p, `You descend into *${f.name}*.`), axyon.battleButtons(), true)
-  })
+    await store.log(ctx.userId, bossFight ? 'floor_boss_enter' : 'floor_enter', String(ordinal), { name: enemy.name })
+    return axyon.withVisual(s, ctx.jid, m, bossFight ? 'boss' : 'dungeon', axyon.battleCard(b, p, story), axyon.battleButtons(), true)
+  }
+
+  cmd('floor', 'dungeon', '{p}floor <n>', 'Enter a regular encounter on a dungeon floor.', async (s, m, ctx, args) => enterDungeonEncounter(s, m, ctx, args, false))
+  cmd('boss', 'dungeon', '{p}boss <n>', 'Challenge the guardian boss of any unlocked dungeon floor for greater rewards.', async (s, m, ctx, args) => enterDungeonEncounter(s, m, ctx, args, true))
 
   /* ----------------------------------------------------------------- party */
 
@@ -955,10 +979,11 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* -------------------------------------------------------- AXYON identity */
 
-  cmd('mode', 'core', '{p}mode <combat|duels|dungeon|general>', 'Switch game mode. Each mode runs only its own commands.', async (s, m, ctx, args) => {
+  cmd('mode', 'core', '{p}mode <combat|duels|dungeon|general>', 'Switch this registered group mode, or your DM mode. Each mode runs only its own commands.', async (s, m, ctx, args) => {
     const want = String(args[0] || '').toLowerCase()
     const p = await store.player(ctx.userId)
-    const current = p?.gameMode || 'general'
+    const groupScoped = String(ctx.jid || '').endsWith('@g.us') && !!ctx.group
+    const current = groupScoped ? (ctx.group.game_mode || 'general') : (p?.gameMode || 'general')
 
     if (!want) {
       const rows = Object.entries(GAME_MODES).map(([key, meta]) => {
@@ -970,7 +995,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
         '',
         `\ud83c\udfae ${T.b('GAME MODES')}`,
         '',
-        `You are in ${T.b(GAME_MODES[current]?.name || 'General')} mode.`,
+        `${groupScoped ? 'This group is' : 'You are'} in ${T.b(GAME_MODES[current]?.name || 'General')} mode.`,
         '',
         T.rule('', 'thin'),
         '',
@@ -988,10 +1013,14 @@ function createCommands ({ axyon, economy, logger, ai }) {
         `Modes: ${Object.keys(GAME_MODES).map(k => T.b(k)).join(', ')}`
       ].join('\n'))
     }
-    if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
-
-    await store.setGameMode(ctx.userId, want)
-    await store.log(ctx.userId, 'game_mode', want)
+    if (groupScoped) {
+      await store.setGroupMode(ctx.jid, want)
+      await store.log(ctx.userId, 'group_game_mode', want, { group: ctx.jid })
+    } else {
+      if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+      await store.setGameMode(ctx.userId, want)
+      await store.log(ctx.userId, 'game_mode', want)
+    }
     const meta = GAME_MODES[want]
     return axyon.send(s, ctx.jid, m, [
       T.header({ creators: greetings.creatorsOf(ctx.settings) }),
@@ -1002,7 +1031,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       '',
       T.rule('', 'hair'),
       `Commands now available: ${meta.sections.map(x => T.m(`${ctx.prefix}help ${x}`)).join(' ')}`,
-      T.i('Shop and inventory stay available.')
+      T.i(groupScoped ? 'This mode is saved for this registered group only; other groups are independent.' : 'This mode is saved to your player account. Shop and inventory stay available.')
     ].join('\n'))
   })
 
@@ -1914,7 +1943,9 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const owners = modesOf(parsed.command, command.section)
     if (owners.length) {
       const p = await store.player(ctx.userId).catch(() => null)
-      const current = p?.gameMode || 'general'
+      const current = (ctx.jid.endsWith('@g.us') && ctx.group)
+        ? (ctx.group.game_mode || 'general')
+        : (p?.gameMode || 'general')
       if (!owners.includes(current)) {
         const owner = owners[0]
         const meta = GAME_MODES[owner]

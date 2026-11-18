@@ -41,7 +41,7 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
   const sock = fakeSock()
   const state = {
     player: player ? { ...player } : null,
-    group,
+    group: group ? { ...group, game_mode: group.game_mode || player?.gameMode || 'general' } : null,
     battle,
     inv: { ...inv },
     modes: []
@@ -49,7 +49,7 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
   const store = require('../src/axyon-store')
   const saved = {}
   for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
-    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'setGameMode', 'settings',
+    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'setGameMode', 'setGroupMode', 'settings',
     'axyonNumberMode', 'roleOf', 'partnerOf']) {
     saved[k] = store[k]
   }
@@ -73,6 +73,7 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
     return state.inv[k]
   }
   store.setGameMode = async (u, m) => { state.player.gameMode = m; state.modes.push(m); return m }
+  store.setGroupMode = async (jid, m) => { if (state.group) state.group.game_mode = m; state.modes.push(m); return m }
 
   const restore = () => Object.assign(store, saved)
 
@@ -209,7 +210,7 @@ test('switching mode makes that mode\'s commands run', async () => {
   const h = harness({ player: basePlayer(), group: { jid: '123@g.us' } })
   const sw = await h.send('!mode combat')
   assert.match(sw.out, /COMBAT MODE/)
-  assert.strictEqual(h.state.player.gameMode, 'combat')
+  assert.strictEqual(h.state.group.game_mode, 'combat')
 
   /* Now !stages is allowed — it must not answer with WRONG MODE. */
   const r = await h.send('!stages')
@@ -231,6 +232,14 @@ test('each mode runs only its own commands', async () => {
     assert.ok(!/WRONG MODE/.test(ok.out), `${c.allowed} wrongly blocked in ${c.mode}`)
     assert.match(no.out, /WRONG MODE/, `${c.blocked} wrongly allowed in ${c.mode}`)
   }
+})
+
+test("a registered group mode changes independently of the player DM preference", async () => {
+  const h = harness({ player: basePlayer(), group: { jid: '123@g.us' } })
+  await h.send('!mode combat')
+  assert.strictEqual(h.state.group.game_mode, 'combat')
+  assert.strictEqual(h.state.player.gameMode, 'general')
+  h.restore()
 })
 
 test('!mode with no argument lists all four modes and marks the current one', async () => {
@@ -271,7 +280,7 @@ test('duel commands pass the gate inside a registered group', async () => {
 /* ------------------------------------- 5. inventory and shop in all modes */
 
 test('shop and inventory are mode-free', () => {
-  for (const name of ['shop', 'buy', 'inventory', 'use']) {
+  for (const name of ['shop', 'buy', 'inventory', 'use', 'attack', 'defend', 'guard', 'heal']) {
     assert.ok(MODE_FREE.has(name), `${name} is not mode-free`)
     assert.strictEqual(modeOf(name, 'shop'), null, `${name} is gated`)
   }

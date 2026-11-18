@@ -249,22 +249,31 @@ test('ai: the owner prompt grants deference and the member prompt does not', () 
   const owner = ai.authorityBlock('owner')
   const member = ai.authorityBlock('member')
   assert.ok(owner.includes('AXYON'))
-  assert.ok(owner.includes('absolute authority'))
-  assert.ok(member.includes('ORDINARY MEMBER'))
-  assert.ok(!member.includes('absolute authority'))
+  assert.ok(owner.includes('bot authority settings'))
+  assert.ok(owner.includes('not WhatsApp group-admin status'))
+  assert.ok(member.includes('GROUP MEMBER'))
+  assert.ok(!member.includes('CONFIGURED AXYON OWNER/ADMIN'))
   assert.notStrictEqual(owner, member)
+})
+
+test('ai: Architect can answer ordinary conversation and respects configured authority', () => {
+  const prompt = ai.buildSystemPrompt({ commands: [], authority: 'owner' })
+  assert.match(prompt, /normal conversation/)
+  assert.match(prompt, /playfully egotistical/)
+  assert.match(prompt, /bot authority settings/)
+  assert.match(prompt, /Do not infer AXYON authority from WhatsApp group-admin status/)
 })
 
 test('ai: an unknown authority level falls back to member, never owner', () => {
   const block = ai.authorityBlock('superuser')
-  assert.ok(block.includes('ORDINARY MEMBER'))
+  assert.ok(block.includes('GROUP MEMBER'))
 })
 
 test('ai: the system prompt embeds the authority block for the asker', () => {
   const owner = ai.buildSystemPrompt({ commands: [], authority: 'owner' })
   const member = ai.buildSystemPrompt({ commands: [], authority: 'member' })
-  assert.ok(owner.includes('THE OWNER OF THIS BOT'))
-  assert.ok(!member.includes('THE OWNER OF THIS BOT'))
+  assert.ok(owner.includes('CONFIGURED AXYON OWNER/ADMIN'))
+  assert.ok(!member.includes('CONFIGURED AXYON OWNER/ADMIN'))
 })
 
 test('ai: a command explanation reaches the prompt when the registry has one', () => {

@@ -453,6 +453,11 @@ class WhatsAppConnection {
     const quotedAuthor = String(ci.participant || '').split(':')[0].split('@')[0]
     if (quotedAuthor && quotedAuthor === self) return true
 
+    /* 3. Address Architect by name, even without an @mention. */
+    const raw = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    const name = String(aiConfig?.botName || 'Architect').trim()
+    if (name && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(raw)) return true
+
     return false
   }
 
@@ -460,8 +465,12 @@ class WhatsAppConnection {
   aiQuestion (content) {
     const raw = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
     if (!raw) return ''
+    const assistantName = String(aiConfig?.botName || 'Architect').trim()
+    const escapedName = assistantName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     return raw
       .replace(/@\d{6,20}/g, ' ')
+      .replace(assistantName ? new RegExp(`\\b${escapedName}\\b`, 'gi') : /$^/, ' ')
+      .replace(/^[\s,:-]+/, '')
       .replace(/\s+/g, ' ')
       .trim()
   }

@@ -93,6 +93,7 @@ async function ensureSchema () {
       registered_by TEXT NOT NULL DEFAULT '',
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       prefix TEXT,
+      game_mode TEXT NOT NULL DEFAULT 'general',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
@@ -434,6 +435,7 @@ async function ensureSchema () {
    * the social and economy commands they were already using.
    */
   await db().query("ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'general'")
+  await db().query("ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'general'")
   for (const s of ORIGINAL_STAGES) {
     await db().query(
       `INSERT INTO axyon_stages(key,name,ordinal,original,hp,atk,def,xp,zen)
@@ -553,6 +555,16 @@ async function setGroupEnabled (jid, enabled) {
 async function setGroupPrefix (jid, prefix) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_groups SET prefix=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, prefix || null])
+  cache.invalidate(`group:${jid}`)
+  return r.rows[0] || null
+}
+
+async function setGroupMode (jid, mode) {
+  await ensureSchema()
+  const allowed = new Set(['combat', 'duels', 'dungeon', 'general'])
+  const next = String(mode || '').toLowerCase()
+  if (!allowed.has(next)) return null
+  const r = await db().query('UPDATE axyon_groups SET game_mode=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, next])
   cache.invalidate(`group:${jid}`)
   return r.rows[0] || null
 }
@@ -1646,6 +1658,7 @@ module.exports = {
   groups,
   setGroupEnabled,
   setGroupPrefix,
+  setGroupMode,
   dayKey,
   xpNeed,
   rankForLevel,
