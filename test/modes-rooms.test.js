@@ -51,15 +51,22 @@ test('modes: a custom mode can never shadow a protected core mode', () => {
   assert.ok(reg.isProtected('normal_battle'))
 })
 
-test('modes: guild slots are placeholders and cannot be entered', () => {
+test('modes: guild slots and collaboration are real, enabled modes', () => {
+  /*
+   * These were placeholders because the spec fixed their position but forbade
+   * inventing their rules. The owner has since asked for them to be built, so
+   * the contract is now: they exist, they are enabled, they are enterable, and
+   * each one points at a defined rule set.
+   */
   const reg = modes.createModeRegistry()
-  for (const id of ['guild_1', 'guild_2', 'guild_3']) {
+  for (const id of ['guild_1', 'guild_2', 'guild_3', 'collab']) {
     const m = reg.get(id)
     assert.ok(m, `${id} must exist in the menu order`)
-    assert.strictEqual(m.placeholder, true)
+    assert.strictEqual(m.placeholder, undefined, `${id} must no longer be a placeholder`)
+    assert.strictEqual(m.enabled, true, `${id} must be enabled`)
+    assert.ok(m.rules, `${id} must name its rule set`)
     const check = reg.canEnter(id)
-    assert.strictEqual(check.ok, false)
-    assert.strictEqual(check.reason, 'placeholder')
+    assert.strictEqual(check.ok, true, `${id} must be enterable`)
   }
 })
 

@@ -69,8 +69,76 @@ const PARTY_MIN = 2
 const PARTY_DEFAULT_MAX = 5
 const PARTY_HARD_MAX = 20
 
+/**
+ * CUSTOM ROOM TYPES
+ * -----------------
+ * The three participation types above are fixed by the spec. Operators also
+ * need their own room shapes — a raid, a tournament bracket, a spectator
+ * lobby — and those have their own capacity rules that the three fixed types
+ * cannot express.
+ *
+ * A custom type is a plain record: an id, a display name, a minimum, a default
+ * maximum and a hard ceiling. It is registered at runtime (or seeded from the
+ * database by the command layer) and is looked up by the SAME `capacityFor`
+ * that the fixed types use, so a custom room cannot bypass the clamping that
+ * protects the fixed ones.
+ *
+ * Custom types can never shadow a fixed type id: `solo`, `multiplayer` and
+ * `party` are reserved, because a custom entry that redefined `party` would
+ * silently change the capacity of every existing party room.
+ */
+const RESERVED_TYPE_IDS = new Set(MODE_TYPE_IDS)
+
+const CUSTOM_ROOM_TYPES = new Map()
+
+/** Hard ceiling for any custom type, so a typo cannot open a 10,000-seat room. */
+const CUSTOM_HARD_MAX = 50
+
+/**
+ * Registers a custom room type.
+ *
+ * Returns { ok, reason, message } rather than throwing, because this is called
+ * from a command handler where a bad argument must produce a message, not a
+ * stack trace.
+ */
+function registerRoomType ({ id, name, minPlayers = 1, defaultMax = 4, hardMax = CUSTOM_HARD_MAX } = {}) {
+  const key = String(id || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  if (!key) return { ok: false, reason: 'no_id', message: 'A room type needs an id.' }
+  if (RESERVED_TYPE_IDS.has(key)) {
+    return { ok: false, reason: 'reserved', message: `*${key}* is a built-in participation type and cannot be redefined.` }
+  }
+  const min = Math.max(1, Math.floor(Number(minPlayers) || 1))
+  const hard = Math.max(min, Math.min(CUSTOM_HARD_MAX, Math.floor(Number(hardMax) || CUSTOM_HARD_MAX)))
+  const def = Math.max(min, Math.min(hard, Math.floor(Number(defaultMax) || min)))
+  CUSTOM_ROOM_TYPES.set(key, {
+    id: key,
+    name: String(name || key).trim() || key,
+    minPlayers: min,
+    defaultMax: def,
+    hardMax: hard,
+    custom: true
+  })
+  return { ok: true, type: CUSTOM_ROOM_TYPES.get(key) }
+}
+
+function unregisterRoomType (id) {
+  return CUSTOM_ROOM_TYPES.delete(String(id || '').trim().toLowerCase())
+}
+
+function customRoomTypes () {
+  return [...CUSTOM_ROOM_TYPES.values()]
+}
+
+/**
+ * Resolves a participation id to a type definition, fixed or custom.
+ *
+ * Fixed types win, so a custom entry can never shadow one even if it somehow
+ * reached the map.
+ */
 function modeType (id) {
-  return MODE_TYPES[String(id || '').toLowerCase()] || null
+  const key = String(id || '').toLowerCase()
+  if (MODE_TYPES[key]) return MODE_TYPES[key]
+  return CUSTOM_ROOM_TYPES.get(key) || null
 }
 
 /**
@@ -79,6 +147,10 @@ function modeType (id) {
  * `partyMax` is the operator's configured ceiling, so AXYON can raise the
  * default 5 without a code change. It is clamped to the hard maximum so a
  * typo cannot open a 10,000-seat room.
+ *
+ * A CUSTOM type uses its own default and its own hard ceiling, and is clamped
+ * the same way. An unknown type still returns 1 — a room with no recognised
+ * participation must never be given a large capacity by accident.
  */
 function capacityFor (participation, partyMax = PARTY_DEFAULT_MAX) {
   const t = modeType(participation)
@@ -87,6 +159,13 @@ function capacityFor (participation, partyMax = PARTY_DEFAULT_MAX) {
     const n = Number(partyMax)
     const max = Number.isFinite(n) ? Math.max(PARTY_MIN, Math.min(PARTY_HARD_MAX, Math.floor(n))) : PARTY_DEFAULT_MAX
     return max
+  }
+  if (t.custom) {
+    const n = Number(partyMax)
+    /* A custom type's own default is the floor; the operator may raise it up
+     * to that type's hard ceiling, never past it. */
+    const wanted = Number.isFinite(n) ? Math.max(t.defaultMax, Math.floor(n)) : t.defaultMax
+    return Math.max(t.minPlayers, Math.min(t.hardMax, wanted))
   }
   return t.defaultMax
 }
@@ -135,16 +214,19 @@ const CORE_MODES = [
 /**
  * The rest of the menu, in the spec's order.
  *
- * Guild slots 1-3 are placeholders: the spec fixes their POSITION but forbids
- * inventing their rules, so they are registered disabled and ruleless.
+ * Guild slots 1-3 and Collaboration are now REAL modes with defined rules
+ * (see axyon-guild.js). They were placeholders because the spec fixed their
+ * position but forbade inventing their rules; the owner has since asked for
+ * them to be built, so the rules are written down in that file and these
+ * entries point at it.
  */
 const OTHER_MODES = [
-  { id: 'guild_1', name: 'Guild Mode 1', category: 'guild', protected: false, enabled: false, participation: ['party'], blurb: 'Placeholder — rules not yet specified.', usesRoom: true, placeholder: true },
-  { id: 'guild_2', name: 'Guild Mode 2', category: 'guild', protected: false, enabled: false, participation: ['party'], blurb: 'Placeholder — rules not yet specified.', usesRoom: true, placeholder: true },
-  { id: 'guild_3', name: 'Guild Mode 3', category: 'guild', protected: false, enabled: false, participation: ['party'], blurb: 'Placeholder — rules not yet specified.', usesRoom: true, placeholder: true },
+  { id: 'guild_1', name: 'Guild Raid', category: 'guild', protected: false, enabled: true, participation: ['party'], blurb: 'A party shares one boss HP pool. Members fall individually; the raid is lost when all are down.', usesRoom: true, rules: 'guild_raid' },
+  { id: 'guild_2', name: 'Guild Duel', category: 'guild', protected: false, enabled: true, participation: ['party'], blurb: 'Two guilds field equal rosters. Members are paired by index; the side with more pair wins takes it.', usesRoom: true, rules: 'guild_duel' },
+  { id: 'guild_3', name: 'Guild Gauntlet', category: 'guild', protected: false, enabled: true, participation: ['party'], blurb: 'Three consecutive waves. HP carries over between waves with no full heal.', usesRoom: true, rules: 'guild_gauntlet' },
   { id: 'duel', name: 'Duel', category: 'duel', protected: false, enabled: true, participation: ['multiplayer'], blurb: 'Direct player-versus-player combat.', usesRoom: true },
   { id: 'card', name: 'Card', category: 'card', protected: false, enabled: true, participation: ['solo', 'multiplayer'], blurb: 'Card features, inventory and abilities.', usesRoom: false },
-  { id: 'collab', name: 'Collaboration', category: 'collab', protected: false, enabled: false, participation: ['party'], blurb: 'Placeholder — activities not yet specified.', usesRoom: true, placeholder: true },
+  { id: 'collab', name: 'Co-op Trial', category: 'collab', protected: false, enabled: true, participation: ['party'], blurb: 'The party shares one HP pool and one damage target. One member taking hits hurts everyone.', usesRoom: true, rules: 'collab_trial' },
   { id: 'dungeon', name: 'Dungeon', category: 'dungeon', protected: false, enabled: true, participation: ['solo', 'multiplayer', 'party'], blurb: 'Expandable floors and protected gates.', usesRoom: true }
 ]
 
@@ -342,6 +424,11 @@ module.exports = {
   PARTY_MIN,
   PARTY_DEFAULT_MAX,
   PARTY_HARD_MAX,
+  CUSTOM_HARD_MAX,
+  RESERVED_TYPE_IDS,
+  registerRoomType,
+  unregisterRoomType,
+  customRoomTypes,
   modeType,
   capacityFor,
   CORE_MODES,

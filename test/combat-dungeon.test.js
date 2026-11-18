@@ -245,9 +245,21 @@ test('rooms: a room can be opened for a protected combat mode', async () => {
   assert.ok(/room_test/.test(out), 'the room key must be shown')
 })
 
-test('rooms: a placeholder guild mode is refused with a clear reason', async () => {
+test('rooms: a guild mode is now real and can be opened', async () => {
+  /*
+   * This used to assert a placeholder refusal. Guild modes 1-3 are now built
+   * for real (see axyon-guild.js), so the contract changed: the room must
+   * OPEN, and it must carry the guild mode id.
+   */
   const h = harness({ player: { ...basePlayer(), gameMode: 'dungeon' } })
+  const saved = { createRoom: store.createRoom, log: store.log }
+  store.createRoom = async (o) => ({
+    room_key: 'room_guild', name: o.name, mode_id: o.modeId, participation: o.participation,
+    privacy: o.privacy, capacity: o.capacity, status: 'waiting', participants: [{ userId: o.ownerId, role: 'leader' }]
+  })
   const { out } = await h.send('!room create guild_1 party')
+  Object.assign(store, saved)
   h.restore()
-  assert.ok(/no rules configured yet/i.test(out), `expected a placeholder refusal, got: ${out.slice(0, 300)}`)
+  assert.ok(/ROOM OPENED/i.test(out), `expected a room, got: ${out.slice(0, 300)}`)
+  assert.ok(/Guild Raid/i.test(out), 'the room must name the guild mode')
 })

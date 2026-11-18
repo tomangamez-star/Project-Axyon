@@ -356,6 +356,70 @@ async function ensureSchema () {
       used INT NOT NULL DEFAULT 0,
       PRIMARY KEY(user_id, day_key));
 
+    /*
+     * CLASS DEFINITIONS & MOVES — the editable catalogue.
+     *
+     * The 20 official classes live in code (axyon-classes.js) because they are
+     * approved data that must not drift. These two tables hold the OPERATOR'S
+     * OWN classes and moves, plus any override of an official one, so
+     * !classadmin can create, edit and delete without a redeploy.
+     *
+     * source distinguishes an operator-created row ('custom') from an
+     * override of a code-defined one ('override'). An override never deletes
+     * the code definition — it shadows it, so removing the override restores
+     * the approved original rather than losing it.
+     *
+     * deleted is a soft-delete flag. A class that players are currently
+     * assigned to must not vanish from under them: the row stays, marked
+     * deleted, and the resolver refuses to hand it out while the player's
+     * stored class value is left untouched.
+     */
+    CREATE TABLE IF NOT EXISTS axyon_class_defs(
+      class_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      specialization TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'custom',
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      deleted BOOLEAN NOT NULL DEFAULT FALSE,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
+    CREATE TABLE IF NOT EXISTS axyon_class_moves(
+      id BIGSERIAL PRIMARY KEY,
+      class_id TEXT NOT NULL,
+      move_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      move_type TEXT NOT NULL DEFAULT 'offensive',
+      damage INT,
+      cost INT,
+      unlock BIGINT,
+      heal INT,
+      ultimate BOOLEAN NOT NULL DEFAULT FALSE,
+      description TEXT NOT NULL DEFAULT '',
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      deleted BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE(class_id, move_id));
+
+    CREATE INDEX IF NOT EXISTS axyon_class_moves_class ON axyon_class_moves(class_id);
+
+    /*
+     * CUSTOM ROOM TYPES — operator-defined participation shapes.
+     *
+     * The three fixed types (solo/multiplayer/party) are code. These are the
+     * operator's own, with their own capacity bounds, so a raid or a
+     * tournament lobby does not have to pretend to be a party.
+     */
+    CREATE TABLE IF NOT EXISTS axyon_room_types(
+      type_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      min_players INT NOT NULL DEFAULT 1,
+      default_max INT NOT NULL DEFAULT 4,
+      hard_max INT NOT NULL DEFAULT 50,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
     CREATE INDEX IF NOT EXISTS axyon_players_rank ON axyon_players(rank, level DESC);
     CREATE INDEX IF NOT EXISTS axyon_cards_owner ON axyon_cards(owner_id);
     CREATE INDEX IF NOT EXISTS axyon_log_created ON axyon_log(created_at DESC);
@@ -1381,6 +1445,166 @@ async function refundClassMove (userId, day = dayKey()) {
   return r.rows[0] ? Number(r.rows[0].used) : 0
 }
 
+/* ------------------------------------------------- class & move catalogue */
+
+/*
+ * The editable catalogue.
+ *
+ * `axyon-classes.js` holds the approved 20 classes in code. These functions
+ * layer the operator's own classes and overrides on top, so `!classadmin` can
+ * create, edit and delete without a redeploy.
+ *
+ * The layering rule is: a code definition is the base, an override row shadows
+ * it, and a custom row adds a new one. Deleting an override restores the code
+ * definition rather than losing it — which is why `deleted` is a soft flag and
+ * the code catalogue is never written to.
+ */
+
+async function classDefs ({ includeDeleted = false } = {}) {
+  await ensureSchema()
+  const where = includeDeleted ? '' : 'WHERE deleted=FALSE'
+  return (await db().query(`SELECT * FROM axyon_class_defs ${where} ORDER BY class_id`)).rows
+}
+
+async function classDef (classId) {
+  await ensureSchema()
+  return (await db().query('SELECT * FROM axyon_class_defs WHERE class_id=$1', [String(classId || '').toLowerCase()])).rows[0] || null
+}
+
+/**
+ * Creates or updates a class definition.
+ *
+ * `source` is 'custom' for a new class and 'override' when the id already
+ * exists in the code catalogue. The caller does not choose it — this function
+ * decides, so an operator cannot accidentally mark an official class as their
+ * own and then delete it out from under the approved roster.
+ */
+async function upsertClassDef ({ classId, name, specialization = '', enabled = true, actor = '' }) {
+  await ensureSchema()
+  const id = String(classId || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  if (!id) return { ok: false, reason: 'no_id', message: 'A class needs an id.' }
+  const label = String(name || '').trim()
+  if (!label) return { ok: false, reason: 'no_name', message: 'A class needs a name.' }
+
+  const existing = await classDef(id)
+  const source = existing ? existing.source : 'custom'
+
+  const r = await db().query(
+    `INSERT INTO axyon_class_defs(class_id,name,specialization,source,enabled,deleted,created_by)
+     VALUES($1,$2,$3,$4,$5,FALSE,$6)
+     ON CONFLICT(class_id) DO UPDATE SET
+       name=EXCLUDED.name,
+       specialization=EXCLUDED.specialization,
+       enabled=EXCLUDED.enabled,
+       deleted=FALSE,
+       updated_at=NOW()
+     RETURNING *`,
+    [id, label, String(specialization || ''), source, !!enabled, String(actor || '')]
+  )
+  return { ok: true, def: r.rows[0] }
+}
+
+/**
+ * Soft-deletes a class definition.
+ *
+ * A class that players are assigned to is NOT hard-deleted: the row is marked
+ * deleted and the players keep their stored class value, so nothing is
+ * silently rewritten. The caller is told how many players are affected.
+ */
+async function deleteClassDef (classId) {
+  await ensureSchema()
+  const id = String(classId || '').trim().toLowerCase()
+  const r = await db().query(
+    'UPDATE axyon_class_defs SET deleted=TRUE, enabled=FALSE, updated_at=NOW() WHERE class_id=$1 RETURNING *',
+    [id]
+  )
+  if (!r.rows[0]) return { ok: false, reason: 'not_found', message: 'No such class definition.' }
+  const held = await db().query('SELECT COUNT(*)::int AS n FROM axyon_players WHERE LOWER(class)=$1', [id])
+  return { ok: true, def: r.rows[0], players: Number(held.rows[0]?.n) || 0 }
+}
+
+async function classMoves ({ classId = null, includeDeleted = false } = {}) {
+  await ensureSchema()
+  const clauses = []
+  const params = []
+  if (classId) { params.push(String(classId).toLowerCase()); clauses.push(`class_id=$${params.length}`) }
+  if (!includeDeleted) clauses.push('deleted=FALSE')
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  return (await db().query(`SELECT * FROM axyon_class_moves ${where} ORDER BY class_id, id`, params)).rows
+}
+
+async function upsertClassMove ({ classId, moveId, name, moveType = 'offensive', damage = null, cost = null, unlock = null, heal = null, ultimate = false, description = '', enabled = true }) {
+  await ensureSchema()
+  const cid = String(classId || '').trim().toLowerCase()
+  const mid = String(moveId || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  if (!cid) return { ok: false, reason: 'no_class', message: 'A move needs a class.' }
+  if (!mid) return { ok: false, reason: 'no_id', message: 'A move needs an id.' }
+  const label = String(name || '').trim()
+  if (!label) return { ok: false, reason: 'no_name', message: 'A move needs a name.' }
+
+  const num = (v) => (v == null || v === '' ? null : (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : null))
+
+  const r = await db().query(
+    `INSERT INTO axyon_class_moves(class_id,move_id,name,move_type,damage,cost,unlock,heal,ultimate,description,enabled)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT(class_id,move_id) DO UPDATE SET
+       name=EXCLUDED.name,
+       move_type=EXCLUDED.move_type,
+       damage=EXCLUDED.damage,
+       cost=EXCLUDED.cost,
+       unlock=EXCLUDED.unlock,
+       heal=EXCLUDED.heal,
+       ultimate=EXCLUDED.ultimate,
+       description=EXCLUDED.description,
+       enabled=EXCLUDED.enabled,
+       deleted=FALSE,
+       updated_at=NOW()
+     RETURNING *`,
+    [cid, mid, label, String(moveType || 'offensive'), num(damage), num(cost), num(unlock), num(heal), !!ultimate, String(description || ''), !!enabled]
+  )
+  return { ok: true, move: r.rows[0] }
+}
+
+async function deleteClassMove (classId, moveId) {
+  await ensureSchema()
+  const r = await db().query(
+    'UPDATE axyon_class_moves SET deleted=TRUE, enabled=FALSE, updated_at=NOW() WHERE class_id=$1 AND move_id=$2 RETURNING *',
+    [String(classId || '').toLowerCase(), String(moveId || '').toLowerCase()]
+  )
+  if (!r.rows[0]) return { ok: false, reason: 'not_found', message: 'No such move.' }
+  return { ok: true, move: r.rows[0] }
+}
+
+/* ------------------------------------------------------- custom room types */
+
+async function roomTypes () {
+  await ensureSchema()
+  return (await db().query('SELECT * FROM axyon_room_types ORDER BY type_id')).rows
+}
+
+async function upsertRoomType ({ typeId, name, minPlayers = 1, defaultMax = 4, hardMax = 50 }) {
+  await ensureSchema()
+  const id = String(typeId || '').trim().toLowerCase().replace(/[^a-z0-9_]+/g, '_')
+  if (!id) return { ok: false, reason: 'no_id', message: 'A room type needs an id.' }
+  const r = await db().query(
+    `INSERT INTO axyon_room_types(type_id,name,min_players,default_max,hard_max)
+     VALUES($1,$2,$3,$4,$5)
+     ON CONFLICT(type_id) DO UPDATE SET
+       name=EXCLUDED.name, min_players=EXCLUDED.min_players,
+       default_max=EXCLUDED.default_max, hard_max=EXCLUDED.hard_max
+     RETURNING *`,
+    [id, String(name || id), Math.max(1, Math.floor(Number(minPlayers) || 1)),
+      Math.max(1, Math.floor(Number(defaultMax) || 4)), Math.max(1, Math.floor(Number(hardMax) || 50))]
+  )
+  return { ok: true, type: r.rows[0] }
+}
+
+async function deleteRoomType (typeId) {
+  await ensureSchema()
+  const r = await db().query('DELETE FROM axyon_room_types WHERE type_id=$1 RETURNING *', [String(typeId || '').toLowerCase()])
+  return r.rows[0] || null
+}
+
 /* --------------------------------------------------------------------- log */
 
 async function log (actor, action, target = '', detail = {}) {
@@ -1505,6 +1729,16 @@ module.exports = {
   classMovesUsedToday,
   consumeClassMove,
   refundClassMove,
+  classDefs,
+  classDef,
+  upsertClassDef,
+  deleteClassDef,
+  classMoves,
+  upsertClassMove,
+  deleteClassMove,
+  roomTypes,
+  upsertRoomType,
+  deleteRoomType,
   log,
   recentLog
 }

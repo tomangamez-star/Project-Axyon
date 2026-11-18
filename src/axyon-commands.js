@@ -1064,6 +1064,130 @@ function createCommands ({ axyon, economy, logger, ai }) {
       ].join('\n'))
     }
 
+    /* ---------------------------------------------------- class CRUD */
+
+    /*
+     * CLASS AND MOVE CRUD
+     * -------------------
+     * The 20 official classes live in code and are never written to. These
+     * subcommands manage the OPERATOR'S layer on top: new classes, overrides
+     * of official ones, and their moves — all in the database, so a change
+     * survives a restart and needs no redeploy.
+     *
+     * Deleting is a SOFT delete. A class that players are assigned to must not
+     * vanish from under them, so the row is flagged and the players keep their
+     * stored class value. The reply says how many players are affected.
+     */
+
+    if (sub === 'create') {
+      const id = String(args[1] || '').trim().toLowerCase()
+      const name = args.slice(2).join(' ').trim()
+      if (!id || !name) {
+        return axyon.send(s, ctx.jid, m, [
+          `\ud83c\udfad *CREATE A CLASS*`, '',
+          `*${P}classadmin create <id> <Name>*`, '',
+          `Example: *${P}classadmin create voidwalker Void Walker*`,
+          '', 'Then add moves with *' + P + 'classadmin addmove <id> <move id> <Name> [damage]*'
+        ].join('\n'))
+      }
+      const res = await store.upsertClassDef({ classId: id, name, actor: ctx.userId })
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+      await store.log(ctx.userId, 'class_create', res.def.class_id, { name })
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\u2705 *CLASS CREATED*', '',
+        `*${res.def.name}* \u2014 id \`${res.def.class_id}\``,
+        `Source: *${res.def.source}*`,
+        '', `Add a move: *${P}classadmin addmove ${res.def.class_id} <move id> <Name> [damage]*`
+      ].join('\n'))
+    }
+
+    if (sub === 'editclass') {
+      const id = String(args[1] || '').trim().toLowerCase()
+      const name = args.slice(2).join(' ').trim()
+      if (!id || !name) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin editclass <id> <New Name>*`)
+      const res = await store.upsertClassDef({ classId: id, name, actor: ctx.userId })
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+      await store.log(ctx.userId, 'class_edit', id, { name })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *CLASS UPDATED*\n\n*${res.def.name}* \u2014 id \`${res.def.class_id}\``)
+    }
+
+    if (sub === 'delclass') {
+      const id = String(args[1] || '').trim().toLowerCase()
+      const confirm = String(args[2] || '').toLowerCase()
+      if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin delclass <id> confirm*`)
+      if (confirm !== 'confirm') {
+        return axyon.send(s, ctx.jid, m, `\u26a0\ufe0f *CONFIRM REQUIRED*\n\nThis removes the class definition *${id}*.\n\nRepeat with:\n*${P}classadmin delclass ${id} confirm*`)
+      }
+      const res = await store.deleteClassDef(id)
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+      await store.log(ctx.userId, 'class_delete', id, { players: res.players })
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\u2705 *CLASS REMOVED*', '',
+        `*${res.def.name}* is no longer offered.`,
+        res.players ? `\u26a0\ufe0f *${res.players}* player(s) still hold it \u2014 their stored class was NOT changed.` : 'No players held it.',
+        '', '> Soft delete: the row is kept so nothing is silently rewritten.'
+      ].join('\n'))
+    }
+
+    if (sub === 'addmove' || sub === 'editmove') {
+      const classId = String(args[1] || '').trim().toLowerCase()
+      const moveId = String(args[2] || '').trim().toLowerCase()
+      const name = args[3] || ''
+      const damage = parseNum(args[4])
+      if (!classId || !moveId || !name) {
+        return axyon.send(s, ctx.jid, m, [
+          `\ud83c\udfad *${sub === 'addmove' ? 'ADD' : 'EDIT'} A MOVE*`, '',
+          `*${P}classadmin ${sub} <class id> <move id> <Name> [damage] [cost] [unlock]*`, '',
+          `Example: *${P}classadmin addmove voidwalker void_rend Void Rend 18 10 5000*`
+        ].join('\n'))
+      }
+      const res = await store.upsertClassMove({
+        classId,
+        moveId,
+        name,
+        damage,
+        cost: parseNum(args[5]),
+        unlock: parseNum(args[6])
+      })
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+      await store.log(ctx.userId, sub === 'addmove' ? 'class_move_add' : 'class_move_edit', `${classId}:${moveId}`, { name, damage })
+      return axyon.send(s, ctx.jid, m, [
+        W, '', `\u2705 *MOVE ${sub === 'addmove' ? 'ADDED' : 'UPDATED'}*`, '',
+        `*${res.move.name}* \u2014 \`${res.move.class_id}:${res.move.move_id}\``,
+        `Damage: *${res.move.damage ?? 'none'}* \u2022 Cost: *${res.move.cost ?? 'none'}* \u2022 Unlock: *${res.move.unlock ?? 'none'}*`
+      ].join('\n'))
+    }
+
+    if (sub === 'delmove') {
+      const classId = String(args[1] || '').trim().toLowerCase()
+      const moveId = String(args[2] || '').trim().toLowerCase()
+      if (!classId || !moveId) return axyon.send(s, ctx.jid, m, `Usage: *${P}classadmin delmove <class id> <move id>*`)
+      const res = await store.deleteClassMove(classId, moveId)
+      if (!res.ok) return axyon.send(s, ctx.jid, m, `\u274c ${res.message}`)
+      await store.log(ctx.userId, 'class_move_delete', `${classId}:${moveId}`)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *MOVE REMOVED*\n\n*${res.move.name}* is no longer offered.\n\n> Soft delete \u2014 the row is kept.`)
+    }
+
+    if (sub === 'custom') {
+      const defs = await store.classDefs()
+      const moves = await store.classMoves()
+      if (!defs.length) {
+        return axyon.send(s, ctx.jid, m, [
+          W, '', '\ud83c\udfad *CUSTOM CLASSES*', '',
+          'None yet.', '',
+          `Create one with *${P}classadmin create <id> <Name>*.`
+        ].join('\n'))
+      }
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '\ud83c\udfad *CUSTOM CLASSES*', '',
+        ...defs.map(d => {
+          const own = moves.filter(mv => mv.class_id === d.class_id)
+          return `\u2022 *${d.name}* \u2014 \`${d.class_id}\` \u2022 ${own.length} move(s) \u2022 ${d.source}${d.enabled ? '' : ' \u2022 DISABLED'}`
+        }),
+        '', `Add a move with *${P}classadmin addmove <class id> <move id> <Name> [damage]*`
+      ].join('\n'))
+    }
+
     return axyon.send(s, ctx.jid, m, [
       `\ud83c\udfad *CLASS ADMIN*`, '',
       `*${P}classadmin list* \u2014 every class`,
@@ -1072,7 +1196,14 @@ function createCommands ({ axyon, economy, logger, ai }) {
       `*${P}classadmin mastery @player <class> <n>* \u2014 set mastery`,
       `*${P}classadmin reset @player <class> confirm* \u2014 wipe mastery`,
       `*${P}classadmin moves @player* \u2014 inspect a player`,
-      `*${P}classadmin balance [key value]* \u2014 view or set balance`
+      `*${P}classadmin balance [key value]* \u2014 view or set balance`,
+      '',
+      `*${P}classadmin create <id> <Name>* \u2014 new class`,
+      `*${P}classadmin editclass <id> <Name>* \u2014 rename a class`,
+      `*${P}classadmin delclass <id> confirm* \u2014 remove a class`,
+      `*${P}classadmin addmove <class> <move> <Name> [dmg] [cost] [unlock]*`,
+      `*${P}classadmin delmove <class> <move>* \u2014 remove a move`,
+      `*${P}classadmin custom* \u2014 list operator classes`
     ].join('\n'))
   })
 

@@ -15,6 +15,7 @@ const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
 const classes = require('./axyon-classes')
+const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
 const fs = require('fs/promises')
 
@@ -50,6 +51,14 @@ const MODES = {
   multiplayer: { name: 'Multiplayer', blurb: 'Several players, individual turns.' },
   party: { name: 'Party', blurb: 'An organised team, 2 or more.' }
 }
+
+/*
+ * SELF-HEAL — a flat 10 HP per use, five uses per combat.
+ *
+ * The implementation note fixes the amount at 10. It is a constant, not a
+ * percentage, so the five uses are worth the same at every level.
+ */
+const SELF_HEAL_HP = 10
 
 const rnd = (n) => Math.floor(Math.random() * n)
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
@@ -113,16 +122,17 @@ function applyProgress (p, { xp = 0, zen = 0, coins = 0 } = {}) {
 /* ------------------------------------------------------------------ combat */
 
 function buildEnemy (stage) {
-  const s = stage || {}
-  return {
-    name: s.name,
-    hp: Number(s.hp) || 60,
-    atk: Number(s.atk) || 5,
-    def: Number(s.def) || 2,
-    xp: Number(s.xp) || 40,
-    zen: Number(s.zen) || 60,
-    boss: !!s.boss
-  }
+  /*
+   * An enemy is now a real NPC: class, rank, grade, mastery and class moves,
+   * derived deterministically from the stage/floor row (see axyon-npc.js).
+   *
+   * The original stat block is preserved exactly — `hp`, `atk`, `def`, `xp`,
+   * `zen` and `boss` are the same numbers as before, so the difficulty of
+   * every existing stage and floor is unchanged. The class identity is added
+   * alongside them, and the NPC's class move goes through the same
+   * `classes.classDamage()` the player's does.
+   */
+  return npc.buildNpc(stage)
 }
 
 function playerHit (p, enemy, mult = 1, bonus = 0) {
@@ -241,6 +251,10 @@ function battleCard (b, p, note = '') {
   const enemyPanel = display.combatantPanel({
     name: e.name,
     type: e.boss ? 'BOSS' : 'MONSTER',
+    rank: e.rank,
+    level: e.level,
+    class: e.className,
+    grade: e.grade,
     hp: Math.max(0, b.enemyHp),
     maxHp: e.hp,
     pe: e.pe != null ? e.pe : undefined,
@@ -639,7 +653,14 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       b.guard = 0.6
       note = '\ud83d\udee1\ufe0f You brace for the counter.'
     } else if (action === 'heal') {
-      const amount = Math.round(p.maxHp * 0.25)
+      /*
+       * FLAT 10 HP, as the implementation note specifies.
+       *
+       * This used to heal 25% of max HP, which scaled with the player and made
+       * the five-per-combat limit worth wildly different amounts at level 1 and
+       * level 80. The note fixes the value at 10, so it is a constant now.
+       */
+      const amount = SELF_HEAL_HP
       b.playerHp = Math.min(p.maxHp, b.playerHp + amount)
       b.healsLeft -= 1
       p.healUses += 1
@@ -717,6 +738,28 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     b.guard = 0
     b.playerHp -= hit
     note += `\n\ud83d\udc79 ${b.enemy.name} answers for *${hit}*.`
+
+    /*
+     * THE NPC'S CLASS MOVE.
+     *
+     * An NPC with a class now actually uses it — otherwise the class, rank,
+     * grade and mastery on its card would be decoration. It fires on a fixed
+     * cadence (every third round) rather than at random, so a fight is
+     * predictable enough to plan around and the player can see it coming.
+     *
+     * The damage comes from `npc.npcMoveDamage()`, which routes through the
+     * SAME `classes.classDamage()` the player's move uses. There is no second
+     * formula, so a rebalance cannot leave the two sides disagreeing.
+     */
+    if (b.enemy.npc && b.enemy.signatureMove && b.turn % 3 === 0) {
+      const move = npc.npcMoveDamage(b.enemy)
+      if (move.damaging && move.final > 0) {
+        b.playerHp -= move.final
+        note += `\n\u2728 ${b.enemy.name} uses *${b.enemy.signature}* for *${move.final}*.`
+      } else if (b.enemy.signature) {
+        note += `\n\u2728 ${b.enemy.name} invokes *${b.enemy.signature}*.`
+      }
+    }
 
     if (b.playerHp <= 0) return finishBattle(sock, m, ctx, p, b, false)
 
