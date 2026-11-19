@@ -7,9 +7,9 @@
  *   admin  Full control. The original owner, any OWNER_NUMBERS, and any number
  *          registered in AXYON_NUMBERS. Can pair accounts, reset sessions,
  *          edit the economy, grant items, change authority.
- *   rhm    Scoped moderation. Can moderate groups, players, stages, floors and
- *          the audit log — but cannot pair/reset WhatsApp sessions, cannot
- *          change authority, and cannot touch the economy limits.
+ *   rhm    Scoped moderation. Can moderate players, stages, floors, modes and
+ *          the audit log — but cannot view or manage group registration,
+ *          pair/reset WhatsApp sessions, change authority or economy limits.
  *   guest  Read-only, non-sensitive. Sees the game content (stages, floors,
  *          modes, shop catalogue, command reference) and nothing that exposes
  *          an account, a phone number, a session or a player's private data.
@@ -50,7 +50,6 @@ const PERMISSIONS = {
   ],
   rhm: [
     'overview.read',
-    'groups.read', 'groups.write',
     'players.read', 'players.write',
     'stages.read', 'stages.write',
     'floors.read', 'floors.write',

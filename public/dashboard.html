@@ -163,43 +163,44 @@
     <div class="screen-head"><p class="eyebrow">REFERENCE</p><h2>Commands &amp; registration</h2><p class="muted">Everything the bot answers to, and the exact steps to get a group working.</p></div>
 
     <div class="panel">
-      <p class="eyebrow">STEP BY STEP</p>
-      <h3>How to register a group</h3>
-      <ol class="steps">
-        <li><b>Add the bot's number to the group.</b> The number is the one you paired on the Pairing screen.</li>
-        <li><b>Make the bot a group admin.</b> Group info &rarr; Members &rarr; tap the bot &rarr; Make group admin. This is required for duel admin promotion, and it lets any admin run <code>!register</code>.</li>
-        <li><b>Send the command in the group:</b> <code>!register</code> &mdash; or <code>!register My Group Name</code> to name it yourself. If you leave the name out, the bot uses the group's own subject.</li>
-        <li><b>The bot replies:</b> <code>&#8984; AXYN CORE</code> then <code>&#9989; GROUP REGISTERED</code>, the group name, and <i>"Architect will now respond here."</i></li>
-        <li><b>Test it:</b> send <code>!ping</code>. You should get <code>&#127923; Pong &mdash; &#8984; AXYN CORE</code>.</li>
-      </ol>
-      <p class="admin-note"><b>Who can run it:</b> AXYON, or any group admin. A normal member gets <i>"&#128737;&#65039; Only AXYON or a group admin can register a group."</i></p>
+      <p class="eyebrow">AXYN CORE &bull; GROUP REGISTRATION</p>
+      <h3>Register a group with AXYON</h3>
+      <p class="muted">Registration is tied to the WhatsApp group JID, never its display name. Only verified AXYON identities can register, change modes, manage features, suspend, reactivate or remove a group. WhatsApp group-admin status does not grant AXYON authority.</p>
+      <div class="admin-scroll"><table class="admin-table"><thead><tr><th>Registration command</th><th>What it enables</th></tr></thead><tbody>
+        <tr><td class="mono">!register group normal</td><td>Original gaming environment: General, Combat, Dungeon, Cards, Social and Economy features enabled by default.</td></tr>
+        <tr><td class="mono">!register group modes</td><td>Official modes registration. Starts with no mode features enabled; AXYON enables each feature individually.</td></tr>
+        <tr><td class="mono">!register group duel</td><td>Duel-only registration. Other systems remain unavailable.</td></tr>
+      </tbody></table></div>
+      <p class="admin-note"><b>Run the command inside the target group.</b> Architect records that group's unique JID. The same player's profile remains available in other registered groups, but access is checked separately in each group.</p>
+    </div>
+
+    <div class="panel">
+      <p class="eyebrow">AXYON MANAGEMENT</p>
+      <h3>Control group access</h3>
+      <p class="muted">These commands are AXYON-only. Run them inside the group being managed, except <code>!register list</code>, which lists the registry.</p>
+      <ul class="steps">
+        <li><code>!register view</code> or <code>!group info</code> &mdash; inspect the current registration.</li>
+        <li><code>!register list</code> &mdash; list registered groups.</li>
+        <li><code>!register mode normal|modes|duel</code> &mdash; change the registration mode.</li>
+        <li><code>!group features</code> &mdash; inspect enabled and available features.</li>
+        <li><code>!group enable combat</code> / <code>!group disable combat</code> &mdash; toggle a feature.</li>
+        <li><code>!group suspend [reason]</code> / <code>!group reactivate</code> &mdash; control group status.</li>
+        <li><code>!group disable</code> / <code>!group enable</code> &mdash; disable or restore all group access.</li>
+        <li><code>!group remove</code> &mdash; remove the group from active registration without deleting player accounts.</li>
+      </ul>
+      <p class="admin-note"><b>Feature routing:</b> <code>!fight</code> and <code>!stages</code> belong to Combat; <code>!floor</code>, <code>!dungeon</code> and <code>!party</code> belong to Dungeon; <code>!duel</code> belongs to Duel; card commands belong to Cards. Player game modes no longer control command access. <code>!mode</code> has been removed.</p>
     </div>
 
     <div class="panel">
       <p class="eyebrow">TROUBLESHOOTING</p>
-      <h3>If the bot says the group isn't registered</h3>
-      <p class="muted">An unregistered group is silent for ordinary chat by design. But if you send a <b>command</b> in one, the bot now answers once with the registration steps instead of ignoring you.</p>
+      <h3>When a command is unavailable</h3>
+      <p class="muted">Architect checks group registration status and the feature assigned to the command. A player profile alone does not grant access in an unregistered group.</p>
       <ol class="steps">
-        <li><b>Send <code>!register</code> in the group.</b> That is the fix in almost every case.</li>
-        <li><b>If it says "Only AXYON or a group admin can register a group"</b> &mdash; you are a normal member. Ask a group admin to send <code>!register</code>, or send it from the AXYON number.</li>
-        <li><b>If it says "Run this inside the group you want to register"</b> &mdash; you sent it in a DM. Registration is per group, so it has to be sent inside the group.</li>
-        <li><b>If it still stays silent</b> &mdash; open the <b>Groups</b> screen here. The group may be <i>paused</i>. Press <b>Resume</b>. If it is not listed at all, the registration never landed: send <code>!register</code> again.</li>
-        <li><b>If nothing at all works</b> &mdash; check the <b>Overview</b> screen. If the account shows <i>Disconnected</i>, press <b>Reconnect</b> on the Pairing screen.</li>
+        <li><b>Access denied:</b> ask an authorized AXYON operator to register the group with <code>!register group normal</code>, <code>modes</code> or <code>duel</code>.</li>
+        <li><b>Feature unavailable:</b> AXYON must enable the relevant feature with <code>!group enable &lt;feature&gt;</code>.</li>
+        <li><b>Group suspended or disabled:</b> only AXYON can reactivate the group.</li>
+        <li><b>Dungeon or Combat command:</b> check that the group has the matching <code>dungeon</code> or <code>combat</code> feature. Player-level <code>!mode</code> switching is no longer used.</li>
       </ol>
-    </div>
-
-    <div class="panel">
-      <p class="eyebrow">GAME MODES</p>
-      <h3>Four modes, and what runs in each</h3>
-      <p class="muted">A command that belongs to another mode will not run. It tells you which mode it belongs to and how to switch. Switch with <code>!mode &lt;name&gt;</code>.</p>
-      <div class="admin-scroll"><table class="admin-table"><thead><tr><th>Mode</th><th>Commands</th></tr></thead><tbody>
-        <tr><td><b>&#9876; Combat</b><br><span class="muted">Monsters, other characters, CPU opponents</span></td><td class="mono">!stages &middot; !fight &middot; !battle &middot; !attack &middot; !guard &middot; !heal &middot; !class &middot; !carduse &middot; !retreat</td></tr>
-        <tr><td><b>&#129354; Duels</b><br><span class="muted">PvP and card fighting &mdash; registered groups only</span></td><td class="mono">!duel &middot; !cards &middot; !claim</td></tr>
-        <tr><td><b>&#127961; Dungeon</b><br><span class="muted">Floors, parties, gates</span></td><td class="mono">!dungeon &middot; !floor &middot; !party</td></tr>
-        <tr><td><b>&#128172; General</b><br><span class="muted">Social, economy, media, management</span></td><td class="mono">!marry &middot; !requests &middot; !accept &middot; !decline &middot; !divorce &middot; !zen &middot; !daily &middot; !play &middot; !top &middot; !register &middot; !stage &middot; !flooradmin &middot; !modes &middot; !visual &middot; !rhm &middot; !numbers &middot; !prefix &middot; !reset &middot; !grantcard</td></tr>
-        <tr><td><b>&#128722; Every mode</b><br><span class="muted">Never gated</span></td><td class="mono">!shop &middot; !buy &middot; !inventory &middot; !use &middot; !mode &middot; !help &middot; !ping &middot; !arise &middot; !profile &middot; !ai</td></tr>
-      </tbody></table></div>
-      <p class="admin-note"><b>Duels need a registered group.</b> In a DM, or in a group that was never registered, <code>!duel</code> and <code>!cards</code> are refused with a reason rather than ignored.</p>
     </div>
 
     <div class="panel">

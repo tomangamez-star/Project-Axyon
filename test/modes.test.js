@@ -10,7 +10,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 
 const { createAxyon } = require('../src/axyon-rpg')
-const { createCommands, GAME_MODES, modeOf, MODE_FREE } = require('../src/axyon-commands')
+const { createCommands } = require('../src/axyon-commands')
 const items = require('../src/axyon-items')
 const T = require('../src/theme')
 
@@ -35,13 +35,13 @@ function fakeSock () {
  * The store is stubbed rather than hit for real because these tests are about
  * routing and gating; the database layer has its own coverage in e2e.js.
  */
-function harness ({ player = null, group = null, battle = null, inv = {} } = {}) {
+function harness ({ player = null, group = { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'] }, battle = null, inv = {} } = {}) {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
   const state = {
     player: player ? { ...player } : null,
-    group: group ? { game_mode: player?.gameMode || 'general', ...group } : null,
+    group,
     battle,
     inv: { ...inv },
     modes: []
@@ -49,8 +49,8 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
   const store = require('../src/axyon-store')
   const saved = {}
   for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
-    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'setGameMode', 'settings',
-    'axyonNumberMode', 'roleOf', 'partnerOf', 'setGroupMode']) {
+    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'settings', 'registerGroup', 'equippedCards', 'updateGroupFeatures',
+    'axyonNumberMode', 'roleOf', 'partnerOf']) {
     saved[k] = store[k]
   }
   store.player = async () => state.player
@@ -72,8 +72,9 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
     state.inv[k] -= 1
     return state.inv[k]
   }
-  store.setGameMode = async (u, m) => { state.player.gameMode = m; state.modes.push(m); return m }
-  store.setGroupMode = async (jid, m) => { if (state.group) state.group.game_mode = m; state.modes.push(m); return state.group }
+  store.registerGroup = async (jid, name, by, mode) => { state.registered = { group_jid: jid, name, registered_by: by, registration_mode: mode, status: 'ACTIVE', enabled: true, registration_id: 'AX-TEST', features: mode === 'duel' ? ['duel'] : [] }; state.group = state.registered; return state.registered }
+  store.equippedCards = async () => []
+  store.updateGroupFeatures = async (jid, features) => { state.group.features = [...features]; return state.group }
 
   const restore = () => Object.assign(store, saved)
 
@@ -83,9 +84,10 @@ function harness ({ player = null, group = null, battle = null, inv = {} } = {})
    * passes. That is what makes these tests meaningful: they go through the same
    * context construction, registration gate and mode gate the bot uses.
    */
-  const send = async (text, { jid = '123@g.us' } = {}) => {
+  const send = async (text, { jid = '123@g.us', asAxyon = false } = {}) => {
     const content = { conversation: text }
-    const m = { key: { remoteJid: jid, fromMe: false, id: 'x' }, message: content }
+    const participant = asAxyon ? '2349110799878@s.whatsapp.net' : '11111111111@s.whatsapp.net'
+    const m = { key: { remoteJid: jid, participant, fromMe: false, id: 'x' }, message: content }
     const handled = await c.handle(sock, m, content)
     return { handled, out: sock.sent.map(s => s.text || s.caption || '').join('\n') }
   }
@@ -97,7 +99,7 @@ const basePlayer = () => ({
   userId: 'u1', name: 'Montai', level: 12, rank: 'D', grade: 1,
   class: 'Fighter', hp: 100, maxHp: 150, powerEnergy: 40, maxPowerEnergy: 90,
   xp: 30, zen: 5000, coins: 3, atk: 20, def: 10, spd: 8,
-  stage: 1, wins: 4, losses: 2, gameMode: 'general'
+  stage: 1, wins: 4, losses: 2
 })
 
 /* ------------------------------------------------------- 1. profile card */
@@ -179,108 +181,112 @@ test('!play never presents a preview as the full song', () => {
   assert.match(src, /is_streamable/)
 })
 
-/* --------------------------------------------------------- 3. mode gating */
+/* ------------------------------------------------------ 3. group feature gate */
 
-test('every command maps to exactly one mode, or to none', () => {
-  const h = harness({ player: basePlayer() })
-  const seen = new Map()
-  for (const cmd of h.a.COMMANDS) {
-    const owner = modeOf(cmd.name, cmd.section)
-    if (owner === null) continue
-    assert.ok(GAME_MODES[owner], `${cmd.name} maps to unknown mode ${owner}`)
-    assert.ok(!seen.has(cmd.name), `${cmd.name} is claimed by two modes`)
-    seen.set(cmd.name, owner)
-  }
+test('!mode has been removed from the command registry and help', async () => {
+  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['general'] } })
+  const result = await h.send('!mode combat')
+  const help = await h.send('!help')
   h.restore()
-  assert.ok(seen.size > 20, 'suspiciously few gated commands')
+  assert.strictEqual(result.handled, false)
+  assert.doesNotMatch(help.out, /!mode\b/)
 })
 
-test('a command from another mode does not run and names its mode', async () => {
-  const h = harness({ player: basePlayer(), group: { jid: '123@g.us' } })
-  /* Player is in general mode; party management remains dungeon-mode gated. */
-  const r = await h.send('!party')
+test('dungeon commands are routed by group feature, not player mode', async () => {
+  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['dungeon'] } })
+  const r = await h.send('!floor')
   h.restore()
   assert.strictEqual(r.handled, true)
-  assert.match(r.out, /WRONG MODE/)
-  assert.match(r.out, /Dungeon/)
-  assert.match(r.out, /!mode dungeon/)
+  assert.doesNotMatch(r.out, /WRONG MODE/)
+  assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
 })
 
-test('switching mode makes that mode\'s commands run', async () => {
-  const h = harness({ player: basePlayer(), group: { jid: '123@g.us' } })
-  const sw = await h.send('!mode combat')
-  assert.match(sw.out, /COMBAT MODE/)
-  assert.strictEqual(h.state.group.game_mode, 'combat')
+test('combat commands are blocked when the group has not enabled combat', async () => {
+  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['dungeon'] } })
+  const r = await h.send('!fight')
+  h.restore()
+  assert.strictEqual(r.handled, true)
+  assert.match(r.out, /FEATURE UNAVAILABLE/)
+  assert.match(r.out, /combat/i)
+})
 
-  /* Battle actions are now available without mode switching, but still validate state. */
+test('shared battle actions still work in a Dungeon-only group', async () => {
+  const h = harness({
+    player: basePlayer(),
+    group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['dungeon'] },
+    battle: { mode: 'floor', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50, enemyHp: 80, playerHp: 100, enemy: { name: 'Floor Guardian', hp: 80, atk: 4, def: 1, xp: 10, zen: 10 } }
+  })
   const r = await h.send('!attack')
   h.restore()
-  assert.ok(!/WRONG MODE/.test(r.out), `still gated after switching: ${r.out.slice(0, 120)}`)
+  assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
+  assert.ok(h.state.battle === null || h.state.battle.enemyHp < 80, 'Dungeon battle action did not execute')
 })
 
-test('each mode runs only its own commands', async () => {
-  const cases = [
-    { mode: 'combat', allowed: '!stages', blocked: '!party' },
-    { mode: 'dungeon', allowed: '!dungeon', blocked: '!zen' },
-    { mode: 'general', allowed: '!zen', blocked: '!party' }
-  ]
-  for (const c of cases) {
-    const h = harness({ player: { ...basePlayer(), gameMode: c.mode }, group: { jid: '123@g.us' } })
-    const ok = await h.send(c.allowed)
-    const no = await h.send(c.blocked)
-    h.restore()
-    assert.ok(!/WRONG MODE/.test(ok.out), `${c.allowed} wrongly blocked in ${c.mode}`)
-    assert.match(no.out, /WRONG MODE/, `${c.blocked} wrongly allowed in ${c.mode}`)
-  }
-})
-
-test('!mode with no argument lists all four modes and marks the current one', async () => {
-  const h = harness({ player: { ...basePlayer(), gameMode: 'dungeon' } })
-  const r = await h.send('!mode')
+test('suspended groups cannot use protected commands', async () => {
+  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: false, status: 'SUSPENDED', features: ['dungeon'] } })
+  const r = await h.send('!floor')
   h.restore()
-  for (const m of ['Combat', 'Duels', 'Dungeon', 'General']) assert.match(r.out, new RegExp(m))
-  assert.match(r.out, /▶️.*Dungeon/)
+  assert.match(r.out, /GROUP SUSPENDED/)
 })
 
-/* ------------------------------------------- 4. duel registration gate */
-
-test('duel commands are refused outside a registered group', async () => {
-  const h = harness({ player: { ...basePlayer(), gameMode: 'duels' }, group: null })
-  const r = await h.send('!duel @someone')
-  h.restore()
-  assert.strictEqual(r.handled, true)
-  /* The refusal is rendered in the bot's display font, so assert on the plain
-   * sentence underneath it rather than the stylised heading. */
-  assert.match(r.out, /!register/, 'refusal did not tell the player how to register')
-  assert.match(r.out, /admin needs to send/i)
+test('duel commands require a group with the duel feature enabled', async () => {
+  const blocked = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: [] } })
+  const no = await blocked.send('!duel @someone')
+  blocked.restore()
+  assert.match(no.out, /FEATURE UNAVAILABLE/)
+  const allowed = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['duel'] } })
+  const yes = await allowed.send('!duel @someone')
+  allowed.restore()
+  assert.doesNotMatch(yes.out, /FEATURE UNAVAILABLE/)
 })
 
-test('duel commands are refused in a DM', async () => {
-  const h = harness({ player: { ...basePlayer(), gameMode: 'duels' }, group: null })
-  const r = await h.send('!duel @someone', { jid: '999@s.whatsapp.net', isGroup: false })
+test('unregistered groups are denied before protected systems run', async () => {
+  const h = harness({ player: basePlayer(), group: null })
+  const r = await h.send('!floor')
   h.restore()
-  assert.match(r.out, /GROUPS ONLY/)
+  assert.match(r.out, /ACCESS DENIED/)
+  assert.match(r.out, /AXYN CORE/)
 })
 
-test('duel commands pass the gate inside a registered group', async () => {
-  const h = harness({ player: { ...basePlayer(), gameMode: 'duels' }, group: { jid: '123@g.us' } })
-  const r = await h.send('!duel @someone')
+test('only AXYON can register the current group with !register group duel', async () => {
+  const denied = harness({ player: basePlayer(), group: null })
+  const no = await denied.send('!register group duel')
+  denied.restore()
+  assert.match(no.out, /ACCESS DENIED/)
+
+  const allowed = harness({ player: basePlayer(), group: null })
+  const yes = await allowed.send('!register group duel', { asAxyon: true })
+  assert.match(yes.out, /GROUP REGISTERED/)
+  assert.match(yes.out, /DUEL/)
+  assert.strictEqual(allowed.state.registered.group_jid, '123@g.us')
+  assert.strictEqual(allowed.state.registered.registration_mode, 'duel')
+  assert.deepStrictEqual(allowed.state.registered.features, ['duel'])
+  allowed.restore()
+})
+
+test('Modes registration starts empty and AXYON can enable individual features', async () => {
+  const h = harness({ player: basePlayer(), group: null })
+  const registered = await h.send('!register group modes', { asAxyon: true })
+  assert.match(registered.out, /MODES/)
+  assert.deepStrictEqual(h.state.group.features, [])
+  const enabled = await h.send('!group enable combat', { asAxyon: true })
+  assert.match(enabled.out, /combat.*enabled/i)
+  assert.deepStrictEqual(h.state.group.features, ['combat'])
   h.restore()
-  assert.ok(!/GROUPS ONLY/.test(r.out), `duel wrongly refused in a registered group: ${r.out.slice(0, 120)}`)
 })
 
 /* ------------------------------------- 5. inventory and shop in all modes */
 
-test('shop and inventory are mode-free', () => {
-  for (const name of ['shop', 'buy', 'inventory', 'use']) {
-    assert.ok(MODE_FREE.has(name), `${name} is not mode-free`)
-    assert.strictEqual(modeOf(name, 'shop'), null, `${name} is gated`)
-  }
+test('shop and inventory commands remain registered without player-mode gates', () => {
+  const h = harness({ player: basePlayer() })
+  for (const name of ['shop', 'buy', 'inventory', 'use']) assert.ok(h.c.BY_NAME.has(name), `${name} is missing`)
+  assert.ok(!h.c.BY_NAME.has('mode'), '!mode should not be registered')
+  h.restore()
 })
 
-test('shop and inventory work in all four modes', async () => {
-  for (const mode of Object.keys(GAME_MODES)) {
-    const h = harness({ player: { ...basePlayer(), gameMode: mode }, inv: { potion: 2 } })
+test('shop and inventory work as shared commands', async () => {
+  for (const mode of ['legacy-combat', 'legacy-duels', 'legacy-dungeon', 'legacy-general']) {
+    const h = harness({ player: { ...basePlayer()}, inv: { potion: 2 } })
     const shop = await h.send('!shop')
     const inv = await h.send('!inventory')
     h.restore()
@@ -291,9 +297,9 @@ test('shop and inventory work in all four modes', async () => {
   }
 })
 
-test('buying an item deducts Zen and adds stock, in every mode', async () => {
-  for (const mode of Object.keys(GAME_MODES)) {
-    const h = harness({ player: { ...basePlayer(), gameMode: mode, zen: 1000 } })
+test('buying an item deducts Zen and adds stock', async () => {
+  for (const mode of ['legacy-combat', 'legacy-duels', 'legacy-dungeon', 'legacy-general']) {
+    const h = harness({ player: { ...basePlayer(), zen: 1000 } })
     const r = await h.send('!buy potion')
     h.restore()
     assert.match(r.out, /PURCHASED/, `!buy failed in ${mode}`)

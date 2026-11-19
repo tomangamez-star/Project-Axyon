@@ -7,10 +7,12 @@ The bot has exactly **one** command system: **AXYON**, prefix `!`, registration 
 ## Quick start
 
 ```
-!arise          register and awaken
-!help           every command, grouped by section
-!stages         pick a fight
-!profile        your rank, grade, stats and energy
+!register group normal   AXYON: authorize this WhatsApp group
+!arise                   register your player profile
+!help                    every command, grouped by section
+!stages                  view Combat stages
+!floor                   enter the Dungeon
+!profile                 your rank, grade, stats and energy
 ```
 
 ## What is in the bot
@@ -23,7 +25,9 @@ The bot has exactly **one** command system: **AXYON**, prefix `!`, registration 
 ## AXYON — the RPG
 
 - **Prefix** is `!` by default. AXYON can change it with `!prefix <symbol>`; a group can override it.
-- **Registration** is `!arise`. It is the only way in, and it is the only command that works before registering.
+- **Group registration** is controlled only by AXYON and keyed by the WhatsApp group's JID. Register a group with `!register group normal`, `!register group modes` or `!register group duel`.
+- **Player registration** is separate: each person uses `!arise` to create their saved RPG profile.
+- **Group feature routing** replaces player-level `!mode`: Combat commands require the `combat` feature, Dungeon commands require `dungeon`, Duel commands require `duel`, and so on.
 - **Ranks** run `E → D → C → B → A → S → SS → SSS → Monarch`, advancing every 10 levels.
 - **Grades** advance every 10 levels and grant **+15 HP** and **+4 ATK** each.
 - **Power Energy** runs **50 → 220** across the ranks; a rank-up restores it in full.
@@ -46,14 +50,11 @@ Most of the bot is plain commands. Buttons appear in exactly two places, where t
 
 Every other screen is text.
 
-### Authority
+### Authority and group registration
 
-| Identity | Function |
-|---|---|
-| **AXYON Mode** | Owner authority and management access |
-| **PLAYER Mode** | Normal saved player progression and statistics |
+Only verified AXYON identities can register groups or change their registration modes, statuses and features. WhatsApp group-admin status does not grant AXYON authority. `!register group modes` starts with no mode features enabled; AXYON can enable individual features with `!group enable <feature>`. `!register group duel` authorizes the Duel feature only.
 
-Switching to PLAYER mode does **not** remove AXYON's management authority. Extra numbers are held in `AXYON_NUMBERS` (`!numbers add|remove|list`) so authority survives losing the owner's phone. **RHM** is a scoped management role that never overrides AXYON.
+Group management commands include `!register view`, `!register list`, `!register mode <normal|modes|duel>`, `!group info`, `!group features`, `!group enable|disable <feature>`, `!group suspend`, `!group reactivate`, and `!group remove`. Every registration mutation is audited. Removing a group does not delete player profiles. Extra AXYON numbers are held in `AXYON_NUMBERS` (`!numbers add|remove|list`) so authority survives losing the owner's phone. **RHM** is a scoped management role that never overrides AXYON. `!mode` has been removed; command access is group-based.
 
 ## Admin panel
 
@@ -64,7 +65,7 @@ Open `/dashboard` and sign in with your **WhatsApp number**. AXYON sends a 7- or
 | Level | Who | Can do |
 |---|---|---|
 | **admin** | The owner, `OWNER_NUMBERS`, and every number in `AXYON_NUMBERS` | Everything: pairing, sessions, economy, authority, settings |
-| **rhm** | Numbers granted RHM (`!rhm add`) | Moderate groups, players, stages, floors, modes, visuals, audit log, feedback |
+| **rhm** | Numbers granted RHM (`!rhm add`) | Moderate players, stages, floors, modes, visuals, audit log and feedback; cannot view or manage group registration |
 | **guest** | Any other number | Read-only game content: stages, floors, modes, shop catalogue, command list |
 
 A guest never sees a phone number, a session, a player record, an authority list or the audit log. The permission table lives in `src/access.js`; every route names the permission it needs, so adding a level is one table edit.
@@ -79,7 +80,7 @@ The session token is kept in `localStorage` as well as an HttpOnly cookie, and t
 
 | Tab | What it does |
 |---|---|
-| **Groups** | Pause, resume, set a per-group prefix, unregister |
+| **Groups** | View registration mode/features, pause, resume, set a per-group prefix, remove |
 | **Players** | Heal, adjust Zen, clear a stuck battle, reset progression |
 | **Stages** | Add, edit, lock, unlock, remove (originals are protected) |
 | **Floors** | Add, edit, lock, unlock, remove dungeon floors |
@@ -98,7 +99,7 @@ Failures surface in a persistent banner as well as a toast — a button never fa
 
 YouTube refuses anonymous requests from datacenter IPs with *"Sign in to confirm you're not a bot"*. Three things are needed, and all three are wired in `src/music.js`:
 
-1. **Cookies** — `data/cookies.txt` is committed (the repo is private). Override with `YTDLP_COOKIES_FILE` if you ever need to rotate it.
+1. **Cookies** — provide a cookie jar through the `YTDLP_COOKIES_FILE` environment variable or an external secret mount. Never commit WhatsApp or browser cookies to the repository.
 2. **A JavaScript runtime** — yt-dlp must solve YouTube's player challenge or it reports *"Only images are available for download"*. **Deno** is installed by `render-build.sh` and the `Dockerfile`; Node 20 is reported as unsupported by the solver.
 3. **The `mweb` player client** — the default `web` client returns formats that 403 on the media fetch.
 
@@ -114,7 +115,7 @@ If YouTube still refuses, the Audius fallback serves full tracks. A missing Deno
 | `WA_SESSION_ID` | Primary session id (default `architect-primary`). |
 | `WA_MAX_SESSIONS` | Maximum paired accounts (default `5`). |
 | `DASHBOARD_SESSION_HOURS` | How long a dashboard login lasts (default `720`). |
-| `YTDLP_COOKIES_FILE` | Optional override for the committed YouTube cookie jar. |
+| `YTDLP_COOKIES_FILE` | Optional path to an externally managed YouTube cookie jar. |
 
 ## Development
 

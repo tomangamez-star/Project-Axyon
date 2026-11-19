@@ -3,17 +3,16 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const sharp = require('sharp')
-const { MODE_FREE, modeOf } = require('../src/axyon-commands')
+const { createCommands } = require('../src/axyon-commands')
+const { createAxyon } = require('../src/axyon-rpg')
 const spawn = require('../src/card-spawn')
 const artwork = require('../src/card-artwork')
 const oldGen = require('../src/card-renderers/special-hunt-card')
 
-test('card collection, card management and drop commands are mode-free', () => {
-  for (const name of ['claim', 'spawncard', 'card', 'cards', 'cardadmin']) assert.equal(MODE_FREE.has(name), true)
-  assert.equal(modeOf('claim', 'cards'), null)
-  assert.equal(modeOf('card', 'cards'), null)
-  assert.equal(modeOf('cardadmin', 'management'), null)
-  assert.equal(modeOf('spawncard', 'management'), null)
+test('card collection, management and drop commands remain registered', () => {
+  const router = createCommands({ axyon: createAxyon({}) })
+  for (const name of ['claim', 'spawncard', 'card', 'cards', 'cardadmin']) assert.equal(router.BY_NAME.has(name), true)
+  assert.equal(router.BY_NAME.has('mode'), false)
 })
 
 test('automatic card spawn interval remains six hours and new drops expire after 30 days by default', () => {

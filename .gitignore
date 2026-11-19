@@ -7,5 +7,5 @@ sessions/
 npm-debug.log*
 documents/
 
-# Local yt-dlp browser/session cookies contain authentication tokens.
+# WhatsApp session cookies / exported credentials
 data/cookies.txt

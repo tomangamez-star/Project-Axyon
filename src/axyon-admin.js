@@ -12,7 +12,6 @@
  */
 const store = require('./axyon-store')
 const items = require('./axyon-items')
-const { GAME_MODES } = require('./axyon-commands')
 
 const MODES = ['duel', 'solo', 'multiplayer', 'party']
 
@@ -42,9 +41,14 @@ function createAxyonAdmin ({ logger }) {
         jid: g.group_jid,
         name: g.name,
         enabled: g.enabled,
+        status: g.status || (g.enabled ? 'ACTIVE' : 'DISABLED'),
+        registrationId: g.registration_id,
+        registrationMode: g.registration_mode || 'normal',
+        features: Array.isArray(g.features) ? g.features : [],
         prefix: g.prefix,
         registeredBy: g.registered_by,
-        createdAt: g.created_at
+        registeredAt: g.registered_at || g.created_at,
+        lastActivity: g.last_activity
       })),
       players: players.map(p => ({
         userId: p.userId,
@@ -80,7 +84,6 @@ function createAxyonAdmin ({ logger }) {
       catalogue: items.catalogue().map(x => ({
         key: x.key, name: x.name, kind: x.kind, price: x.price, desc: x.desc
       })),
-      gameModes: Object.entries(GAME_MODES).map(([key, m]) => ({ key, name: m.name, blurb: m.blurb })),
       log: log.map(l => ({
         id: l.id, actor: l.actor, action: l.action, target: l.target,
         detail: l.detail, at: l.created_at
@@ -184,15 +187,6 @@ function createAxyonAdmin ({ logger }) {
         await store.addItem(input.userId, entry.key, 1)
         await store.log(actor, 'admin_grant_ability', input.userId, { item: entry.key })
         return { ok: true, message: `Granted the ability ${entry.name}.` }
-      }
-      case 'player-mode': {
-        const mode = String(input.mode || '').toLowerCase()
-        if (!GAME_MODES[mode]) return { ok: false, message: 'Unknown game mode.' }
-        const p = await store.player(input.userId)
-        if (!p) return { ok: false, message: 'Player not found.' }
-        await store.setGameMode(input.userId, mode)
-        await store.log(actor, 'admin_player_mode', input.userId, { mode })
-        return { ok: true, message: `Moved to ${GAME_MODES[mode].name} mode.` }
       }
 
       /* ---------------------------------------------------------- settings */

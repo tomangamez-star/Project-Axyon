@@ -93,9 +93,26 @@ async function ensureSchema () {
       registered_by TEXT NOT NULL DEFAULT '',
       enabled BOOLEAN NOT NULL DEFAULT TRUE,
       prefix TEXT,
-      game_mode TEXT NOT NULL DEFAULT 'general',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      registration_id TEXT,
+      registration_mode TEXT NOT NULL DEFAULT 'normal',
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      features JSONB NOT NULL DEFAULT '[]'::jsonb,
+      suspension_reason TEXT,
+      suspended_at TIMESTAMPTZ,
+      registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_activity TIMESTAMPTZ);
+
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS registration_id TEXT;
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS registration_mode TEXT NOT NULL DEFAULT 'normal';
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ACTIVE';
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS features JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS suspension_reason TEXT;
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS last_activity TIMESTAMPTZ;
+    UPDATE axyon_groups SET features='[\"general\",\"combat\",\"dungeon\",\"cards\",\"social\",\"economy\",\"casino\"]'::jsonb WHERE registration_id IS NULL AND registration_mode='normal' AND features='[]'::jsonb;
 
     CREATE TABLE IF NOT EXISTS axyon_players(
       user_id TEXT PRIMARY KEY,
@@ -426,16 +443,6 @@ async function ensureSchema () {
     CREATE INDEX IF NOT EXISTS axyon_log_created ON axyon_log(created_at DESC);
     CREATE INDEX IF NOT EXISTS axyon_class_mastery_user ON axyon_class_mastery(user_id);
   `)
-  /*
-   * MIGRATION — the active game mode.
-   *
-   * `axyon_players` already exists on a live deployment, so the column is added
-   * with ADD COLUMN IF NOT EXISTS rather than being folded into the CREATE
-   * above. Existing players default to `general`, which is the mode that holds
-   * the social and economy commands they were already using.
-   */
-  await db().query("ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'general'")
-  await db().query("ALTER TABLE axyon_groups ADD COLUMN IF NOT EXISTS game_mode TEXT NOT NULL DEFAULT 'general'")
   for (const s of ORIGINAL_STAGES) {
     await db().query(
       `INSERT INTO axyon_stages(key,name,ordinal,original,hp,atk,def,xp,zen)
@@ -514,23 +521,74 @@ async function setSettings (patch = {}) {
 
 /* ------------------------------------------------------------------ groups */
 
-async function registerGroup (jid, name, by) {
+const GROUP_MODES = Object.freeze({
+  normal: ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino'],
+  modes: [],
+  duel: ['duel']
+})
+
+function groupRegistrationId () {
+  return `AX-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`
+}
+
+async function registerGroup (jid, name, by, registrationMode = 'normal', features = null) {
   await ensureSchema()
+  const mode = String(registrationMode || 'normal').toLowerCase()
+  if (!Object.hasOwn(GROUP_MODES, mode)) throw new Error(`Unknown group registration mode: ${mode}`)
+  const enabledFeatures = Array.isArray(features) ? features : GROUP_MODES[mode]
   const r = await db().query(
-    `INSERT INTO axyon_groups(group_jid,name,registered_by,enabled) VALUES($1,$2,$3,TRUE)
-     ON CONFLICT(group_jid) DO UPDATE SET name=EXCLUDED.name,enabled=TRUE,updated_at=NOW()
+    `INSERT INTO axyon_groups(group_jid,name,registered_by,enabled,registration_id,registration_mode,status,features,registered_at)
+     VALUES($1,$2,$3,TRUE,$4,$5,'ACTIVE',$6::jsonb,NOW())
+     ON CONFLICT(group_jid) DO UPDATE SET name=EXCLUDED.name,registered_by=EXCLUDED.registered_by,
+       enabled=TRUE,registration_id=CASE WHEN axyon_groups.status='REMOVED' THEN EXCLUDED.registration_id ELSE COALESCE(axyon_groups.registration_id,EXCLUDED.registration_id) END,
+       registration_mode=EXCLUDED.registration_mode,status='ACTIVE',features=EXCLUDED.features,
+       suspension_reason=NULL,suspended_at=NULL,registered_at=CASE WHEN axyon_groups.status='REMOVED' THEN NOW() ELSE axyon_groups.registered_at END,updated_at=NOW()
      RETURNING *`,
-    [jid, name || '', by || '']
+    [jid, name || '', by || '', groupRegistrationId(), mode, JSON.stringify(enabledFeatures)]
   )
   cache.invalidate(`group:${jid}`)
   return r.rows[0]
 }
 
+async function updateGroupMode (jid, mode) {
+  await ensureSchema()
+  mode = String(mode || '').toLowerCase()
+  if (!Object.hasOwn(GROUP_MODES, mode)) throw new Error(`Unknown group registration mode: ${mode}`)
+  const r = await db().query(
+    `UPDATE axyon_groups SET registration_mode=$2,features=$3::jsonb,updated_at=NOW()
+     WHERE group_jid=$1 RETURNING *`, [jid, mode, JSON.stringify(GROUP_MODES[mode])]
+  )
+  cache.invalidate(`group:${jid}`)
+  return r.rows[0] || null
+}
+
+async function updateGroupFeatures (jid, features) {
+  await ensureSchema()
+  const clean = [...new Set((Array.isArray(features) ? features : []).map(x => String(x).toLowerCase()).filter(Boolean))]
+  const r = await db().query('UPDATE axyon_groups SET features=$2::jsonb,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, JSON.stringify(clean)])
+  cache.invalidate(`group:${jid}`)
+  return r.rows[0] || null
+}
+
+async function updateGroupStatus (jid, status, reason = '') {
+  await ensureSchema()
+  const next = String(status || '').toUpperCase()
+  if (!['ACTIVE', 'SUSPENDED', 'DISABLED'].includes(next)) throw new Error('Invalid group status')
+  const r = await db().query(
+    `UPDATE axyon_groups SET status=$2,enabled=($2='ACTIVE'),
+      suspension_reason=CASE WHEN $2='SUSPENDED' THEN NULLIF($3,'') ELSE NULL END,
+      suspended_at=CASE WHEN $2='SUSPENDED' THEN NOW() ELSE NULL END,updated_at=NOW()
+     WHERE group_jid=$1 RETURNING *`, [jid, next, String(reason || '')]
+  )
+  cache.invalidate(`group:${jid}`)
+  return r.rows[0] || null
+}
+
 async function unregisterGroup (jid) {
   await ensureSchema()
-  const r = await db().query('DELETE FROM axyon_groups WHERE group_jid=$1', [jid])
+  const r = await db().query("UPDATE axyon_groups SET status='REMOVED',enabled=FALSE,updated_at=NOW() WHERE group_jid=$1 RETURNING *", [jid])
   cache.invalidate(`group:${jid}`)
-  return r.rowCount > 0
+  return r.rows[0] || null
 }
 
 async function group (jid) {
@@ -545,9 +603,15 @@ async function groups () {
   return (await db().query('SELECT * FROM axyon_groups ORDER BY created_at DESC')).rows
 }
 
+async function touchGroupActivity (jid) {
+  await ensureSchema()
+  await db().query("UPDATE axyon_groups SET last_activity=NOW() WHERE group_jid=$1 AND status <> 'REMOVED'", [jid])
+  cache.invalidate(`group:${jid}`)
+}
+
 async function setGroupEnabled (jid, enabled) {
   await ensureSchema()
-  const r = await db().query('UPDATE axyon_groups SET enabled=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, !!enabled])
+  const r = await db().query("UPDATE axyon_groups SET enabled=$2,status=CASE WHEN $2 THEN 'ACTIVE' ELSE 'DISABLED' END,updated_at=NOW() WHERE group_jid=$1 AND status <> 'REMOVED' RETURNING *", [jid, !!enabled])
   cache.invalidate(`group:${jid}`)
   return r.rows[0] || null
 }
@@ -555,16 +619,6 @@ async function setGroupEnabled (jid, enabled) {
 async function setGroupPrefix (jid, prefix) {
   await ensureSchema()
   const r = await db().query('UPDATE axyon_groups SET prefix=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, prefix || null])
-  cache.invalidate(`group:${jid}`)
-  return r.rows[0] || null
-}
-
-async function setGroupMode (jid, mode) {
-  await ensureSchema()
-  const allowed = new Set(['combat', 'duels', 'dungeon', 'general'])
-  const next = String(mode || '').toLowerCase()
-  if (!allowed.has(next)) return null
-  const r = await db().query('UPDATE axyon_groups SET game_mode=$2,updated_at=NOW() WHERE group_jid=$1 RETURNING *', [jid, next])
   cache.invalidate(`group:${jid}`)
   return r.rows[0] || null
 }
@@ -614,7 +668,6 @@ function norm (r) {
     healUses: Number(r.heal_uses),
     cardUses: Number(r.card_uses),
     lastDaily: r.last_daily,
-    gameMode: r.game_mode || 'general',
     createdAt: r.created_at
   }
 }
@@ -681,21 +734,6 @@ async function leaderboard (limit = 10) {
 async function playerCount () {
   await ensureSchema()
   return Number((await db().query('SELECT COUNT(*)::int c FROM axyon_players')).rows[0].c)
-}
-
-/**
- * Sets the player's active game mode.
- *
- * The mode is stored on the player row, not in memory, so it survives a
- * reconnect and is the same in every chat the player uses.
- */
-async function setGameMode (userId, mode) {
-  await ensureSchema()
-  const r = await db().query(
-    'UPDATE axyon_players SET game_mode=$2,updated_at=NOW() WHERE user_id=$1 RETURNING game_mode',
-    [userId, mode]
-  )
-  return r.rows[0]?.game_mode || null
 }
 
 async function setBattle (userId, battle) {
@@ -773,15 +811,6 @@ async function removeStage (ordinal) {
 
 async function floors () {
   await ensureSchema()
-  // Re-seed missing built-in floors idempotently. This repairs older live databases
-  // where the table exists but its initial seed was skipped or partially applied.
-  for (const f of ORIGINAL_FLOORS) {
-    await db().query(
-      `INSERT INTO axyon_floors(key,name,ordinal,boss,hp,atk,def,xp,zen)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(key) DO NOTHING`,
-      [f.key, f.name, f.ordinal, f.boss, f.hp, f.atk, f.def, f.xp, f.zen]
-    )
-  }
   return (await db().query('SELECT * FROM axyon_floors ORDER BY ordinal,id')).rows
 }
 
@@ -1662,12 +1691,16 @@ module.exports = {
   setSetting,
   setSettings,
   registerGroup,
+  updateGroupMode,
+  updateGroupFeatures,
+  updateGroupStatus,
+  GROUP_MODES,
   unregisterGroup,
   group,
   groups,
+  touchGroupActivity,
   setGroupEnabled,
   setGroupPrefix,
-  setGroupMode,
   dayKey,
   xpNeed,
   rankForLevel,
@@ -1680,7 +1713,6 @@ module.exports = {
   leaderboard,
   playerCount,
   setBattle,
-  setGameMode,
   getBattle,
   stages,
   stage,

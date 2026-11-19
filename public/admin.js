@@ -97,18 +97,20 @@ const A = (() => {
 
   function renderGroups () {
     const rows = data.groups || []
-    if (!rows.length) return '<div class="admin-empty">No groups registered yet. Send <b>!register</b> inside a WhatsApp group.</div>'
+    if (!rows.length) return '<div class="admin-empty">No groups registered yet. An AXYON operator can send <b>!register group normal</b> inside the target group.</div>'
     return `<div class="admin-scroll"><table class="admin-table"><thead><tr>
-      <th>Group</th><th>JID</th><th>Prefix</th><th>State</th><th></th></tr></thead><tbody>
+      <th>Group</th><th>JID</th><th>Registration</th><th>Features</th><th>Prefix</th><th>State</th><th></th></tr></thead><tbody>
       ${rows.map(g => `<tr>
-        <td><b>${esc(g.name || 'Unnamed')}</b></td>
+        <td><b>${esc(g.name || 'Unnamed')}</b><br><small>${esc(g.registrationId || 'legacy')}</small></td>
         <td class="mono">${esc(g.jid)}</td>
+        <td>${esc(g.registrationMode || 'normal')}</td>
+        <td>${esc((g.features || []).join(', ') || 'none')}</td>
         <td class="mono">${esc(g.prefix || data.settings.prefix)}</td>
-        <td><span class="tag ${g.enabled ? 'on' : 'off'}">${g.enabled ? 'active' : 'paused'}</span></td>
+        <td><span class="tag ${g.status === 'ACTIVE' ? 'on' : 'off'}">${esc(g.status || (g.enabled ? 'active' : 'disabled'))}</span></td>
         <td style="text-align:right;white-space:nowrap">
-          <button class="mini" data-act="${g.enabled ? 'group-disable' : 'group-enable'}" data-jid="${esc(g.jid)}">${g.enabled ? 'Pause' : 'Resume'}</button>
+          ${g.status === 'REMOVED' ? '<small>Re-register in WhatsApp to restore</small>' : `<button class="mini" data-act="${g.enabled ? 'group-disable' : 'group-enable'}" data-jid="${esc(g.jid)}">${g.enabled ? 'Pause' : 'Resume'}</button>
           <button class="mini" data-act="group-prefix" data-jid="${esc(g.jid)}">Prefix</button>
-          <button class="mini danger" data-act="group-remove" data-jid="${esc(g.jid)}">Remove</button>
+          <button class="mini danger" data-act="group-remove" data-jid="${esc(g.jid)}">Remove</button>`}
         </td></tr>`).join('')}
     </tbody></table></div>`
   }

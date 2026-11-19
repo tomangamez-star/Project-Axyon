@@ -149,7 +149,7 @@ test('every manuscript command is registered', () => {
   const c = createCommands({ axyon: a })
   const need = ['arise', 'profile', 'help', 'stages', 'fight', 'dungeon', 'party', 'duel', 'cards',
     'claim', 'marry', 'requests', 'accept', 'decline', 'divorce', 'zen', 'daily', 'economy', 'reset',
-    'prefix', 'register', 'unregister', 'groups', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin',
+    'prefix', 'register', 'group', 'unregister', 'groups', 'numbers', 'rhm', 'stage', 'flooradmin',
     'modes', 'visual', 'grantcard', 'top']
   const missing = need.filter(n => !c.BY_NAME.has(n))
   assert.deepStrictEqual(missing, [])

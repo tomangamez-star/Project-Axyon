@@ -21,7 +21,6 @@ const guild = require('./axyon-guild')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
-const { cache } = require('./cache')
 const { norm, isOwner } = require('./access')
 const { canonicalUserId, displayName, mentionedId } = require('./identity')
 
@@ -39,103 +38,13 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'unregister', 'groups', 'prefix', 'mode', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
   solo: { name: 'Solo', blurb: 'One player enters a gate alone.' },
   multiplayer: { name: 'Multiplayer', blurb: 'Several players, individual turns.' },
   party: { name: 'Party', blurb: 'An organised team of 2 or more.' }
-}
-
-/*
- * GAME MODES
- * ----------
- * Four modes, and a command belongs to exactly one of them. In a registered
- * group, `!mode combat` changes that group's mode; in DMs it changes the
- * player's mode. Different groups never share their mode setting.
- *
- *   combat   — fighting: stages, monsters, CPU opponents, battle actions
- *   duels    — PvP duels and card fighting. Registered groups only.
- *   dungeon  — dungeon floors, parties, gates
- *   general  — social, economy, media, help, management
- *
- * INVENTORY AND SHOP ARE NOT IN THIS TABLE ON PURPOSE. `!shop`, `!buy`,
- * `!inventory` and `!use` are reachable in all four modes, so they are listed
- * in MODE_FREE below and skip the gate entirely.
- */
-const GAME_MODES = {
-  combat: {
-    name: 'Combat',
-    icon: '\u2694\ufe0f',
-    blurb: 'Fight monsters, other characters and CPU opponents.',
-    sections: ['battle']
-  },
-  duels: {
-    name: 'Duels',
-    icon: '\ud83e\udd4a',
-    blurb: 'PvP duels and card fighting. Registered groups only.',
-    sections: ['duel', 'cards']
-  },
-  dungeon: {
-    name: 'Dungeon',
-    icon: '\ud83c\udff9',
-    blurb: 'Dungeon floors, parties and gates.',
-    sections: ['dungeon']
-  },
-  general: {
-    name: 'General',
-    icon: '\ud83d\udcac',
-    blurb: 'Social, economy, media and management.',
-    sections: ['core', 'social', 'economy', 'media', 'management']
-  }
-}
-
-/*
- * Commands that work in EVERY mode.
- *
- * Two groups:
- *   - the shop and inventory, which the brief requires in all four modes
- *   - the meta commands that must never be blocked, because a player who is
- *     stuck in the wrong mode needs them to get out: `!mode`, `!help`, `!ping`
- *     and `!arise`.
- */
-const MODE_FREE = new Set([
-  'shop', 'buy', 'inventory', 'inv', 'use', 'items',
-  'mode', 'help', 'ping', 'arise', 'profile', 'ai', 'claim', 'spawncard', 'card', 'cards', 'cardadmin',
-  /*
-   * THE BATTLE ACTIONS.
-   *
-   * The adventure entry points and turn actions are mode-free by design: the
-   * player's progression is one continuous campaign, not separate stage and
-   * dungeon command trees. Each action still validates its active encounter.
-   * `!stages` is an optional progress view; `!explore`, `!floor` and `!fight`
-   * all enter the same automatically selected next floor.
-   */
-  'attack', 'defend', 'guard', 'heal', 'class', 'classmove', 'carduse', 'retreat', 'battle', 'floor', 'explore', 'fight', 'stages', 'choose', 'menu', 'room'
-])
-
-/**
- * Which mode owns a command, or null when it is mode-free.
- *
- * A section can belong to more than one mode — `battle` is shared by Combat and
- * Dungeon, because dungeon combat uses the same actions. When that happens the
- * command is reachable from ANY of those modes, so this returns the list and
- * the gate accepts a match against any entry.
- */
-function modesOf (commandName, section) {
-  if (MODE_FREE.has(commandName)) return []
-  const out = []
-  for (const [key, meta] of Object.entries(GAME_MODES)) {
-    if (meta.sections.includes(section)) out.push(key)
-  }
-  return out
-}
-
-/** Back-compat: the first owning mode, or null. */
-function modeOf (commandName, section) {
-  const all = modesOf(commandName, section)
-  return all.length ? all[0] : null
 }
 
 function parseNum (v) {
@@ -163,7 +72,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       isAxyonNumber,
       numberMode,
       // AXYON authority: original owner, or a number registered in AXYON_NUMBERS.
-      // Switching to PLAYER mode does NOT remove management authority, per the manuscript.
+      // Management authority is tied to verified identity, not WhatsApp group role.
       axyon: owner || isAxyonNumber,
       rhm: !!rhmRole || owner
     }
@@ -172,8 +81,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* ---------------------------------------------------------- registration */
 
   cmd('arise', 'core', '{p}arise', 'Register with the System and awaken your hunter.', async (s, m, ctx) => axyon.arise(s, m, ctx))
-  cmd('profile', 'core', '{p}profile', 'Your rank, grade, stats, energy and progression.', async (s, m, ctx) => axyon.profile(s, m, ctx))
-  cmd('menu', 'core', '{p}menu', 'Open your hunter dashboard and current progression.', async (s, m, ctx) => axyon.profile(s, m, ctx))
+  cmd('profile', 'core', '{p}profile', 'Your rank, grade, stats, energy and stage.', async (s, m, ctx) => axyon.profile(s, m, ctx))
   cmd('help', 'core', '{p}help [section|command]', 'Every command, grouped by section. Name a command for detail.', async (s, m, ctx, args) => {
     const section = String(args[0] || '').toLowerCase()
     if (section && axyon.SECTIONS[section]) return axyon.send(s, ctx.jid, m, axyon.helpPage(section, ctx.prefix))
@@ -213,38 +121,21 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ---------------------------------------------------------------- stages */
 
-  cmd('stages', 'battle', '{p}stages', 'View your current floor and the adventure progression.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
-  async function startAdventure (s, m, ctx) {
+  cmd('stages', 'battle', '{p}stages', 'List battle stages and your position.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
+  cmd('fight', 'battle', '{p}fight', 'Enter your next stage and fight.', async (s, m, ctx, args) => {
     const p = await store.player(ctx.userId)
-    if (!p) return axyon.arise(s, m, ctx)
-    const active = await store.getBattle(ctx.userId)
-    if (active) return axyon.beginBattle(s, m, ctx, p.stage)
-    const ordinal = Math.max(1, Number(p.stage) || 1)
-    const floors = await store.floors().catch(() => [])
-    const floor = floors.find(x => Number(x.ordinal) === ordinal) || (store.ORIGINAL_FLOORS || []).find(x => Number(x.ordinal) === ordinal)
-    let story = null
-    if (typeof ai?.generateMissionStory === 'function') {
-      try { story = await ai.generateMissionStory({ name: floor?.name || `The Unmapped Depths ${ordinal}`, ordinal, boss: ordinal % 5 === 0 || !!floor?.boss }) } catch { /* the deterministic story fallback keeps play available */ }
-    }
-    return axyon.beginBattle(s, m, ctx, ordinal, story)
-  }
-  cmd('explore', 'battle', '{p}explore', 'Explore onward and enter your next encounter.', startAdventure)
-  cmd('floor', 'battle', '{p}floor', 'Enter your current floor automatically. Floor numbers are managed by the System.', startAdventure)
-  cmd('fight', 'battle', '{p}fight', 'Start or resume the next encounter in your adventure.', startAdventure)
-  cmd('choose', 'battle', '{p}choose <1-4>', 'Choose an option in a story encounter.', async (s, m, ctx, args) => {
-    const n = parseNum(args[0])
-    if (!n || n < 1 || n > 4) return axyon.send(s, ctx.jid, m, `Choose an option from *1* to *4*.`)
-    return axyon.resolveChoice(s, m, ctx, n)
+    const ordinal = parseNum(args[0]) ?? p?.stage ?? 1
+    return axyon.beginBattle(s, m, ctx, ordinal)
   })
-  cmd('battle', 'battle', '{p}battle', 'Resume your current encounter or story choice.', async (s, m, ctx) => {
+  cmd('battle', 'battle', '{p}battle', 'Resume an active battle.', async (s, m, ctx) => {
     const b = await store.getBattle(ctx.userId)
-    if (!b) return axyon.send(s, ctx.jid, m, `⚔️ No active encounter. Use *${ctx.prefix}explore* to continue.`)
-    return axyon.beginBattle(s, m, ctx, b.ordinal)
-  })
-  cmd('attack', 'battle', '{p}attack', 'Attack during an active fight.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'))
-  cmd('defend', 'battle', '{p}defend', 'Brace and reduce the next incoming hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'))
-  cmd('guard', 'battle', '{p}guard', 'Legacy alias for defending.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
-  cmd('heal', 'battle', '{p}heal', 'Recover 10 HP. Uses per combat are limited.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'))
+    const p = await store.player(ctx.userId)
+    if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
+    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), axyon.battleButtons(), true)
+  }, { hidden: true })
+  cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
+  cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
+  cmd('heal', 'battle', '{p}heal', 'Recover 25% HP. 5 uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
   cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
     /*
      * `!class` is BOTH the class sheet and the in-battle move command.
@@ -264,12 +155,43 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!args || !args.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}classmove <move name>* \u2014 see *${ctx.prefix}class*.`)
     return axyon.battleAct(s, m, ctx, 'class', 1, args.join(' '))
   }, { hidden: true })
-  cmd('carduse', 'battle', '{p}carduse', 'Use your equipped card ability during a fight.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'))
-  cmd('retreat', 'battle', '{p}retreat', 'Leave the current fight without victory rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'))
+  cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
+  cmd('retreat', 'battle', '{p}retreat', 'Leave the fight with no rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
 
   /* --------------------------------------------------------------- dungeon */
 
-  cmd('dungeon', 'dungeon', '{p}dungeon', 'Show the adventure and your current floor.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
+  cmd('dungeon', 'dungeon', '{p}dungeon', 'Dungeon modes and floors.', async (s, m, ctx) => {
+    const modes = await store.modes()
+    const floors = await store.floors()
+    const lines = [
+      `${W}`, '', '\ud83c\udff9 *DUNGEON*', '',
+      '*MODES*',
+      modes.map(x => `${x.enabled ? '\u2705' : '\u274c'} *${MODE_LIST[x.mode]?.name || x.mode}* \u2014 max ${x.max_players}\n   ${MODE_LIST[x.mode]?.blurb || ''}`).join('\n'),
+      '',
+      '*FLOORS*',
+      floors.length ? floors.map(f => `${f.locked ? '\ud83d\udd12' : '\u25ab\ufe0f'} *${f.ordinal}. ${f.name}* ${f.boss ? '\ud83d\udc80' : ''}\n   \u2764\ufe0f ${f.hp} \u2022 \u2694\ufe0f ${f.atk} \u2022 \u2728 ${f.xp} XP`).join('\n') : 'No floors configured.',
+      '',
+      `Enter a floor with *${ctx.prefix}floor*.`,
+      'Gates control progression. Fillers are a separate system and never merged with gates.'
+    ]
+    return axyon.send(s, ctx.jid, m, lines.join('\n'))
+  })
+
+  cmd('floor', 'dungeon', '{p}floor', 'Enter a dungeon floor.', async (s, m, ctx, args) => {
+    const p = await store.player(ctx.userId)
+    if (!p) return axyon.arise(s, m, ctx)
+    const floors = await store.floors()
+    if (!floors.length) return axyon.send(s, ctx.jid, m, `\ud83c\udff9 No dungeon floors exist yet. AXYON can add one with *${ctx.prefix}flooradmin add <name>*`)
+    const ordinal = parseNum(args[0]) ?? 1
+    const f = floors.find(x => Number(x.ordinal) === ordinal)
+    if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
+    if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
+    const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
+    const b = { mode: 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
+    await store.setBattle(ctx.userId, b)
+    await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
+    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p, `You descend into *${f.name}*.`), axyon.battleButtons(), true)
+  })
 
   /* ----------------------------------------------------------------- party */
 
@@ -900,99 +822,129 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* --------------------------------------------------- group registration */
 
-  cmd('register', 'management', '{p}register [name]', 'Register this group so Architect responds here.', async (s, m, ctx, args) => {
-    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, '\ud83d\udccd Run this inside the group you want to register.')
-    if (!ctx.auth.axyon && !(await ctx.resolveGroupAdmin())) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only AXYON or a group admin can register a group.')
-    let name = args.join(' ').trim()
-    if (!name) { try { name = (await s.groupMetadata(ctx.jid))?.subject || '' } catch { name = '' } }
-    const g = await store.registerGroup(ctx.jid, name, ctx.userId)
-    await store.log(ctx.userId, 'register_group', ctx.jid, { name })
-    /* AXYON's own welcome line, so arriving in a new group has a voice. */
-    return axyon.send(s, ctx.jid, m, [
-      `${W}`,
-      '',
-      `\u2705 *GROUP REGISTERED*`,
-      '',
-      name ? `*${g.name}*` : null,
-      '',
-      greetings.welcome(),
-      '',
-      T.rule('', 'hair'),
-      `Start with ${T.b(`${ctx.prefix}arise`)} \u2014 or ${T.b(`${ctx.prefix}help`)} to see everything.`
-    ].filter(x => x !== null).join('\n'))
+  const GROUP_FEATURES = new Set([
+    'general', 'combat', 'dungeon', 'casino', 'duel', 'cards', 'social', 'economy',
+    'guild_slot_1', 'guild_slot_2', 'guild_slot_3', 'collab'
+  ])
+  const SECTION_FEATURE = {
+    core: 'general', social: 'social', economy: 'economy', media: 'general', shop: 'economy',
+    battle: 'combat', dungeon: 'dungeon', duel: 'duel', cards: 'cards'
+  }
+  function featureFor (command) {
+    if (command.name === 'flooradmin') return 'dungeon'
+    if (command.name === 'classadmin') return 'general'
+    if (command.name === 'stage') return 'combat'
+    if (['modes', 'roomtype'].includes(command.name)) return 'dungeon'
+    if (['cardadmin', 'spawncard', 'grantcard'].includes(command.name)) return 'cards'
+    if (command.name === 'carduse') return { all: ['cards'], any: ['combat', 'dungeon'] }
+    if (['arise', 'help', 'ping', 'ai', 'profile'].includes(command.name)) return null
+    // The same battle actions resolve both Combat stages and Dungeon floors.
+    if (command.section === 'battle' && !['fight', 'stages'].includes(command.name)) return ['combat', 'dungeon']
+    return SECTION_FEATURE[command.section] || null
+  }
+  const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel>\` — Change mode (AXYON)`
+
+  cmd('register', 'management', '{p}register <group normal|modes|duel|view|list|mode>', 'Register and inspect group access (AXYON only).', async (s, m, ctx, args) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON ONLY*\n\nOnly verified AXYON identities can manage group registration.`)
+    const sub = String(args[0] || '').toLowerCase()
+    if (sub === 'list') {
+      const rows = await store.groups()
+      return axyon.send(s, ctx.jid, m, [W, '', '⌬ *GROUP REGISTRY*', '', rows.length ? rows.map(g => `${g.status === 'ACTIVE' ? '✅' : '⛔'} *${g.name || 'Unnamed'}* — ${String(g.registration_mode || 'normal').toUpperCase()}\n   ${g.status} • ${g.registration_id || 'legacy'}\n   \`${g.group_jid}\``).join('\n\n') : 'No registered groups.'].join('\n'))
+    }
+    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, '📍 Send this command inside the WhatsApp group you want to register.')
+    const current = await store.group(ctx.jid)
+    if (['view', 'status'].includes(sub)) return axyon.send(s, ctx.jid, m, groupRecordText(current, ctx.prefix))
+    if (sub === 'mode') {
+      const mode = String(args[1] || '').toLowerCase()
+      if (!['normal', 'modes', 'duel'].includes(mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register mode normal|modes|duel*`)
+      if (!current || current.status === 'REMOVED') return axyon.send(s, ctx.jid, m, `This group is not registered. Use *${ctx.prefix}register group ${mode}*.`)
+      const updated = await store.updateGroupMode(ctx.jid, mode)
+      await store.log(ctx.userId, 'group_registration_mode', ctx.jid, { mode })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *REGISTRATION MODE UPDATED*\n\n${updated.name || ctx.jid}\nMode: *${mode.toUpperCase()}*\nFeatures: ${(updated.features || []).join(', ') || 'none enabled'}`)
+    }
+    if (sub !== 'group') return axyon.send(s, ctx.jid, m, registrationHelp)
+    const mode = String(args[1] || '').toLowerCase()
+    if (!['normal', 'modes', 'duel'].includes(mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register group normal|modes|duel*`)
+    let name = ''
+    try { name = (await withTimeout(s.groupMetadata(ctx.jid), GROUP_META_TIMEOUT_MS))?.subject || '' } catch {}
+    const g = await store.registerGroup(ctx.jid, name, ctx.userId, mode)
+    await store.log(ctx.userId, 'register_group', ctx.jid, { name, mode, registrationId: g.registration_id })
+    return axyon.send(s, ctx.jid, m, [W, '', '✅ *GROUP REGISTERED*', '', `Group: *${g.name || 'Unnamed'}*`, `Registration ID: \`${g.registration_id}\``, `Mode: *${mode.toUpperCase()}*`, `Features: ${(g.features || []).join(', ') || 'none enabled yet'}`, '', mode === 'modes' ? `Enable systems with *${ctx.prefix}group enable <feature>*.\nUse *${ctx.prefix}group features* to view available features.` : 'The group is now authorized for its registration mode.'].join('\n'))
   })
 
-  cmd('unregister', 'management', '{p}unregister', 'Stop Architect responding in this group.', async (s, m, ctx) => {
-    if (!ctx.auth.axyon && !(await ctx.resolveGroupAdmin())) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only AXYON or a group admin can unregister a group.')
+  function groupRecordText (g, prefix = '!') {
+    if (!g || g.status === 'REMOVED') return `${W}\n\n⌬ *NO ACTIVE REGISTRATION*\n\nThis group is not registered.`
+    return [W, '', '⌬ *GROUP REGISTRATION*', '', `Name: *${g.name || 'Unnamed'}*`, `JID: \`${g.group_jid}\``, `ID: \`${g.registration_id || 'legacy'}\``, `Mode: *${String(g.registration_mode || 'normal').toUpperCase()}*`, `Status: *${g.status || (g.enabled ? 'ACTIVE' : 'DISABLED')}*`, `Features: ${(g.features || []).join(', ') || 'none'}`, `Registered by: ${g.registered_by || 'unknown'}`, `Registered: ${g.registered_at || g.created_at || 'unknown'}`, g.suspension_reason ? `Reason: ${g.suspension_reason}` : null].filter(Boolean).join('\n')
+  }
+
+  cmd('group', 'management', '{p}group <info|enable|disable|suspend|reactivate|remove|features>', 'Manage this group registration (AXYON only).', async (s, m, ctx, args) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON ONLY*`)
+    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, '📍 Run group management inside the target WhatsApp group.')
+    const sub = String(args[0] || 'info').toLowerCase()
+    const g = await store.group(ctx.jid)
+    if (sub === 'info' || sub === 'view') return axyon.send(s, ctx.jid, m, groupRecordText(g, ctx.prefix))
+    if (!g || g.status === 'REMOVED') return axyon.send(s, ctx.jid, m, 'This group has no active registration.')
+    if (sub === 'features') {
+      const available = g.registration_mode === 'duel' ? ['duel'] : g.registration_mode === 'modes' ? [...GROUP_FEATURES] : [...store.GROUP_MODES.normal]
+      return axyon.send(s, ctx.jid, m, [W, '', '*GROUP FEATURES*', '', `Enabled: ${(g.features || []).join(', ') || 'none'}`, `Available: ${available.join(', ')}`, '', `Enable: *${ctx.prefix}group enable <feature>*`, `Disable: *${ctx.prefix}group disable <feature>*`].join('\n'))
+    }
+    if (sub === 'enable' || sub === 'disable') {
+      const feature = String(args[1] || '').toLowerCase()
+      if (!feature) {
+        if (sub === 'enable') {
+          const updated = await store.updateGroupStatus(ctx.jid, 'ACTIVE')
+          await store.log(ctx.userId, 'group_enable', ctx.jid)
+          return axyon.send(s, ctx.jid, m, `✅ Group reactivated. Status: *${updated.status}*`)
+        }
+        const updated = await store.updateGroupStatus(ctx.jid, 'DISABLED')
+        await store.log(ctx.userId, 'group_disable', ctx.jid)
+        return axyon.send(s, ctx.jid, m, `⏸️ Group disabled. Status: *${updated.status}*`)
+      }
+      if (!GROUP_FEATURES.has(feature)) return axyon.send(s, ctx.jid, m, `Unknown feature. Available: ${[...GROUP_FEATURES].join(', ')}`)
+      const allowedForMode = g.registration_mode === 'duel' ? new Set(['duel']) : g.registration_mode === 'modes' ? GROUP_FEATURES : new Set(store.GROUP_MODES.normal)
+      if (!allowedForMode.has(feature)) return axyon.send(s, ctx.jid, m, `The *${feature}* feature is not available under ${String(g.registration_mode).toUpperCase()} registration.`)
+      const features = new Set(g.features || [])
+      if (sub === 'enable') features.add(feature); else features.delete(feature)
+      const updated = await store.updateGroupFeatures(ctx.jid, [...features])
+      await store.log(ctx.userId, `group_feature_${sub}`, ctx.jid, { feature })
+      return axyon.send(s, ctx.jid, m, `✅ Feature *${feature}* ${sub}d.\nEnabled: ${(updated.features || []).join(', ') || 'none'}`)
+    }
+    if (sub === 'suspend') {
+      const reason = args.slice(1).join(' ').trim()
+      const updated = await store.updateGroupStatus(ctx.jid, 'SUSPENDED', reason)
+      await store.log(ctx.userId, 'group_suspend', ctx.jid, { reason })
+      return axyon.send(s, ctx.jid, m, `⛔ *GROUP SUSPENDED*\n\n${updated.name || ctx.jid}${reason ? `\nReason: ${reason}` : ''}`)
+    }
+    if (sub === 'reactivate') {
+      const updated = await store.updateGroupStatus(ctx.jid, 'ACTIVE')
+      await store.log(ctx.userId, 'group_reactivate', ctx.jid)
+      return axyon.send(s, ctx.jid, m, `✅ *GROUP REACTIVATED*\n\n${updated.name || ctx.jid}`)
+    }
+    if (sub === 'remove') {
+      const removed = await store.unregisterGroup(ctx.jid)
+      await store.log(ctx.userId, 'group_remove', ctx.jid)
+      return axyon.send(s, ctx.jid, m, removed ? '🗑️ Group removed from the active registry. Player accounts remain untouched.' : 'Group registration not found.')
+    }
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}group info|enable|disable|suspend|reactivate|remove|features*`)
+  })
+
+  cmd('unregister', 'management', '{p}unregister', 'Remove this group from active registration (AXYON only).', async (s, m, ctx) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🛡️ AXYON ONLY')
+    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, 'Run this inside a group.')
     await store.unregisterGroup(ctx.jid)
     await store.log(ctx.userId, 'unregister_group', ctx.jid)
-    return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\uded1 *GROUP UNREGISTERED*\n\nArchitect will ignore this group.`)
+    return axyon.send(s, ctx.jid, m, `${W}\n\n🛑 *GROUP REMOVED*\n\nPlayer accounts remain intact.`)
   })
 
   cmd('groups', 'management', '{p}groups', 'List registered groups (AXYON only).', async (s, m, ctx) => {
-    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*')
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🛡️ *AXYON ONLY*')
     const rows = await store.groups()
     if (!rows.length) return axyon.send(s, ctx.jid, m, `${W}\n\nNo groups registered.`)
-    return axyon.send(s, ctx.jid, m, [W, '', '\ud83d\udccd *REGISTERED GROUPS*', '', rows.map(g => `${g.enabled ? '\u2705' : '\u23f8\ufe0f'} *${g.name || 'Unnamed'}*\n   \`${g.group_jid}\``).join('\n\n')].join('\n'))
+    return axyon.send(s, ctx.jid, m, [W, '', '⌬ *GROUP REGISTRY*', '', rows.map(g => `${g.status === 'ACTIVE' ? '✅' : '⛔'} *${g.name || 'Unnamed'}* — ${String(g.registration_mode || 'normal').toUpperCase()}\n   ${g.status} • ${g.registration_id || 'legacy'}\n   \`${g.group_jid}\``).join('\n\n')].join('\n'))
   })
 
   /* -------------------------------------------------------- AXYON identity */
 
-  cmd('mode', 'core', '{p}mode <combat|duels|dungeon|general>', 'Switch this registered group mode, or your DM mode. Each mode runs only its own commands.', async (s, m, ctx, args) => {
-    const want = String(args[0] || '').toLowerCase()
-    const p = await store.player(ctx.userId)
-    const groupScoped = String(ctx.jid || '').endsWith('@g.us') && !!ctx.group
-    const current = groupScoped ? (ctx.group.game_mode || 'general') : (p?.gameMode || 'general')
-
-    if (!want) {
-      const rows = Object.entries(GAME_MODES).map(([key, meta]) => {
-        const mark = key === current ? '\u25b6\ufe0f' : '\u25ab\ufe0f'
-        return `${mark} ${meta.icon} ${T.b(meta.name)} \u2014 ${T.m(`${ctx.prefix}mode ${key}`)}\n   ${T.i(meta.blurb)}`
-      })
-      return axyon.send(s, ctx.jid, m, [
-        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-        '',
-        `\ud83c\udfae ${T.b('GAME MODES')}`,
-        '',
-        `${groupScoped ? 'This group is' : 'You are'} in ${T.b(GAME_MODES[current]?.name || 'General')} mode.`,
-        '',
-        T.rule('', 'thin'),
-        '',
-        rows.join('\n\n'),
-        '',
-        T.rule('', 'hair'),
-        T.i('The shop and inventory work in every mode.')
-      ].join('\n'))
-    }
-
-    if (!GAME_MODES[want]) {
-      return axyon.send(s, ctx.jid, m, [
-        `\u274c No mode called *${want}*.`,
-        '',
-        `Modes: ${Object.keys(GAME_MODES).map(k => T.b(k)).join(', ')}`
-      ].join('\n'))
-    }
-    if (groupScoped) {
-      await store.setGroupMode(ctx.jid, want)
-      await store.log(ctx.userId, 'group_game_mode', want, { group: ctx.jid })
-    } else {
-      if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
-      await store.setGameMode(ctx.userId, want)
-      await store.log(ctx.userId, 'game_mode', want)
-    }
-    const meta = GAME_MODES[want]
-    return axyon.send(s, ctx.jid, m, [
-      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-      '',
-      `${meta.icon} ${T.b(`${meta.name.toUpperCase()} MODE`)}`,
-      '',
-      T.i(meta.blurb),
-      '',
-      T.rule('', 'hair'),
-      `Commands now available: ${meta.sections.map(x => T.m(`${ctx.prefix}help ${x}`)).join(' ')}`,
-      T.i(groupScoped ? 'This mode is saved for this registered group only; other groups are independent.' : 'This mode is saved to your player account. Shop and inventory stay available.')
-    ].join('\n'))
-  })
 
   cmd('numbers', 'management', '{p}numbers <add|remove|list> [number]', 'Manage AXYON_NUMBERS (AXYON only).', async (s, m, ctx, args, content) => {
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*')
@@ -1596,14 +1548,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ------------------------------------------------------- shop & inventory */
 
-  /*
-   * THE SHOP AND THE INVENTORY ARE MODE-FREE.
-   *
-   * They are registered in the `shop` section, which belongs to no game mode,
-   * and their names are in MODE_FREE, so the gate below never blocks them. That
-   * is the requirement: a player must be able to buy a potion and use it
-   * whether they are in combat, duels, dungeon or general.
-   */
+  /* Shop and inventory are ordinary group features, routed through Economy. */
 
   cmd('shop', 'shop', '{p}shop [items|abilities]', 'Browse the shop. Works in every mode.', async (s, m, ctx, args) => {
     const filter = String(args[0] || '').toLowerCase()
@@ -1754,7 +1699,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       await store.log(ctx.userId, 'item_use', entry.key, { inBattle: true })
       return axyon.withVisual(s, ctx.jid, m, r.battle.enemy.boss ? 'boss' : 'battle',
         axyon.battleCard(r.battle, p, `${entry.icon} ${T.b(entry.name)}\n${r.note}\n\ud83d\udc79 ${r.battle.enemy.name} answers for *${hit}*.`),
-        axyon.battleButtons(r.battle), true)
+        axyon.battleButtons(), true)
     }
 
     /* Outside a battle the effect lands on the player row. */
@@ -1795,21 +1740,6 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const auth = await authority(userId)
     const prefix = group?.prefix || settings.prefix
 
-    /*
-     * GROUP ADMIN IS LAZY
-     * -------------------
-     * This used to call sock.groupMetadata() for EVERY message in a group.
-     * That is a full network round trip to WhatsApp's servers, and it was the
-     * single largest cost on the message path: measured at ~120 ms per
-     * message while the four SQL statements it sat next to took under 1 ms.
-     * It also failed slowly when the socket was busy, which is why replies
-     * were sometimes fast and sometimes very late.
-     *
-     * Only two commands actually need to know whether the sender is a group
-     * admin: !register and !unregister. So it is now a lazy getter that is
-     * only awaited by those two, and its result is cached per group+sender.
-     */
-    let adminPromise = null
     const ctx = {
       userId,
       jid,
@@ -1818,24 +1748,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       group,
       auth,
       prefix,
-      content,
-      get isGroupAdmin () { return false },
-      async resolveGroupAdmin () {
-        if (!jid.endsWith('@g.us')) return false
-        if (adminPromise) return adminPromise
-        adminPromise = cache.wrap(`admin:${jid}:${userId}`, async () => {
-          try {
-            const meta = await withTimeout(sock.groupMetadata(jid), GROUP_META_TIMEOUT_MS)
-            return (meta?.participants || []).some(p => {
-              const ids = [p.id, p.phoneNumber, p.lid].filter(Boolean)
-              return ids.some(v => String(v).split(':')[0].split('@')[0] === userId) && !!p.admin
-            })
-          } catch {
-            return false
-          }
-        }, 60000)
-        return adminPromise
-      }
+      content
     }
     return ctx
   }
@@ -1855,25 +1768,29 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const parsed = parse(content, ctx.prefix)
     if (!parsed) return false
 
-    /*
-     * UNREGISTERED GROUPS
-     * -------------------
-     * This used to `return true` and say nothing at all, which is why a group
-     * that was never registered looked exactly like a broken bot. Ordinary
-     * chatter is still ignored (the bot must not spam every group it is in),
-     * but a COMMAND now gets one clear reply telling the sender how to
-     * register. That is the difference between "silently dead" and "working".
-     */
-    if (ctx.jid.endsWith('@g.us') && !ctx.group && ctx.settings.groupRegistrationRequired) {
-      if (!ctx.auth.axyon && !['register', 'groups', 'unregister'].includes(parsed.command)) {
-        await axyon.send(sock, ctx.jid, m, greetings.groupNotRegistered(ctx.prefix))
-        return true
-      }
-      if (ctx.auth.axyon && !['register', 'groups', 'unregister', 'spawncard', 'cardadmin'].includes(parsed.command)) return true
-    }
-
     const command = BY_NAME.get(parsed.command)
     if (!command) return false
+
+    const groupManagement = new Set(['register', 'group', 'groups', 'unregister'])
+    if (ctx.jid.endsWith('@g.us')) {
+      const isAxyonManagement = ctx.auth.axyon && groupManagement.has(parsed.command)
+      if (!ctx.group || ctx.group.status === 'REMOVED') {
+        if (!isAxyonManagement) {
+          await axyon.send(sock, ctx.jid, m, `${W}\n\n*ACCESS DENIED*\n\nThis group has not been registered with the AXYN CORE system.\nContact an authorized AXYON operator for registration.`)
+          return true
+        }
+      } else if (!ctx.auth.axyon) {
+        const status = String(ctx.group.status || (ctx.group.enabled ? 'ACTIVE' : 'DISABLED')).toUpperCase()
+        if (status === 'SUSPENDED') {
+          await axyon.send(sock, ctx.jid, m, `${W}\n\n*GROUP SUSPENDED*\n\nThis group's access has been temporarily suspended. Gaming features are currently unavailable.`)
+          return true
+        }
+        if (status !== 'ACTIVE' || ctx.group.enabled === false) {
+          await axyon.send(sock, ctx.jid, m, `${W}\n\n*GROUP DISABLED*\n\nThis group's access has been manually disabled.`)
+          return true
+        }
+      }
+    }
 
     /*
      * REGISTRATION GATE
@@ -1890,67 +1807,31 @@ function createCommands ({ axyon, economy, logger, ai }) {
       }
     }
 
-    /*
-     * MODE GATE
-     * ---------
-     * A command that belongs to another mode does not run. It says which mode
-     * it belongs to and how to switch, so the player is never left guessing.
-     *
-     * The shop and the inventory are in MODE_FREE and skip this entirely — they
-     * are required to work in all four modes.
-     */
-    const owners = modesOf(parsed.command, command.section)
-    if (owners.length) {
-      const p = await store.player(ctx.userId).catch(() => null)
-      const current = (ctx.jid.endsWith('@g.us') && ctx.group)
-        ? (ctx.group.game_mode || 'general')
-        : (p?.gameMode || 'general')
-      if (!owners.includes(current)) {
-        const owner = owners[0]
-        const meta = GAME_MODES[owner]
-        const here = GAME_MODES[current]
-        await axyon.send(sock, ctx.jid, m, [
-          T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-          '',
-          `\ud83d\udd12 ${T.b('WRONG MODE')}`,
-          '',
-          `${T.m(`${ctx.prefix}${parsed.command}`)} belongs to ${meta.icon} ${T.b(meta.name)} mode.`,
-          `You are in ${here.icon} ${T.b(here.name)} mode.`,
-          '',
-          T.rule('', 'hair'),
-          `Switch with ${T.b(`${ctx.prefix}mode ${owner}`)}`,
-          T.i('The shop and inventory work in every mode.')
-        ].join('\n'))
-        return true
+    /* GROUP FEATURE GATE — command sections map to group-level features. */
+    if (ctx.jid.endsWith('@g.us') && ctx.group && !ctx.auth.axyon && !['register', 'group', 'groups', 'unregister'].includes(parsed.command)) {
+      const feature = featureFor(command)
+      if (feature) {
+        const enabled = Array.isArray(ctx.group.features) ? ctx.group.features : []
+        const required = Array.isArray(feature) ? feature : [feature]
+        const all = !Array.isArray(feature) && feature.all ? feature.all : []
+        const any = !Array.isArray(feature) && feature.any ? feature.any : required
+        const allowed = all.every(name => enabled.includes(name)) && any.some(name => enabled.includes(name))
+        if (!allowed) {
+          const needs = [...all, any.length > 1 ? `(${any.join(' or ')})` : any[0]].filter(Boolean)
+          await axyon.send(sock, ctx.jid, m, `${W}\n\n*FEATURE UNAVAILABLE*\n\nThis command requires: *${needs.join(' + ')}*.`)
+          return true
+        }
       }
     }
 
-    /*
-     * DUEL GATE
-     * ---------
-     * Duels and card fighting are group features: they need two players in one
-     * chat and a group the bot is allowed to act in. Outside a registered group
-     * they are refused with a reason, not silently ignored.
-     */
-    if (command.section === 'duel') {
-      if (!ctx.jid.endsWith('@g.us')) {
-        await axyon.send(sock, ctx.jid, m, [
-          T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-          '',
-          `\ud83e\udd4a ${T.b('GROUPS ONLY')}`,
-          '',
-          `${T.m(`${ctx.prefix}${parsed.command}`)} is a duel command.`,
-          'Duels need a registered group. Your personal card collection works in private chat too.',
-          '',
-          T.rule('', 'hair'),
-          `An admin registers a group with ${T.b(`${ctx.prefix}register`)}.`
-        ].join('\n'))
-        return true
-      }
-      if (!ctx.group) {
-        await axyon.send(sock, ctx.jid, m, greetings.groupNotRegistered(ctx.prefix))
-        return true
-      }
+    /* Duel commands require a group even when AXYON is testing them. */
+    if (command.section === 'duel' && !ctx.jid.endsWith('@g.us')) {
+      await axyon.send(sock, ctx.jid, m, `${W}\n\n*GROUPS ONLY*\n\nDuel commands require a registered WhatsApp group.`)
+      return true
+    }
+
+    if (ctx.jid.endsWith('@g.us') && ctx.group) {
+      await store.touchGroupActivity(ctx.jid).catch(() => {})
     }
 
     try {
@@ -1968,16 +1849,18 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const ctx = await buildContext(sock, m, {})
 
     if (id === 'ax_profile') { await axyon.profile(sock, m, ctx); return true }
-    if (id === 'ax_explore') { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
-    if (id.startsWith('ax_choice_')) { await axyon.resolveChoice(sock, m, ctx, parseNum(id.slice(10))); return true }
     if (id === 'ax_help') { await axyon.send(sock, ctx.jid, m, axyon.helpAll(ctx.prefix)); return true }
     if (id.startsWith('ax_help_')) { await axyon.send(sock, ctx.jid, m, axyon.helpPage(id.slice(8), ctx.prefix)); return true }
     if (id === 'ax_stages') { await axyon.listStages(sock, m, ctx); return true }
-    if (id.startsWith('ax_fight_')) { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
+    if (id.startsWith('ax_fight_')) { await axyon.beginBattle(sock, m, ctx, parseNum(id.slice(9))); return true }
     if (id === 'ax_cards') { await axyon.cardPanel(sock, m, ctx); return true }
     if (id.startsWith('ax_claim_')) { await axyon.claimCard(sock, m, ctx, parseNum(id.slice(9))); return true }
     if (id === 'ax_dungeon') { await BY_NAME.get('dungeon').handler(sock, m, ctx, [], {}); return true }
-    if (id === 'ax_dungeon_solo') { const c = BY_NAME.get('explore'); await c.handler(sock, m, ctx, [], {}); return true }
+    if (id === 'ax_dungeon_solo') {
+      const floors = await store.floors()
+      if (floors.length) { await BY_NAME.get('floor').handler(sock, m, ctx, ['1'], {}); return true }
+      await BY_NAME.get('stages').handler(sock, m, ctx, [], {}); return true
+    }
     if (id === 'ax_party_view') { await BY_NAME.get('party').handler(sock, m, ctx, ['view'], {}); return true }
     if (id === 'ax_party_join') { await BY_NAME.get('party').handler(sock, m, ctx, ['join'], {}); return true }
     if (id === 'ax_party_leave') { await BY_NAME.get('party').handler(sock, m, ctx, ['leave'], {}); return true }
@@ -1996,4 +1879,4 @@ function createCommands ({ axyon, economy, logger, ai }) {
   return { handle, section, parse, buildContext, BY_NAME, mentionedId, answerAI }
 }
 
-module.exports = { createCommands, MODE_LIST, GAME_MODES, MODE_FREE, modeOf, mentionedId }
+module.exports = { createCommands, MODE_LIST, mentionedId }

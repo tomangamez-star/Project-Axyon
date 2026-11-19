@@ -40,10 +40,10 @@ test('access: guest is limited to non-sensitive content', () => {
 })
 
 test('access: rhm moderates content but cannot control accounts or authority', () => {
-  for (const p of ['groups.write', 'players.write', 'stages.write', 'floors.write', 'modes.write', 'visuals.write', 'log.read', 'feedback.read']) {
+  for (const p of ['players.write', 'stages.write', 'floors.write', 'modes.write', 'visuals.write', 'log.read', 'feedback.read']) {
     assert.equal(access.can('rhm', p), true, `rhm should hold ${p}`)
   }
-  for (const p of ['overview.control', 'pairing.write', 'authority.write', 'settings.write', 'shop.write']) {
+  for (const p of ['groups.read', 'groups.write', 'overview.control', 'pairing.write', 'authority.write', 'settings.write', 'shop.write']) {
     assert.equal(access.can('rhm', p), false, `rhm must NOT hold ${p}`)
   }
 })

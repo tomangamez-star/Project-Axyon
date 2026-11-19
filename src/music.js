@@ -63,27 +63,12 @@ const DOWNLOAD_TIMEOUT_MS = 90000
 const MAX_BYTES = 16 * 1024 * 1024
 
 /*
- * YOUTUBE COOKIES — WHY THEY ARE IN THE REPO
- * ------------------------------------------
- * YouTube answers a datacenter IP with "Sign in to confirm you're not a bot"
- * and refuses to serve the stream. That is not a bug in this code: it is
- * YouTube refusing an anonymous request from a cloud host. The only reliable
- * fix is to make the request look like a signed-in browser, which means
- * sending a real account's cookies.
- *
- * The repo is private, so the operator chose to commit the cookie jar rather
- * than require an env var on every deploy. The order below still lets an
- * operator override it without a code change:
- *
- *   1. YTDLP_COOKIES_FILE   — an explicit path (env)
- *   2. data/cookies.txt     — the committed jar (this is the normal path)
- *   3. YTDLP_COOKIES_FROM_BROWSER — a local browser profile, dev machines only
- *
- * A missing jar is not fatal: yt-dlp simply runs without cookies and the
- * Audius fallback still serves full tracks.
+ * YOUTUBE COOKIES
+ * ----------------
+ * A signed-in cookie jar may be supplied as an external secret through
+ * YTDLP_COOKIES_FILE. It is never bundled with or committed to the project.
+ * YTDLP_COOKIES_FROM_BROWSER remains available for local development only.
  */
-const COOKIES_FILE = path.join(__dirname, '..', 'data', 'cookies.txt')
-
 /*
  * THE JS RUNTIME AND THE PLAYER CLIENT — WHY BOTH ARE NEEDED
  * ---------------------------------------------------------
@@ -148,16 +133,16 @@ function hasJsRuntime () {
  * ------------------------------------------
  * At the end of a run it saves the jar back, refreshing rotated cookies and
  * adding anything YouTube set (SIDCC, __Secure-1PSIDTS, YSC, ...). Pointed at
- * `data/cookies.txt` in the repo that is a real defect:
+ * a shared or committed cookie jar that is a real defect:
  *
- *   - it mutates a committed file on every single `!play`, so the working tree
- *     goes dirty and a deploy can pick up a rotated jar nobody reviewed;
+ *   - it mutates the source secret on every single `!play`, making rotation
+ *     and deployment state harder to audit;
  *   - two `!play` commands at once write the same file concurrently and can
  *     truncate it, after which EVERY play fails with a cookie error;
  *   - on a read-only buildroot install the writeback itself can fail the run.
  *
  * So yt-dlp is never handed the original. Each run gets a private copy of the
- * jar in the run's own temp directory, and the original stays untouched.
+ * jar in the run's own temp directory, and the source secret stays untouched.
  * `--sleep-requests` is not enough; the copy is what makes it safe.
  */
 async function cookieJarFor (workDir) {
@@ -168,8 +153,8 @@ async function cookieJarFor (workDir) {
     await fs.copyFile(jar, copy)
     return copy
   } catch {
-    /* A copy we cannot make is better than no cookies at all. */
-    return jar
+    /* Never hand yt-dlp the source secret if its private copy failed. */
+    return null
   }
 }
 
@@ -177,7 +162,7 @@ async function cookieJarFor (workDir) {
  * The yt-dlp flags that make a datacenter request look like a real browser.
  *
  * `jar` is the per-run writable copy from `cookieJarFor()`; every caller passes
- * one so the committed file is never modified.
+ * one so the source secret is never modified.
  */
 async function youtubeArgs (client = PLAYER_CLIENTS[0], workDir = null) {
   const args = []
@@ -194,11 +179,8 @@ function cookiesPath () {
   if (explicit) {
     try {
       if (require('fs').statSync(explicit).isFile()) return explicit
-    } catch { /* fall through to the committed jar */ }
+    } catch { return null }
   }
-  try {
-    if (require('fs').statSync(COOKIES_FILE).isFile()) return COOKIES_FILE
-  } catch { /* no jar committed */ }
   return null
 }
 /* Anything under this is a snippet, an intro or a preview — never a song. */
@@ -860,11 +842,11 @@ async function resolve (query, { logger } = {}) {
          * "could not download" sends the operator looking in the wrong place,
          * so this message names the cause and the actual fix.
          */
-        parts.push('This video is age-restricted, so YouTube will only serve it to a signed-in account — it needs a logged-in cookie jar in data/cookies.txt.')
+        parts.push('This video is age-restricted, so YouTube will only serve it to a signed-in account — it needs a logged-in cookie jar configured with YTDLP_COOKIES_FILE.')
       } else if (ytReason === 'login') {
-        parts.push('YouTube is treating this bot as signed out: the cookies in data/cookies.txt are missing, expired, or not from a logged-in account. Refresh that file with a signed-in session.')
+        parts.push('YouTube is treating this bot as signed out: the configured cookie jar is missing, expired, or not from a logged-in account. Set YTDLP_COOKIES_FILE to a fresh external cookie jar.')
       } else if (ytReason === 'botcheck') {
-        parts.push('YouTube is still asking this server to confirm it is not a bot — the cookies in data/cookies.txt are likely stale or were signed out.')
+        parts.push('YouTube is still asking this server to confirm it is not a bot — the configured cookie jar is likely stale or was signed out. Refresh the external YTDLP_COOKIES_FILE secret.')
       } else if (ytReason === 'restricted') {
         parts.push('That video is private, members-only, removed or region-blocked, so it cannot be downloaded.')
       } else if (ytReason === 'format') {

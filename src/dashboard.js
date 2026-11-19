@@ -92,7 +92,6 @@ const ACTION_PERMISSION = {
   'player-clear-battle': 'players.write',
   'player-grant-item': 'players.write',
   'player-grant-ability': 'players.write',
-  'player-mode': 'players.write',
   settings: 'settings.write',
   'stage-add': 'stages.write',
   'stage-edit': 'stages.write',
