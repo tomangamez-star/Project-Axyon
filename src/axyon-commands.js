@@ -1775,6 +1775,22 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   async function handle (sock, m, content) {
     const ctx = await buildContext(sock, m, content)
+
+    /*
+     * NUMBERED OPTION REPLY
+     * ---------------------
+     * With native buttons gone, a card offers its actions as a numbered list
+     * and the player answers with the number. This runs BEFORE command parsing
+     * so a bare "2" is understood as "the second option on the card I was just
+     * shown" — but only when that player actually has a live card pending, so
+     * ordinary chat containing a number is never hijacked.
+     */
+    const bare = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    if (/^\d{1,2}$/.test(bare)) {
+      const id = axyon.takePendingOption(ctx.jid, ctx.userId, bare)
+      if (id && await section(sock, m, id)) return true
+    }
+
     const parsed = parse(content, ctx.prefix)
     if (!parsed) return false
 

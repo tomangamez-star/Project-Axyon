@@ -17,9 +17,80 @@ const music = require('./music')
 const classes = require('./axyon-classes')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
+const { canonicalUserId } = require('./identity')
 const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
+
+/*
+ * NUMBERED OPTIONS — the replacement for native buttons.
+ *
+ * Every screen that used to hand WhatsApp a button grid now renders the same
+ * options as a numbered list, and the player answers with the number. The
+ * mapping is kept in one place so the renderer and the resolver can never
+ * disagree about what "3" means.
+ *
+ * `defs` is the old button shape: [[label, id], ...]. The ids are unchanged
+ * (`ax_b_attack`, `ax_duel_accept_7`, ...), so the existing action router still
+ * understands them — only the transport changed.
+ */
+function renderOptions (body, defs) {
+  if (!Array.isArray(defs) || !defs.length) return body
+  const lines = defs.map(([label], i) => `*${i + 1}.* ${label}`)
+  return `${body}\n\n${lines.join('\n')}\n\nReply with a number to choose.`
+}
+
+/**
+ * Resolves a bare number reply against the options a screen last offered.
+ *
+ * Returns the option id, or null when the number is out of range. The caller
+ * decides what to do with a null (usually: ignore, so ordinary chat is not
+ * hijacked by a stray digit).
+ */
+function resolveOptionNumber (defs, n) {
+  if (!Array.isArray(defs) || !defs.length) return null
+  const i = Number(n)
+  if (!Number.isInteger(i) || i < 1 || i > defs.length) return null
+  return defs[i - 1][1]
+}
+
+/*
+ * PENDING OPTIONS — what each player was last offered, so a bare number reply
+ * can be resolved back to an action.
+ *
+ * Keyed by chat + sender, because a group can have several players mid-battle
+ * at once and "2" must mean *that player's* second option, not the last one
+ * anyone in the group was shown. Entries expire so a stale card cannot hijack
+ * a number typed an hour later.
+ */
+const PENDING_OPTIONS = new Map()
+const PENDING_TTL_MS = Number(process.env.AXYON_OPTION_TTL_MS) || 15 * 60 * 1000
+
+function optionKey (jid, userId) { return `${jid}|${userId}` }
+
+function rememberOptions (jid, userId, defs) {
+  if (!jid || !userId || !Array.isArray(defs) || !defs.length) return
+  PENDING_OPTIONS.set(optionKey(jid, userId), { defs, at: Date.now() })
+  if (PENDING_OPTIONS.size > 2000) {
+    const cutoff = Date.now() - PENDING_TTL_MS
+    for (const [k, v] of PENDING_OPTIONS) if (v.at < cutoff) PENDING_OPTIONS.delete(k)
+  }
+}
+
+/** The action id a bare number picks for this player, or null. */
+function takePendingOption (jid, userId, n) {
+  const entry = PENDING_OPTIONS.get(optionKey(jid, userId))
+  if (!entry) return null
+  if (Date.now() - entry.at > PENDING_TTL_MS) {
+    PENDING_OPTIONS.delete(optionKey(jid, userId))
+    return null
+  }
+  return resolveOptionNumber(entry.defs, n)
+}
+
+function clearPendingOptions (jid, userId) {
+  PENDING_OPTIONS.delete(optionKey(jid, userId))
+}
 
 /*
  * CLASSES and CLASS_MOVES are now DERIVED from the class catalogue.
@@ -306,91 +377,51 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   const send = (s, j, m, t) => s.sendMessage(j, { text: t }, { quoted: m })
 
   /*
-   * BUTTON POLICY
-   * -------------
-   * Most of this bot is plain commands. Buttons are reserved for the two
-   * places where tapping genuinely beats typing: the six battle actions, and
-   * accepting or declining a duel (where the other player has to answer).
+   * NO NATIVE BUTTONS
+   * -----------------
+   * The native-flow button transport is gone. It was the reason `!fight` and
+   * `!floor` produced no reply at all: the battle card existed only inside an
+   * interactive payload, and when WhatsApp rejected or stalled that payload the
+   * whole message vanished. Every reply is now ordinary text.
    *
-   * `buttons()` therefore renders plain text and ignores any button defs it is
-   * handed, so no screen can quietly grow a button grid again. `tapButtons()`
-   * is the explicit opt-in used only by battle and duels.
+   * Where a screen used to offer buttons it renders a numbered list instead,
+   * and a bare number reply is resolved back to the same action id (see
+   * `resolveOptionNumber` and the number branch in axyon-commands `handle`).
    */
-  const buttons = (s, j, m, body) => s.sendMessage(j, { text: body }, { quoted: m })
+  const buttons = (s, j, m, body, footer, defs) => {
+    rememberOptions(j, canonicalUserId(m?.key), defs)
+    return s.sendMessage(j, { text: renderOptions(body, defs) }, { quoted: m })
+  }
 
-  /*
-   * How long a native button send may take before we give up on it.
-   *
-   * `relayMessage` can stall indefinitely: the socket is open, the promise is
-   * never settled, and nothing throws. Awaiting it without a bound meant the
-   * battle card was never sent at all — the command looked like it was ignored.
-   * A rejection was already handled; a *hang* was not.
-   */
-  const BUTTON_TIMEOUT_MS = Number(process.env.AXYON_BUTTON_TIMEOUT_MS) || 8000
-
-  const tapButtons = async (s, j, m, body, footer, defs, owner) => {
-    /*
-     * Battle entry must never depend on WhatsApp's optional native-flow
-     * transport. If Baileys/WhatsApp rejects an interactive payload, stalls
-     * without settling, or the session does not expose relayMessage, send the
-     * complete battle card as ordinary text instead. Players can still use the
-     * text commands, so a button failure must not swallow the encounter.
-     */
-    if (sendButtons) {
-      let timer = null
-      try {
-        const result = await Promise.race([
-          Promise.resolve().then(() => sendButtons(s, j, body, footer || WATERMARK, defs, owner)),
-          new Promise(resolve => {
-            timer = setTimeout(() => resolve('__timeout__'), BUTTON_TIMEOUT_MS)
-          })
-        ])
-        if (result === true) return true
-        if (result === '__timeout__') {
-          logger?.warn?.({ timeoutMs: BUTTON_TIMEOUT_MS }, 'native buttons timed out; falling back to text')
-        }
-      } catch (e) {
-        logger?.warn?.({ err: e?.message || e }, 'native buttons unavailable; falling back to text')
-      } finally {
-        if (timer) clearTimeout(timer)
-      }
-    }
-    /*
-     * Text fallback. When the native grid could not carry every action (it caps
-     * at three), name the rest so the player is never left without a way to act.
-     */
-    const extra = Array.isArray(defs) && defs.length > 3
-      ? '\n\n' + defs.slice(3).map(([label]) => `\u2022 ${label}`).join('\n')
-      : ''
-    return s.sendMessage(j, { text: body + extra }, { quoted: m })
+  /* The same renderer, kept under its old name so call sites stay readable. */
+  const tapButtons = async (s, j, m, body, footer, defs) => {
+    rememberOptions(j, canonicalUserId(m?.key), defs)
+    return s.sendMessage(j, { text: renderOptions(body, defs) }, { quoted: m })
   }
 
   /* ---------------------------------------------------------- media helper */
   async function withVisual (sock, jid, m, mode, text, defs, tappable = false) {
+    /*
+     * The numbered options ride along in the caption now. They used to be a
+     * second message carrying a button grid; with buttons gone there is no
+     * reason to split the card, and one message is one thing to read.
+     */
+    const body = renderOptions(text, defs)
+    if (defs && defs.length) rememberOptions(jid, canonicalUserId(m?.key), defs)
     const v = await store.visual(mode).catch(() => null)
     if (v && (v.image_data || v.url)) {
       try {
-        const payload = { caption: text }
+        const payload = { caption: body }
         if (v.image_data) payload.image = Buffer.isBuffer(v.image_data) ? v.image_data : Buffer.from(v.image_data)
         else if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
         else payload.image = { url: v.url }
         await sock.sendMessage(jid, payload, { quoted: m })
-        if (defs && defs.length) {
-          return tappable
-            ? tapButtons(sock, jid, m, v.caption || '\u2728', WATERMARK, defs)
-            : buttons(sock, jid, m, v.caption || '\u2728')
-        }
         return true
       } catch (e) {
         logger?.warn?.({ err: e, mode }, 'axyon visual send failed')
       }
     }
-    if (defs && defs.length) {
-      return tappable
-        ? tapButtons(sock, jid, m, text, WATERMARK, defs)
-        : buttons(sock, jid, m, text)
-    }
-    return send(sock, jid, m, text)
+    return send(sock, jid, m, body)
   }
 
   /* -------------------------------------------------------------- registry */
@@ -1228,6 +1259,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
+    renderOptions, resolveOptionNumber, rememberOptions, takePendingOption, clearPendingOptions,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
     classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
@@ -1239,5 +1271,6 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 module.exports = {
   createAxyon, applyProgress, buildEnemy, playerHit, enemyHit,
   powerEnergyForRank, profileCard, battleCard,
+  renderOptions, resolveOptionNumber, rememberOptions, takePendingOption, clearPendingOptions,
   CLASSES, CLASS_MOVES, MODES, WATERMARK
 }

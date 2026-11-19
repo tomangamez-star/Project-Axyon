@@ -37,10 +37,16 @@ const binaries = require('./binaries')
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
 const port = Number(process.env.PORT || 3000)
 
-const axyon = createAxyon({
-  logger,
-  sendButtons: (s, j, b, f, d, o) => s.__sendNativeButtons?.(s, j, b, f, d, o)
-})
+/*
+ * NO NATIVE BUTTONS.
+ *
+ * `sendButtons` used to be wired here to the native-flow transport. It is gone:
+ * every reply is plain text with numbered options, so there is no interactive
+ * payload left to reject, stall or swallow. The option is deliberately not
+ * passed at all, so no code path can reach a button sender even if one is
+ * reintroduced by accident.
+ */
+const axyon = createAxyon({ logger })
 
 /*
  * THE ASSISTANT
@@ -266,7 +272,7 @@ class WhatsAppConnection {
       if (sentId) { this.ownMessageIds.add(String(sentId)); if (this.ownMessageIds.size > 4000) this.ownMessageIds.delete(this.ownMessageIds.values().next().value) }
       return sent
     }
-    sock.__sendNativeButtons = (s, j, body, footer, defs, ownerId) => this.sendNativeButtons(s, j, body, footer, defs, ownerId)
+    /* Native button transport removed — see sendNativeButtons below. */
 
     sock.ev.on('creds.update', async () => {
       await saveCreds()
@@ -536,35 +542,21 @@ class WhatsAppConnection {
 
   /* --------------------------------------------------------------- buttons */
 
-  async sendNativeButtons (sock, jid, body, footer, defs, ownerId = null) {
-    const { proto, generateWAMessageFromContent } = this.baileys
-    /*
-     * WhatsApp's native-flow quick_reply accepts at most three buttons. Sending
-     * six made the whole interactive payload invalid, so the API rejected it —
-     * and because the battle card only existed inside that payload, the reply
-     * vanished. Cap the grid and let the caller list the rest as text.
-     */
-    const MAX_NATIVE_BUTTONS = 3
-    const buttons = defs.slice(0, MAX_NATIVE_BUTTONS).map(([label, id]) => {
-      const scoped = ownerId && ['ax_b_', 'ax_duel_'].some(p => String(id).startsWith(p)) ? `${id}~u:${ownerId}` : id
-      return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: label, id: scoped }) }
-    })
-    const g = generateWAMessageFromContent(jid, {
-      viewOnceMessage: {
-        message: {
-          messageContextInfo: { deviceListMetadata: {}, deviceListMetadataVersion: 2 },
-          interactiveMessage: proto.Message.InteractiveMessage.create({
-            body: proto.Message.InteractiveMessage.Body.create({ text: body }),
-            footer: proto.Message.InteractiveMessage.Footer.create({ text: footer }),
-            nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({ buttons })
-          })
-        }
-      }
-    }, {})
-    this.ownMessageIds.add(String(g.key.id))
-    if (this.ownMessageIds.size > 4000) this.ownMessageIds.delete(this.ownMessageIds.values().next().value)
-    await this.outputGuard.run(jid, () => sock.relayMessage(jid, g.message, { messageId: g.key.id }))
-    return true
+  /*
+   * REMOVED.
+   *
+   * `sendNativeButtons` built a WhatsApp native-flow interactive payload and
+   * relayed it. That transport is what took `!fight` and `!floor` off the air:
+   * the battle card existed only inside the payload, so a rejection or a stall
+   * meant no message at all. Every reply is now plain text with numbered
+   * options, and the numbered reply is resolved in axyon-commands `handle`.
+   *
+   * Nothing calls this any more. It is kept as an explicit throw so that a
+   * future call site fails loudly in development instead of silently
+   * reintroducing the bug.
+   */
+  async sendNativeButtons () {
+    throw new Error('native buttons have been removed; replies are plain text with numbered options')
   }
 
   async stop () {
