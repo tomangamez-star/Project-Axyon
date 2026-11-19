@@ -100,6 +100,9 @@ class GlobalOutputGuard {
     this.burstLimit = 8            // sends per second before pacing widens
     this.recent = []
     this.lastSendAt = 0
+
+    /* A single stalled send must not hold the queue open forever. */
+    this.sendTimeoutMs = Number(process.env.AXYON_SEND_TIMEOUT_MS) || 20000
   }
 
   setRawSend (fn) { this.rawSend = fn }
@@ -136,7 +139,31 @@ class GlobalOutputGuard {
         if (!q) break
         this.lastSendAt = Date.now()
         this.recent.push(this.lastSendAt)
-        try { q.resolve(await q.fn()) } catch (e) { q.reject(e) }
+        /*
+         * A send that never settles must not wedge the queue.
+         *
+         * `drain` is a single loop: while it awaits one entry, every later
+         * message waits behind it. A stalled `relayMessage` therefore silenced
+         * the whole bot, not just the one command. Bound each send so a stall
+         * costs one message instead of all of them.
+         */
+        let timer = null
+        try {
+          const result = await Promise.race([
+            Promise.resolve().then(() => q.fn()),
+            new Promise((resolve, reject) => {
+              timer = setTimeout(
+                () => reject(new Error(`send timed out after ${this.sendTimeoutMs}ms`)),
+                this.sendTimeoutMs
+              )
+            })
+          ])
+          q.resolve(result)
+        } catch (e) {
+          q.reject(e)
+        } finally {
+          if (timer) clearTimeout(timer)
+        }
       }
     } finally {
       this.draining = false
@@ -511,7 +538,14 @@ class WhatsAppConnection {
 
   async sendNativeButtons (sock, jid, body, footer, defs, ownerId = null) {
     const { proto, generateWAMessageFromContent } = this.baileys
-    const buttons = defs.map(([label, id]) => {
+    /*
+     * WhatsApp's native-flow quick_reply accepts at most three buttons. Sending
+     * six made the whole interactive payload invalid, so the API rejected it —
+     * and because the battle card only existed inside that payload, the reply
+     * vanished. Cap the grid and let the caller list the rest as text.
+     */
+    const MAX_NATIVE_BUTTONS = 3
+    const buttons = defs.slice(0, MAX_NATIVE_BUTTONS).map(([label, id]) => {
       const scoped = ownerId && ['ax_b_', 'ax_duel_'].some(p => String(id).startsWith(p)) ? `${id}~u:${ownerId}` : id
       return { name: 'quick_reply', buttonParamsJson: JSON.stringify({ display_text: label, id: scoped }) }
     })

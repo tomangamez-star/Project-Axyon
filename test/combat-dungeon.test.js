@@ -361,3 +361,39 @@ test('rooms: a guild mode is now real and can be opened', async () => {
   assert.ok(/ROOM OPENED/i.test(out), `expected a room, got: ${out.slice(0, 300)}`)
   assert.ok(/Guild Raid/i.test(out), 'the room must name the guild mode')
 })
+
+/* ------------------------------------------------- button transport stalls */
+
+/*
+ * A native button send that never settles is the failure that actually took
+ * !fight and !floor off the air: `relayMessage` stayed pending, nothing threw,
+ * and the battle card — which only existed inside that payload — was never
+ * sent. These lock the timeout in.
+ */
+
+test('combat: !fight delivers its card when the button send hangs forever', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: () => new Promise(() => {}) })
+  const { handled, out } = await h.send('!fight')
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(battle, 'a hung button send must not prevent battle creation')
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected text fallback battle card, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: !floor delivers its encounter when the button send hangs forever', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, sendButtons: () => new Promise(() => {}) })
+  const { handled, out } = await h.send('!floor 1')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'a hung button send must not prevent floor entry')
+  assert.ok(/BATTLE|HP/i.test(out), `expected text fallback encounter, got: ${out.slice(0, 200)}`)
+})
+
+test('combat: the text fallback names the actions the 3-button grid could not carry', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: () => new Promise(() => {}) })
+  const { out } = await h.send('!fight')
+  h.restore()
+  assert.ok(/Retreat/i.test(out), `expected the overflow actions listed, got: ${out.slice(-300)}`)
+})

@@ -317,23 +317,52 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
    * is the explicit opt-in used only by battle and duels.
    */
   const buttons = (s, j, m, body) => s.sendMessage(j, { text: body }, { quoted: m })
+
+  /*
+   * How long a native button send may take before we give up on it.
+   *
+   * `relayMessage` can stall indefinitely: the socket is open, the promise is
+   * never settled, and nothing throws. Awaiting it without a bound meant the
+   * battle card was never sent at all — the command looked like it was ignored.
+   * A rejection was already handled; a *hang* was not.
+   */
+  const BUTTON_TIMEOUT_MS = Number(process.env.AXYON_BUTTON_TIMEOUT_MS) || 8000
+
   const tapButtons = async (s, j, m, body, footer, defs, owner) => {
     /*
      * Battle entry must never depend on WhatsApp's optional native-flow
-     * transport. If Baileys/WhatsApp rejects an interactive payload (or the
-     * session does not expose relayMessage), send the complete battle card as
-     * ordinary text instead. Players can still use the text commands, so a
-     * button failure must not swallow the encounter.
+     * transport. If Baileys/WhatsApp rejects an interactive payload, stalls
+     * without settling, or the session does not expose relayMessage, send the
+     * complete battle card as ordinary text instead. Players can still use the
+     * text commands, so a button failure must not swallow the encounter.
      */
     if (sendButtons) {
+      let timer = null
       try {
-        const result = await sendButtons(s, j, body, footer || WATERMARK, defs, owner)
+        const result = await Promise.race([
+          Promise.resolve().then(() => sendButtons(s, j, body, footer || WATERMARK, defs, owner)),
+          new Promise(resolve => {
+            timer = setTimeout(() => resolve('__timeout__'), BUTTON_TIMEOUT_MS)
+          })
+        ])
         if (result === true) return true
+        if (result === '__timeout__') {
+          logger?.warn?.({ timeoutMs: BUTTON_TIMEOUT_MS }, 'native buttons timed out; falling back to text')
+        }
       } catch (e) {
         logger?.warn?.({ err: e?.message || e }, 'native buttons unavailable; falling back to text')
+      } finally {
+        if (timer) clearTimeout(timer)
       }
     }
-    return s.sendMessage(j, { text: body }, { quoted: m })
+    /*
+     * Text fallback. When the native grid could not carry every action (it caps
+     * at three), name the rest so the player is never left without a way to act.
+     */
+    const extra = Array.isArray(defs) && defs.length > 3
+      ? '\n\n' + defs.slice(3).map(([label]) => `\u2022 ${label}`).join('\n')
+      : ''
+    return s.sendMessage(j, { text: body + extra }, { quoted: m })
   }
 
   /* ---------------------------------------------------------- media helper */
