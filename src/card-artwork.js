@@ -4,6 +4,75 @@
 // Public GETs do not require credentials. Credentials may be supplied for a
 // registered Danbooru account, but this module never writes to Danbooru.
 const API = 'https://danbooru.donmai.us/posts.json'
+
+const SERPAPI_ENDPOINT = 'https://serpapi.com/search.json'
+const SERPAPI_TIMEOUT_MS = 20000
+const UNSAFE_PIN_TERMS = /\b(nsfw|nude|nudity|explicit|porn|hentai|ecchi|sexual|18\+|adult content)\b/i
+
+function pinterestQuery (name, searchTerm = '') {
+  const identity = String(searchTerm || name || '').trim()
+  if (!identity) throw new Error('A character name is required for Pinterest artwork search.')
+  return `${identity} anime character portrait illustration`
+}
+
+function selectPinterestPin (pins = []) {
+  const candidates = (Array.isArray(pins) ? pins : []).filter(pin => {
+    const imageUrl = pin?.original || ''
+    const width = Number(pin?.original_width || 0)
+    const height = Number(pin?.original_height || 0)
+    const text = `${pin?.title || ''} ${pin?.description || ''} ${pin?.alt_text || ''}`
+    return validImageUrl(imageUrl) && width >= 420 && height >= 540 && height / width >= 1.12 && !UNSAFE_PIN_TERMS.test(text)
+  }).sort((a, b) => {
+    const score = pin => {
+      const w = Number(pin.original_width) || 0
+      const h = Number(pin.original_height) || 0
+      const reactions = Math.max(0, Number(pin.reactions) || 0)
+      return Math.min(w * h, 5000000) / 1000 + Math.min(reactions, 1000) * 2
+    }
+    return score(b) - score(a)
+  })
+  if (!candidates.length) return null
+  // Randomise among the strongest portrait candidates instead of repeating
+  // the same first result for every card.
+  const shortlist = candidates.slice(0, Math.min(8, candidates.length))
+  return shortlist[Math.floor(Math.random() * shortlist.length)]
+}
+
+async function searchPinterest (name, searchTerm = '') {
+  const apiKey = String(process.env.SERPAPI_API_KEY || '').trim()
+  if (!apiKey) throw new Error('SERPAPI_API_KEY is not configured. Add it to Render environment variables.')
+  const params = new URLSearchParams({
+    engine: 'pinterest',
+    q: pinterestQuery(name, searchTerm),
+    type: 'pins',
+    api_key: apiKey
+  })
+  const response = await fetch(`${SERPAPI_ENDPOINT}?${params}`, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(SERPAPI_TIMEOUT_MS)
+  })
+  if (!response.ok) throw new Error(`SerpApi Pinterest search failed (${response.status}).`)
+  const json = await response.json()
+  if (json?.error) throw new Error(`SerpApi Pinterest search failed: ${String(json.error).slice(0, 220)}`)
+  const pin = selectPinterestPin(json?.pins)
+  if (!pin) throw new Error(`Pinterest returned no suitable portrait artwork for ${name}.`)
+  return pin
+}
+
+async function findPinterest (name, searchTerm = '') {
+  const pin = await searchPinterest(name, searchTerm)
+  const url = pin.original
+  const buffer = await fetchBuffer(url)
+  const pinUrl = pin.pin_link || pin.board?.link || `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(pinterestQuery(name, searchTerm))}`
+  return {
+    buffer,
+    source: 'Pinterest via SerpApi',
+    sourceUrl: pinUrl,
+    fileUrl: url,
+    sourceArtist: String(pin.pinner?.name || pin.pinner?.username || ''),
+    pinId: String(pin.pin_id || '')
+  }
+}
 const USER_AGENT = `AXYON-Core/2.0 (https://github.com/tomangamez-star/Project-Axyon; ${process.env.DANBOORU_USER_ID ? `user #${process.env.DANBOORU_USER_ID}` : 'anonymous API client'})`
 let danbooruQueue = Promise.resolve()
 let lastDanbooruReadAt = 0
@@ -160,8 +229,18 @@ async function aniListCharacter (name) {
   }
 }
 
-async function resolveArtwork ({ name, kind = 'character', fallbackUrl = '', series = '' } = {}) {
+async function resolveArtwork ({ name, kind = 'character', fallbackUrl = '', series = '', searchTerm = '' } = {}) {
   if (!name) throw new Error('A character or weapon name is required for artwork matching.')
+  if (kind === 'character' && (process.env.SERPAPI_API_KEY || process.env.SERPAPI_REQUIRED === 'true')) {
+    try {
+      const pinterest = await findPinterest(name, searchTerm)
+      return { ...pinterest, series }
+    } catch (error) {
+      // Keep the existing exact-match providers as a fallback if Pinterest
+      // has no usable portrait or the SerpApi request is temporarily down.
+      if (process.env.SERPAPI_REQUIRED === 'true') throw error
+    }
+  }
   const found = await findDanbooru(name, kind)
   if (found?.buffer) return { ...found, series }
   if (fallbackUrl) {
@@ -172,4 +251,4 @@ async function resolveArtwork ({ name, kind = 'character', fallbackUrl = '', ser
   throw new Error(`No exact safe Danbooru artwork was found for weapon tag “${name}”. Add a direct HTTPS image URL or use an exact Danbooru tag.`)
 }
 
-module.exports = { API, USER_AGENT, tagSlug, tagAliases, tagMatches, validImageUrl, fetchBuffer, danbooruPosts, findDanbooru, resolveArtwork }
+module.exports = { API, SERPAPI_ENDPOINT, USER_AGENT, tagSlug, tagAliases, tagMatches, validImageUrl, fetchBuffer, pinterestQuery, selectPinterestPin, searchPinterest, findPinterest, danbooruPosts, findDanbooru, resolveArtwork }

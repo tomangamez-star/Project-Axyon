@@ -47,3 +47,15 @@ Only the upgraded **Old Gen** renderer is used for new card creation and re-rend
 The primary WhatsApp session checks PostgreSQL every minute and releases one global card when the six-hour timer is due. Automatically generated cards are valid for 30 days by default; set `AXYON_CARD_VALIDITY_DAYS=0` for permanent cards or a value from 1–3650 to change the validity window. The expiry is shown on the artwork and enforced when a user claims or equips/uses the card. The same code is broadcast to all enabled registered groups. Manual drops do not reset the automatic timer. The database locks a drop row on claim so only one user can win. Card images are stored as `BYTEA` so they remain available after the source file changes.
 
 Existing PostgreSQL deployments migrate via `ensureSchema()` using `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; no schema reset is required. `sharp` remains the image renderer dependency.
+
+
+## Pinterest artwork through SerpApi
+
+Automatic card drops now choose from the built-in anime character-variant catalogue and use SerpApi's Pinterest engine for portrait artwork. The selected portrait is downloaded and passed to the existing Old Gen card renderer; the renderer/template is unchanged. The saved card retains its Pinterest source link and pinner attribution when available.
+
+Set these variables in Render → your service → Environment:
+
+- `SERPAPI_API_KEY` — your private SerpApi key (required).
+- `SERPAPI_REQUIRED=true` — makes card generation report a Pinterest/SerpApi error instead of silently switching to the legacy artwork providers.
+
+The repository's `render.yaml` declares the secret as `sync: false`, so the key is not stored in source control. Never paste the key into code or commit it. Pinterest search results may include artwork owned by third parties; only use images you have permission to reproduce in generated cards and follow the applicable Pinterest and SerpApi terms.
