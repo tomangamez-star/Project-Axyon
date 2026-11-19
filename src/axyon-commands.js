@@ -48,8 +48,13 @@ const MODE_LIST = {
 }
 
 function parseNum (v) {
-  const n = Number(String(v ?? '').replace(/,/g, ''))
-  return Number.isFinite(n) ? Math.floor(n) : null
+  // Number('') is 0. Treat a missing/blank argument as absent so commands
+  // such as !fight and !floor can select the player's next progression step.
+  const raw = String(v ?? '').replace(/,/g, '').trim()
+  if (!raw) return null
+  const n = Number(raw)
+  const whole = Math.floor(n)
+  return Number.isFinite(n) && Number.isSafeInteger(whole) && whole >= 1 ? whole : null
 }
 
 function createCommands ({ axyon, economy, logger, ai }) {
@@ -838,8 +843,13 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (['cardadmin', 'spawncard', 'grantcard'].includes(command.name)) return 'cards'
     if (command.name === 'carduse') return { all: ['cards'], any: ['combat', 'dungeon'] }
     if (['arise', 'help', 'ping', 'ai', 'profile'].includes(command.name)) return null
-    // The same battle actions resolve both Combat stages and Dungeon floors.
-    if (command.section === 'battle' && !['fight', 'stages'].includes(command.name)) return ['combat', 'dungeon']
+
+    // Core progression entry points are shared across registration modes.
+    // Their turn actions must be shared too, otherwise !fight/!floor could
+    // start a battle in one mode but !attack/!guard would be blocked in another.
+    if (['fight', 'floor', 'stages'].includes(command.name)) return null
+    if (command.section === 'battle') return null
+
     return SECTION_FEATURE[command.section] || null
   }
   const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel>\` — Change mode (AXYON)`
