@@ -39,6 +39,7 @@ const { createAxyon } = require('./axyon-rpg')
 const { createCommands } = require('./axyon-commands')
 const access = require('./access')
 const dashAuth = require('./dash-auth')
+const store = require('./axyon-store')
 
 const PUBLIC = path.join(__dirname, '..', 'public')
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8' }
@@ -66,6 +67,54 @@ async function body (req, max = 16384) {
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw Object.assign(Error('Invalid JSON'), { status: 400 }) }
 }
+
+async function multipart (req, max = 8 * 1024 * 1024 + 65536) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > max) throw Object.assign(Error('Image is too large. Maximum size is 8 MB.'), { status: 413 })
+    chunks.push(chunk)
+  }
+  const raw = Buffer.concat(chunks)
+  const type = String(req.headers['content-type'] || '')
+  const boundary = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  if (!/^multipart\/form-data/i.test(type) || !boundary) throw Object.assign(Error('Expected an image upload.'), { status: 400 })
+  const marker = Buffer.from(`--${(boundary[1] || boundary[2]).trim()}`)
+  const fields = {}
+  let pos = 0
+  while ((pos = raw.indexOf(marker, pos)) !== -1) {
+    pos += marker.length
+    if (raw[pos] === 45 && raw[pos + 1] === 45) break
+    if (raw[pos] === 13 && raw[pos + 1] === 10) pos += 2
+    const headerEnd = raw.indexOf(Buffer.from('\r\n\r\n'), pos)
+    if (headerEnd < 0) break
+    const headers = raw.subarray(pos, headerEnd).toString('utf8')
+    const next = raw.indexOf(marker, headerEnd + 4)
+    if (next < 0) break
+    let end = next
+    if (raw[end - 2] === 13 && raw[end - 1] === 10) end -= 2
+    const disposition = headers.match(/content-disposition:\s*form-data;\s*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i)
+    if (disposition) {
+      const name = disposition[1]
+      const data = raw.subarray(headerEnd + 4, end)
+      const mime = (headers.match(/content-type:\s*([^\r\n]+)/i) || [])[1] || ''
+      fields[name] = disposition[2] !== undefined ? { data: Buffer.from(data), mime: mime.trim(), filename: disposition[2] } : data.toString('utf8')
+    }
+    pos = next
+  }
+  return fields
+}
+
+function imageMime (data) {
+  if (!Buffer.isBuffer(data)) return ''
+  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png'
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg'
+  if (data.length >= 12 && data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+  if (data.length >= 6 && /^GIF8[79]a$/.test(data.toString('ascii', 0, 6))) return 'image/gif'
+  return ''
+}
+
 function maskPhone (value) {
   const x = String(value || '').split(':')[0].split('@')[0].replace(/\D/g, '')
   return x.length > 7 ? `+${x.slice(0, 3)} ••• ••${x.slice(-4)}` : x ? 'Connected account' : 'Not available'
@@ -372,6 +421,24 @@ function createDashboard ({ sessions, database, lease, logger }) {
         return true
       }
 
+      if (req.method === 'POST' && url.pathname === '/dashboard/api/visual-upload') {
+        const s = await requireAuth(req, res, 'visuals.write', true)
+        if (!s) return true
+        const fields = await multipart(req)
+        const mode = String(fields.mode || '').trim().toLowerCase()
+        const caption = String(fields.caption || '').trim()
+        const file = fields.image
+        if (!['arise', 'profile', 'battle', 'boss', 'dungeon', 'duel'].includes(mode)) { json(res, 400, { ok: false, error: 'Choose a valid visual type.' }); return true }
+        if (!file?.data?.length) { json(res, 400, { ok: false, error: 'Choose an image from your phone first.' }); return true }
+        const mime = imageMime(file.data)
+        if (!mime) { json(res, 400, { ok: false, error: 'Unsupported image. Use JPG, PNG, WEBP or GIF.' }); return true }
+        if (file.data.length > 8 * 1024 * 1024) { json(res, 413, { ok: false, error: 'Image is too large. Maximum size is 8 MB.' }); return true }
+        await store.setVisualImage(mode, file.data, mime, caption)
+        await store.log('dashboard', 'admin_visual_upload', mode, { mime, bytes: file.data.length })
+        json(res, 200, { ok: true, message: `Image uploaded for ${mode}.` })
+        return true
+      }
+
       if (req.method === 'POST' && url.pathname === '/dashboard/api/admin/action') {
         const input = await body(req, 65536)
         const action = String(input.action || '')
@@ -434,4 +501,4 @@ function createDashboard ({ sessions, database, lease, logger }) {
   return { handle, _test: { safeEqual, maskPhone, formatPairingCode, filterSnapshot, ACTION_PERMISSION } }
 }
 
-module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode } }
+module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode, multipart, imageMime } }

@@ -325,10 +325,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   /* ---------------------------------------------------------- media helper */
   async function withVisual (sock, jid, m, mode, text, defs, tappable = false) {
     const v = await store.visual(mode).catch(() => null)
-    if (v && v.url) {
+    if (v && (v.image_data || v.url)) {
       try {
         const payload = { caption: text }
-        if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
+        if (v.image_data) payload.image = Buffer.isBuffer(v.image_data) ? v.image_data : Buffer.from(v.image_data)
+        else if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
         else payload.image = { url: v.url }
         await sock.sendMessage(jid, payload, { quoted: m })
         if (defs && defs.length) {

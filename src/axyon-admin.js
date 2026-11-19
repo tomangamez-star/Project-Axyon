@@ -76,7 +76,7 @@ function createAxyonAdmin ({ logger }) {
         xp: f.xp, zen: f.zen, locked: f.locked, boss: f.boss
       })),
       modes: modes.map(m => ({ mode: m.mode, enabled: m.enabled, maxPlayers: m.max_players })),
-      visuals: visuals.map(v => ({ mode: v.mode, url: v.url, caption: v.caption })),
+      visuals: visuals.map(v => ({ mode: v.mode, url: v.url, caption: v.caption, hasImage: !!v.image_data, mimeType: v.mime_type || '' })),
       roles: roles.map(r => ({ userId: r.user_id, role: r.role })),
       numbers: numbers.map(n => ({ userId: n.user_id, mode: n.mode })),
       /* The shop catalogue, so the panel's reward pickers are built from the

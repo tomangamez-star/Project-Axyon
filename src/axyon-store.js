@@ -269,7 +269,11 @@ async function ensureSchema () {
       mode TEXT PRIMARY KEY,
       url TEXT NOT NULL DEFAULT '',
       caption TEXT NOT NULL DEFAULT '',
+      image_data BYTEA,
+      mime_type TEXT NOT NULL DEFAULT '',
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    ALTER TABLE axyon_visuals ADD COLUMN IF NOT EXISTS image_data BYTEA;
+    ALTER TABLE axyon_visuals ADD COLUMN IF NOT EXISTS mime_type TEXT NOT NULL DEFAULT '';
 
     CREATE TABLE IF NOT EXISTS axyon_modes(
       mode TEXT PRIMARY KEY,
@@ -1192,9 +1196,19 @@ async function visual (mode) {
 async function setVisual (mode, url, caption) {
   await ensureSchema()
   const r = await db().query(
-    `INSERT INTO axyon_visuals(mode,url,caption) VALUES($1,$2,$3)
-     ON CONFLICT(mode) DO UPDATE SET url=EXCLUDED.url,caption=EXCLUDED.caption,updated_at=NOW() RETURNING *`,
+    `INSERT INTO axyon_visuals(mode,url,caption,image_data,mime_type) VALUES($1,$2,$3,NULL,'')
+     ON CONFLICT(mode) DO UPDATE SET url=EXCLUDED.url,caption=EXCLUDED.caption,image_data=NULL,mime_type='',updated_at=NOW() RETURNING *`,
     [mode, url || '', caption || '']
+  )
+  return r.rows[0]
+}
+
+async function setVisualImage (mode, imageData, mimeType, caption) {
+  await ensureSchema()
+  const r = await db().query(
+    `INSERT INTO axyon_visuals(mode,url,caption,image_data,mime_type) VALUES($1,'',$2,$3,$4)
+     ON CONFLICT(mode) DO UPDATE SET url='',caption=EXCLUDED.caption,image_data=EXCLUDED.image_data,mime_type=EXCLUDED.mime_type,updated_at=NOW() RETURNING mode,caption,mime_type,updated_at`,
+    [mode, caption || '', imageData, mimeType]
   )
   return r.rows[0]
 }
@@ -1759,6 +1773,7 @@ module.exports = {
   visuals,
   visual,
   setVisual,
+  setVisualImage,
   clearVisual,
   modes,
   setMode,
