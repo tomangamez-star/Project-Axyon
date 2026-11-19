@@ -31,7 +31,7 @@ function fakeSock () {
   }
 }
 
-function harness ({ player = null, battle = null, floors = [] } = {}) {
+function harness ({ player = null, battle = null, floors = [], features = ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'] } = {}) {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
@@ -46,7 +46,7 @@ function harness ({ player = null, battle = null, floors = [] } = {}) {
   }
 
   store.player = async () => state.player
-  store.group = async () => ({ group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'normal', features: ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'], registered_by: 'u1' })
+  store.group = async () => ({ group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'normal', features: [...features], registered_by: 'u1' })
   store.getBattle = async () => state.battle
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
@@ -102,6 +102,28 @@ test('combat: a player can enter a stage and start a real battle', async () => {
   assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
 })
 
+test('combat: !fight with no argument selects the player next stage, not stage zero', async () => {
+  const h = harness({ player: basePlayer() })
+  const { handled, out } = await h.send('!fight')
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(battle, 'the no-argument command must start a battle')
+  assert.strictEqual(battle.ordinal, 1)
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
+})
+
+test('combat: !fight works in a registered group with only Duel enabled', async () => {
+  const h = harness({ player: basePlayer(), features: ['duel'] })
+  const { handled, out } = await h.send('!fight')
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(battle, 'Duel registration must not block the shared fight entry point')
+  assert.strictEqual(battle.ordinal, 1)
+  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
+})
+
 test('combat: attacking damages the enemy and the enemy answers', async () => {
   const h = harness({
     player: basePlayer(),
@@ -154,6 +176,40 @@ test('dungeon: a player can enter a floor and start a real battle', async () => 
   assert.strictEqual(b.mode, 'floor')
   assert.ok(b.enemyHp > 0, 'the floor enemy must have HP')
   assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: !floor with no argument defaults to floor 1, never floor zero', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS })
+  const { handled, out } = await h.send('!floor')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'the no-argument command must create a floor battle')
+  assert.strictEqual(b.ordinal, 1)
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: !floor works in a registered group with only Duel enabled', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, features: ['duel'] })
+  const { handled, out } = await h.send('!floor')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'Duel registration must not block the shared floor entry point')
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
+})
+
+test('dungeon: !floor also works when Modes registration has no optional features enabled', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, features: [] })
+  const { handled, out } = await h.send('!floor')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'the core floor command must not depend on an optional feature toggle')
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
 })
 
 test('dungeon: winning a floor awards XP and can level the player up', async () => {

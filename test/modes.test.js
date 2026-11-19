@@ -49,13 +49,14 @@ function harness ({ player = null, group = { group_jid: '123@g.us', enabled: tru
   const store = require('../src/axyon-store')
   const saved = {}
   for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
-    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'settings', 'registerGroup', 'equippedCards', 'updateGroupFeatures',
+    'inventory', 'inventoryQty', 'addItem', 'consumeItem', 'settings', 'registerGroup', 'equippedCards', 'updateGroupFeatures', 'stage',
     'axyonNumberMode', 'roleOf', 'partnerOf']) {
     saved[k] = store[k]
   }
   store.player = async () => state.player
   store.group = async () => state.group
   store.getBattle = async () => state.battle
+  store.stage = async ordinal => ({ ordinal, name: 'Outer Gate', hp: 60, atk: 5, def: 2, xp: 40, zen: 60, locked: false })
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
   store.log = async () => {}
@@ -201,13 +202,13 @@ test('dungeon commands are routed by group feature, not player mode', async () =
   assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
 })
 
-test('combat commands are blocked when the group has not enabled combat', async () => {
-  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['dungeon'] } })
+test('!fight is a shared progression command in every registered group mode', async () => {
+  const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'duel', features: ['duel'] } })
   const r = await h.send('!fight')
   h.restore()
   assert.strictEqual(r.handled, true)
-  assert.match(r.out, /FEATURE UNAVAILABLE/)
-  assert.match(r.out, /combat/i)
+  assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
+  assert.match(r.out, /Outer Gate|BATTLE|HP/i)
 })
 
 test('shared battle actions still work in a Dungeon-only group', async () => {
@@ -220,6 +221,19 @@ test('shared battle actions still work in a Dungeon-only group', async () => {
   h.restore()
   assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
   assert.ok(h.state.battle === null || h.state.battle.enemyHp < 80, 'Dungeon battle action did not execute')
+})
+
+test('shared battle actions also work in a Duel-only group', async () => {
+  const h = harness({
+    player: basePlayer(),
+    group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'duel', features: ['duel'] },
+    battle: { mode: 'floor', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50, enemyHp: 80, playerHp: 100, enemy: { name: 'Floor Guardian', hp: 80, atk: 4, def: 1, xp: 10, zen: 10 } }
+  })
+  const r = await h.send('!attack')
+  const remaining = h.state.battle?.enemyHp
+  h.restore()
+  assert.doesNotMatch(r.out, /FEATURE UNAVAILABLE/)
+  assert.ok(remaining == null || remaining < 80, 'Duel-only group battle action did not execute')
 })
 
 test('suspended groups cannot use protected commands', async () => {
