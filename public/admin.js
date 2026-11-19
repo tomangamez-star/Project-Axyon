@@ -209,22 +209,23 @@ const A = (() => {
   function renderVisuals () {
     const rows = data.visuals || []
     return `<div class="admin-scroll"><table class="admin-table"><thead><tr>
-      <th>Mode</th><th>URL</th><th>Caption</th><th></th></tr></thead><tbody>
+      <th>Visual</th><th>Image</th><th>Caption</th><th></th></tr></thead><tbody>
       ${rows.length ? rows.map(v => `<tr>
         <td><b>${esc(v.mode)}</b></td>
-        <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v.url)}</td>
+        <td>${v.hasImage ? `<span class="tag on">Uploaded ${esc(v.mimeType || 'image')}</span>` : v.url ? '<span class="tag">Legacy URL</span>' : '<span class="tag off">No image</span>'}</td>
         <td>${esc(v.caption || '\u2014')}</td>
         <td style="text-align:right"><button class="mini danger" data-act="visual-remove" data-mode="${esc(v.mode)}">Remove</button></td>
       </tr>`).join('') : '<tr><td colspan="4" class="admin-empty">No visuals configured.</td></tr>'}
     </tbody></table></div>
-    <div class="admin-row">
-      <label class="admin-field"><small>Mode</small><select id="visMode">
-        <option value="arise">arise</option><option value="profile">profile</option>
+    <div class="admin-row" style="align-items:end;flex-wrap:wrap">
+      <label class="admin-field"><small>Visual type</small><select id="visMode">
+        <option value="arise">arise / welcome</option><option value="profile">profile</option>
         <option value="battle">battle</option><option value="boss">boss</option>
         <option value="dungeon">dungeon</option><option value="duel">duel</option></select></label>
-      <label class="admin-field" style="flex:3"><small>Image / GIF / MP4 URL</small><input id="visUrl" placeholder="https://\u2026"></label>
+      <label class="admin-field" style="flex:3;min-width:220px"><small>Choose image from your phone</small><input id="visFile" type="file" accept="image/jpeg,image/png,image/webp,image/gif" /></label>
       <label class="admin-field" style="flex:2"><small>Caption (optional)</small><input id="visCaption" placeholder="The System awakens."></label>
-      <button class="primary" id="setVisual">Set visual</button>
+      <button class="primary" id="setVisual">Upload &amp; set visual</button>
+      <p class="admin-note" style="flex-basis:100%;margin:0">JPG, PNG, WEBP or GIF · Maximum 8 MB. Images are stored in the database, so they remain available after a redeploy.</p>
     </div>`
   }
 
@@ -419,12 +420,31 @@ const A = (() => {
     }
 
     const setVisual = host.querySelector('#setVisual')
-    if (setVisual) setVisual.onclick = () => {
-      const url = host.querySelector('#visUrl').value.trim()
-      if (!/^https?:\/\//i.test(url)) return requireField(host.querySelector('#visUrl'), 'Paste a full http:// or https:// link.')
-      act('visual-set', {
-        mode: host.querySelector('#visMode').value, url, caption: host.querySelector('#visCaption').value
-      }).catch(() => {})
+    if (setVisual) setVisual.onclick = async () => {
+      const fileInput = host.querySelector('#visFile')
+      const file = fileInput?.files?.[0]
+      if (!file) return requireField(fileInput, 'Choose an image from your phone first.')
+      if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type)) return requireField(fileInput, 'Choose a JPG, PNG, WEBP or GIF image.')
+      if (file.size > 8 * 1024 * 1024) return requireField(fileInput, 'Image must be 8 MB or smaller.')
+      banner('')
+      setVisual.disabled = true
+      setVisual.textContent = 'Uploading…'
+      try {
+        const form = new FormData()
+        form.append('mode', host.querySelector('#visMode').value)
+        form.append('caption', host.querySelector('#visCaption').value)
+        form.append('image', file, file.name)
+        const response = await fetch('/dashboard/api/visual-upload', {
+          method: 'POST', credentials: 'same-origin', body: form,
+          headers: { 'x-architect-csrf': csrf }
+        })
+        const out = await response.json().catch(() => ({ error: `Invalid server response (HTTP ${response.status})` }))
+        if (!response.ok) throw Error(out.error || out.message || `HTTP ${response.status}`)
+        toast(out.message || 'Visual uploaded')
+        fileInput.value = ''
+        await load()
+      } catch (e) { banner(e.message); toast(e.message) }
+      finally { setVisual.disabled = false; setVisual.textContent = 'Upload & set visual' }
     }
 
     const grantAuth = host.querySelector('#grantAuth')
