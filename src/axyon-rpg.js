@@ -317,8 +317,22 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
    * is the explicit opt-in used only by battle and duels.
    */
   const buttons = (s, j, m, body) => s.sendMessage(j, { text: body }, { quoted: m })
-  const tapButtons = (s, j, m, body, footer, defs, owner) => {
-    if (sendButtons) return sendButtons(s, j, body, footer || WATERMARK, defs, owner)
+  const tapButtons = async (s, j, m, body, footer, defs, owner) => {
+    /*
+     * Battle entry must never depend on WhatsApp's optional native-flow
+     * transport. If Baileys/WhatsApp rejects an interactive payload (or the
+     * session does not expose relayMessage), send the complete battle card as
+     * ordinary text instead. Players can still use the text commands, so a
+     * button failure must not swallow the encounter.
+     */
+    if (sendButtons) {
+      try {
+        const result = await sendButtons(s, j, body, footer || WATERMARK, defs, owner)
+        if (result === true) return true
+      } catch (e) {
+        logger?.warn?.({ err: e?.message || e }, 'native buttons unavailable; falling back to text')
+      }
+    }
     return s.sendMessage(j, { text: body }, { quoted: m })
   }
 

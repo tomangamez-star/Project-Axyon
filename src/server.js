@@ -530,6 +530,7 @@ class WhatsAppConnection {
     this.ownMessageIds.add(String(g.key.id))
     if (this.ownMessageIds.size > 4000) this.ownMessageIds.delete(this.ownMessageIds.values().next().value)
     await this.outputGuard.run(jid, () => sock.relayMessage(jid, g.message, { messageId: g.key.id }))
+    return true
   }
 
   async stop () {

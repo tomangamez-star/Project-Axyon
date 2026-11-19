@@ -31,8 +31,8 @@ function fakeSock () {
   }
 }
 
-function harness ({ player = null, battle = null, floors = [], features = ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'] } = {}) {
-  const a = createAxyon({})
+function harness ({ player = null, battle = null, floors = [], features = ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'], sendButtons } = {}) {
+  const a = createAxyon({ sendButtons })
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
   const state = { player: player ? { ...player } : null, battle, floors }
@@ -113,6 +113,26 @@ test('combat: !fight with no argument selects the player next stage, not stage z
   assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
 })
 
+test('combat: !fight sends its battle card when native WhatsApp buttons fail', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: async () => undefined })
+  const { handled, out } = await h.send('!fight')
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(battle, 'button transport failure must not prevent battle creation')
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected text fallback battle card, got: ${out.slice(0, 200)}`)
+})
+
+test('combat: !fight still sends its battle card when WhatsApp native buttons fail', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: async () => { throw new Error('native flow unavailable') } })
+  const { handled, out } = await h.send('!fight')
+  const battle = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(battle, 'button transport failure must not prevent battle creation')
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected text fallback battle card, got: ${out.slice(0, 200)}`)
+})
+
 test('combat: !fight works in a registered group with only Duel enabled', async () => {
   const h = harness({ player: basePlayer(), features: ['duel'] })
   const { handled, out } = await h.send('!fight')
@@ -188,6 +208,28 @@ test('dungeon: !floor with no argument defaults to floor 1, never floor zero', a
   assert.strictEqual(b.ordinal, 1)
   assert.strictEqual(b.mode, 'floor')
   assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: !floor sends its encounter when native WhatsApp buttons fail', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, sendButtons: async () => { throw new Error('native flow unavailable') } })
+  const { handled, out } = await h.send('!floor')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'button transport failure must not prevent floor entry')
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected text fallback floor card, got: ${out.slice(0, 200)}`)
+})
+
+test('dungeon: !floor still sends its encounter when WhatsApp native buttons fail', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, sendButtons: async () => { throw new Error('native flow unavailable') } })
+  const { handled, out } = await h.send('!floor')
+  const b = h.state.battle
+  h.restore()
+  assert.strictEqual(handled, true)
+  assert.ok(b, 'button transport failure must not prevent floor entry')
+  assert.strictEqual(b.mode, 'floor')
+  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected text fallback floor card, got: ${out.slice(0, 200)}`)
 })
 
 test('dungeon: !floor works in a registered group with only Duel enabled', async () => {
