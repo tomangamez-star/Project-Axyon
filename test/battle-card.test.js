@@ -11,6 +11,7 @@ const test = require('node:test')
 const assert = require('node:assert')
 
 const { createAxyon } = require('../src/axyon-rpg')
+const T = require('../src/theme')
 
 const a = createAxyon({})
 
@@ -44,7 +45,7 @@ test('battle card: omits PE bars and raw combat stats', () => {
 
 test('battle card: the enemy is shown as a monster, not as a player', () => {
   const text = card(battle, player)
-  assert.ok(text.toUpperCase().includes('MONSTER'), 'the enemy must be labelled MONSTER')
+  assert.ok(text.includes(T.font('MONSTER')), 'the enemy must be labelled MONSTER')
   assert.ok(!text.includes('EQUIPPED CARD'), 'a monster must not be given a player card')
 })
 
@@ -52,7 +53,44 @@ test('battle card: hides permanent usage trackers and shows command actions', ()
   const text = card(battle, player)
   assert.ok(!/ABILITY & USAGE TRACKER|CLASS MOVES|SELF-HEALING/i.test(text))
   assert.ok(text.includes('!attack') && text.includes('!heal') && text.includes('!defend'))
-  assert.ok(text.includes('Damage taken: 0') && text.includes('Damage blocked: 0'))
+  assert.ok(!text.includes('BATTLE ACTIVITY'), 'empty activity should not clutter the opening battle card')
+  assert.ok(!text.includes('Damage taken: 0') && !text.includes('Damage blocked: 0'))
+})
+
+
+test('battle card: separates sections and shows the real location, HP bars and equipped cards', () => {
+  const equippedBattle = {
+    ...battle,
+    location: 'Sunken Citadel · Dungeon Hall',
+    equippedCards: [{
+      equipped_slot: 1,
+      name: 'Makima',
+      ability: 'Control Chain',
+      ability_damage: 13,
+      damage: 7,
+      expires_at: null
+    }]
+  }
+  const text = card(equippedBattle, player)
+  assert.ok(text.includes('Sunken Citadel · Dungeon Hall'))
+  assert.ok(text.includes('Makima'))
+  assert.ok(text.includes('Control Chain'))
+  assert.ok(text.includes('13'))
+  assert.ok(text.includes('████'))
+  assert.ok(text.includes('━━━━━━━━━━━━━━━━━━━━'))
+  assert.ok(text.includes(T.font('EQUIPPED CARDS')))
+})
+
+
+test('battle card: shows only activity counters that have actually occurred', () => {
+  const text = card({ ...battle, damageTaken: 24, damageBlocked: 8 }, player)
+  assert.ok(text.includes(T.font('BATTLE ACTIVITY')))
+  assert.ok(text.includes('Damage taken: *24*'))
+  assert.ok(text.includes('Damage blocked: *8*'))
+
+  const partial = card({ ...battle, damageTaken: 12, damageBlocked: 0 }, player)
+  assert.ok(partial.includes('Damage taken: *12*'))
+  assert.ok(!partial.includes('Damage blocked:'))
 })
 
 test('battle card: a boss enemy is labelled BOSS', () => {
