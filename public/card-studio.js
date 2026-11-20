@@ -46,7 +46,7 @@
     // Read the actual file input at submit time. Do not depend on a prior change event
     // having completed (mobile browsers can dispatch it late or restore the input).
     imageData: await readSelectedArtwork(), name: $('csName').value, version: $('csVersion').value, arc: $('csArc').value,
-    cardType: $('csType').value, imageUrl: $('csImage').value, rarity: $('csRarity').value,
+    cardType: $('csType').value, renderer: $('csRenderer')?.value || 'old-gen', imageUrl: $('csImage').value, rarity: $('csRarity').value,
     percentRating: $('csPercent').value, starRating: $('csStars').value, baseDamage: $('csDamage').value,
     abilities: parseRows($('csAbilities').value), weapons: parseRows($('csWeapons').value),
     coin: $('csCoin').value, zen: $('csZen').value, claimLimit: $('csClaims').value,

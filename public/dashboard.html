@@ -143,11 +143,12 @@
 
   <!-- ---------------------------- CARD STUDIO --------------------------- -->
   <section class="screen" data-screen="cardstudio">
-    <div class="screen-head"><p class="eyebrow">AXYON &bull; CARD FORGE</p><h2>Card Customizer</h2><p class="muted">Design a card with the existing renderer, preview it, save it, then manually send it to a WhatsApp group. This does not trigger random spawning.</p></div>
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; CARD FORGE</p><h2>Card Customizer</h2><p class="muted">Design a battle card with either AXYON renderer, preview it, save it, then manually send it to a WhatsApp group. This does not trigger random spawning.</p></div>
     <div class="panel"><div class="detail-grid">
       <label>Character name<input id="csName" placeholder="Naruto Uzumaki" required></label>
       <label>Version<input id="csVersion" placeholder="Six Paths Mode"></label>
       <label>Arc<input id="csArc" placeholder="War Arc version"></label>
+      <label>Card renderer<select id="csRenderer"><option value="old-gen">Old Gen · AXYON classic</option><option value="ai-custom">AI Custom · Cinematic battle card</option></select></label>
       <label>Card type<select id="csType"><option value="character">Character</option><option value="weapon">Weapon</option></select></label>
       <label>Artwork URL (optional)<input id="csImage" type="url" placeholder="https://..."></label><label>Upload artwork (PNG/JPG/GIF/WebP, max 8 MB)<input id="csImageFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label><img id="csArtworkThumb" alt="Selected artwork" style="display:none;width:120px;height:150px;object-fit:cover;border-radius:10px">
       <label>Rarity tier (1–6)<input id="csRarity" type="number" min="1" max="6" value="3"></label>
