@@ -133,6 +133,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const b = await store.getBattle(ctx.userId)
     const p = await store.player(ctx.userId)
     if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
+    b.equippedCards = await store.equippedCards(ctx.userId)
     return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), [], true)
   }, { hidden: true })
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
@@ -191,7 +192,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
     if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
     const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
-    const b = { mode: 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
+    const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
     // The existing anthology is now part of floor entry. The seed keeps a
@@ -1716,6 +1717,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
           `*${r.battle.enemy.name}* answers for *${hit}*.`
         ].join('\n'))
       }
+      r.battle.equippedCards = await store.equippedCards(ctx.userId)
       await store.setBattle(ctx.userId, r.battle)
       await store.log(ctx.userId, 'item_use', entry.key, { inBattle: true })
       return axyon.withVisual(s, ctx.jid, m, r.battle.enemy.boss ? 'boss' : 'battle',

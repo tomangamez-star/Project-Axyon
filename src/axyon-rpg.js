@@ -227,37 +227,107 @@ function profileCard (p, extra = {}) {
  * hunter below, both with monospace bars, then the remaining uses.
  */
 function battleCard (b, p, note = '') {
-  const e = b.enemy
+  const e = b.enemy || {}
   const xpNeed = store.xpNeed(p.level)
-  const activity = [
-    'BATTLE ACTIVITY',
-    `Damage taken: ${Math.max(0, Number(b.damageTaken) || 0)}`,
-    `Damage blocked: ${Math.max(0, Number(b.damageBlocked) || 0)}`
-  ].join('\n')
   const playerName = String(p.name || 'Hunter')
-  return [
-    T.header({ creators: greetings.creatorsOf({}) }),
+  const location = String(b.location || (b.mode === 'floor'
+    ? e.name || `Dungeon Floor ${b.ordinal || 1}`
+    : `Stage ${b.ordinal || p.stage || 1}`))
+  const status = String(b.status || (e.boss ? 'BOSS ENCOUNTER' : 'IN PROGRESS'))
+  const playerHp = Math.max(0, Number(b.playerHp ?? p.hp) || 0)
+  const playerMaxHp = Math.max(0, Number(p.maxHp) || 0)
+  const enemyHp = Math.max(0, Number(b.enemyHp ?? e.hp) || 0)
+  const enemyMaxHp = Math.max(0, Number(e.hp) || 0)
+  const bar = (current, maximum, width = 20) => {
+    const ratio = maximum > 0 ? Math.max(0, Math.min(1, current / maximum)) : 0
+    const filled = Math.max(0, Math.min(width, Math.round(ratio * width)))
+    return T.m(`[${'█'.repeat(filled)}${'░'.repeat(width - filled)}]`)
+  }
+  const section = (heading, description, rows = []) => [
+    '━━━━━━━━━━━━━━━━━━━━',
+    T.font(heading, 'bold'),
+    description,
+    ...rows
+  ].filter(Boolean).join('\n')
+
+  const equipped = Array.isArray(b.equippedCards)
+    ? b.equippedCards.filter(c => c && (!c.expires_at || new Date(c.expires_at).getTime() > Date.now()))
+    : Array.isArray(p.equippedCards) ? p.equippedCards.filter(Boolean) : []
+
+  const activityRows = []
+  const damageTaken = Math.max(0, Number(b.damageTaken) || 0)
+  const damageBlocked = Math.max(0, Number(b.damageBlocked) || 0)
+  if (damageTaken > 0) activityRows.push(`• Damage taken: *${damageTaken}*`)
+  if (damageBlocked > 0) activityRows.push(`• Damage blocked: *${damageBlocked}*`)
+
+  const cardRows = equipped.length
+    ? equipped.map(c => {
+        const slot = Number(c.equipped_slot) || equipped.indexOf(c) + 1
+        const details = [`  ${T.b(`Slot ${slot} · ${c.name || 'Unnamed Card'}`)}`]
+        if (c.ability) {
+          const abilityDamage = c.ability_damage != null ? ` · Damage ${c.ability_damage}` : ''
+          details.push(`  Ability: ${c.ability}${abilityDamage}`)
+        } else if (c.damage != null) {
+          details.push(`  Card damage: ${c.damage}`)
+        }
+        return details.join('\n')
+      })
+    : ['  No cards are equipped yet. Visit your card collection and equip up to two cards to bring their abilities into battle.']
+
+  const out = [
+    `⬡ ${T.font('AXYN CORE', 'bold')}`,
+    `└─ by ${greetings.creatorsOf({}).join(' & ')}`,
     '',
-    `${T.b('BATTLE')} · ${T.i(`Turn ${b.turn}`)}${e.boss ? ` · ${T.b('BOSS')}` : ''}`,
+    `${T.font('BATTLE REPORT', 'bold')}  ·  ${T.b(`TURN ${b.turn || 1}`)}${e.boss ? '  ·  👑 BOSS' : ''}`,
     '',
-    note || null,
-    `🔵 *MONSTER*`,
-    `*${String(e.name || 'UNKNOWN').toUpperCase()}*`,
-    `*${Math.max(0, Number(b.enemyHp) || 0)} / ${Number(e.hp) || 0} HP*`,
+    section('📍  LOCATION',
+      'The arena where this encounter is unfolding. Every move from here shapes the outcome.',
+      [`*${location}*`, `Status: ${T.b(status)}`]),
     '',
-    `🔴 *PLAYER — ${playerName}*`,
-    `${p.rank || 'E'} Rank · Level ${p.level || 1} · ${p.class || 'Fighter'}`,
-    `${Math.max(0, Number(p.xp) || 0)} / ${xpNeed} XP`,
-    `*${Math.max(0, Number(b.playerHp) || 0)} / ${Number(p.maxHp) || 0} HP*`,
+    section(`🔵  ${e.boss ? 'BOSS ENCOUNTER' : 'MONSTER'}`,
+      'A hostile presence stands in your way. Watch its remaining health as the battle develops.',
+      [`*${String(e.name || 'UNKNOWN').toUpperCase()}*`, bar(enemyHp, enemyMaxHp), `*${enemyHp} / ${enemyMaxHp} HP*`]),
     '',
-    activity,
+    section(`🔴  YOUR HUNTER`,
+      'Your current condition and progression. Keep an eye on your health before choosing your next move.',
+      [
+        `*${T.hunterName(playerName)}*`,
+        `${p.rank || 'E'} Rank  ·  Level ${p.level || 1}  ·  ${p.class || 'Fighter'}`,
+        bar(playerHp, playerMaxHp),
+        `*${playerHp} / ${playerMaxHp} HP*`,
+        `⭐ XP  ·  *${Math.max(0, Number(p.xp) || 0)} / ${xpNeed} XP*`
+      ]),
     '',
-    '*BATTLE COMMANDS*',
-    '`!attack` · `!heal` · `!guard` · `!defend`',
-    '`!ability` · `!class` · `!card` · `!retreat`',
+    section('🎴  EQUIPPED CARDS',
+      'Your equipped cards provide the abilities and bonuses available to you during combat.',
+      cardRows),
+    activityRows.length ? '' : null,
+    activityRows.length ? section('📊  BATTLE ACTIVITY',
+      'A record of the impact you have taken and the damage you have successfully blocked.',
+      activityRows) : null,
     '',
-    T.i('Type a command to perform an action.')
-  ].filter(x => x !== null && x !== undefined && x !== '').join('\n')
+    section('⚔️  BATTLE COMMANDS',
+      'Choose the action that best fits the situation. AXYON will update the battle record after every turn.',
+      [
+        '`!attack`  ·  Strike the enemy',
+        '`!heal`  ·  Restore health',
+        '`!guard` / `!defend`  ·  Brace for impact',
+        '`!ability`  ·  Use an equipped card ability',
+        '`!class`  ·  Use a class move',
+        '`!card`  ·  View or manage your cards'
+      ]),
+    '',
+    '`!retreat`  ·  Leave this encounter',
+    T.i('The battle continues until you win, fall, or retreat.')
+  ]
+
+  if (note) {
+    out.splice(4, 0, section('✦  LATEST EVENT',
+      'The latest action has changed the state of this encounter.',
+      [String(note)]), '')
+  }
+
+  return out.filter(x => x !== null && x !== undefined && x !== '').join('\n')
 }
 
 /**
@@ -397,6 +467,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const b = {
       mode: 'stage',
       ordinal: Number(stage.ordinal),
+      location: stage.name || `Stage ${stage.ordinal}`,
+      equippedCards: await store.equippedCards(ctx.userId),
       enemy,
       enemyHp: enemy.hp,
       playerHp: p.hp,
@@ -714,9 +786,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
     if (b.enemyHp <= 0) return finishBattle(sock, m, ctx, p, b, true)
 
-    const hit = enemyHit(b.enemy, p, b.guard)
+    const hitDetails = enemyHitDetails(b.enemy, p, b.guard)
+    const hit = hitDetails.finalDamage
     b.guard = 0
     b.playerHp -= hit
+    b.damageTaken = Math.max(0, Number(b.damageTaken) || 0) + hit
+    b.damageBlocked = Math.max(0, Number(b.damageBlocked) || 0) + hitDetails.blocked
     note += `\n\ud83d\udc79 ${b.enemy.name} answers for *${hit}*.`
 
     /*
@@ -746,6 +821,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
     b.turn += 1
     b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
+    b.equippedCards = await store.equippedCards(ctx.userId)
     await store.setBattle(ctx.userId, b)
 
     return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
