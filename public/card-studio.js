@@ -4,17 +4,43 @@
     const at = line.lastIndexOf(':')
     return at < 0 ? { name: line.trim(), damage: 0 } : { name: line.slice(0, at).trim(), damage: Number(line.slice(at + 1).trim()) || 0 }
   }).filter(x => x.name)
-  const readSelectedArtwork = async () => {
-    const file = $('csImageFile')?.files?.[0]
+  // Mobile browsers can fail when the same local File is read again after its
+  // first successful preview. Cache the data URL by File object and share an
+  // in-flight read between the change handler and Preview/Save submissions.
+  const artworkCache = new WeakMap()
+  const artworkReads = new WeakMap()
+  const readSelectedArtwork = async (file = $('csImageFile')?.files?.[0]) => {
     if (!file) return ''
     if (file.size > 8 * 1024 * 1024) throw Error('Artwork must be 8 MB or smaller.')
     if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw Error('Choose a PNG, JPEG, GIF or WebP image.')
-    return await new Promise((resolve, reject) => {
+
+    const cached = artworkCache.get(file)
+    if (cached) return cached
+    const pending = artworkReads.get(file)
+    if (pending) return pending
+
+    const readPromise = new Promise((resolve, reject) => {
       const reader = new FileReader()
-      reader.onload = () => resolve(String(reader.result || ''))
+      reader.onload = () => {
+        const data = String(reader.result || '')
+        if (!data.startsWith('data:image/')) {
+          reject(Error('The selected artwork could not be read. Please choose the file again.'))
+          return
+        }
+        resolve(data)
+      }
       reader.onerror = () => reject(Error('The selected artwork could not be read. Please choose the file again.'))
+      reader.onabort = () => reject(Error('Artwork reading was interrupted. Please choose the file again.'))
       reader.readAsDataURL(file)
     })
+    artworkReads.set(file, readPromise)
+    try {
+      const data = await readPromise
+      artworkCache.set(file, data)
+      return data
+    } finally {
+      if (artworkReads.get(file) === readPromise) artworkReads.delete(file)
+    }
   }
   const fields = async () => ({
     // Read the actual file input at submit time. Do not depend on a prior change event
@@ -73,7 +99,7 @@
     const file = e.target.files?.[0]
     if (!file) { $('csArtworkThumb').style.display='none'; return }
     try {
-      const previewData = await readSelectedArtwork()
+      const previewData = await readSelectedArtwork(file)
       $('csArtworkThumb').src = previewData
       $('csArtworkThumb').style.display = 'block'
       $('csError').textContent = `Artwork selected: ${file.name}`
