@@ -538,7 +538,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/spawn') {
           const input = await body(req)
           const jid = String(input.groupJid || '').trim()
-          if (!/^\d{5,25}-\d{5,25}@g\.us$/.test(jid)) { json(res, 400, { ok: false, error: 'Select a registered WhatsApp group.' }); return true }
+          if (!/^\d{5,30}(?:-\d{5,25})?@g\.us$/.test(jid)) { json(res, 400, { ok: false, error: 'Select a registered WhatsApp group.' }); return true }
           const registeredGroups = await cardStore.groups()
           const registeredGroup = registeredGroups.find(g => g.group_jid === jid && g.status === 'ACTIVE' && g.enabled !== false)
           if (!registeredGroup) { json(res, 403, { ok:false, error:'That group is not actively registered with AXYON CORE.' }); return true }
