@@ -4,9 +4,22 @@
     const at = line.lastIndexOf(':')
     return at < 0 ? { name: line.trim(), damage: 0 } : { name: line.slice(0, at).trim(), damage: Number(line.slice(at + 1).trim()) || 0 }
   }).filter(x => x.name)
-  let uploadedArtwork = ''
-  const fields = () => ({
-    imageData: uploadedArtwork, name: $('csName').value, version: $('csVersion').value, arc: $('csArc').value,
+  const readSelectedArtwork = async () => {
+    const file = $('csImageFile')?.files?.[0]
+    if (!file) return ''
+    if (file.size > 8 * 1024 * 1024) throw Error('Artwork must be 8 MB or smaller.')
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) throw Error('Choose a PNG, JPEG, GIF or WebP image.')
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result || ''))
+      reader.onerror = () => reject(Error('The selected artwork could not be read. Please choose the file again.'))
+      reader.readAsDataURL(file)
+    })
+  }
+  const fields = async () => ({
+    // Read the actual file input at submit time. Do not depend on a prior change event
+    // having completed (mobile browsers can dispatch it late or restore the input).
+    imageData: await readSelectedArtwork(), name: $('csName').value, version: $('csVersion').value, arc: $('csArc').value,
     cardType: $('csType').value, imageUrl: $('csImage').value, rarity: $('csRarity').value,
     percentRating: $('csPercent').value, starRating: $('csStars').value, baseDamage: $('csDamage').value,
     abilities: parseRows($('csAbilities').value), weapons: parseRows($('csWeapons').value),
@@ -24,7 +37,7 @@
   async function preview() {
     $('csError').textContent = 'Rendering…'
     try {
-      const data = await api('preview', fields())
+      const data = await api('preview', await fields())
       $('csPreviewImage').src = `data:image/png;base64,${data.preview}`
       $('csPreviewImage').style.display = 'block'
       $('csCaption').textContent = data.caption
@@ -34,7 +47,7 @@
   async function save() {
     $('csError').textContent = 'Saving…'
     try {
-      const data = await api('save', fields())
+      const data = await api('save', await fields())
       $('csError').textContent = `Saved card #${data.card.id}. It has not been sent to WhatsApp.`
       await refresh()
     } catch (e) { $('csError').textContent = e.message }
@@ -57,16 +70,23 @@
     finally { b.disabled = false }
   })
   $('csImageFile')?.addEventListener('change', async e => {
-    const file = e.target.files?.[0]; if (!file) { uploadedArtwork = ''; return }
-    if (file.size > 8 * 1024 * 1024) { $('csError').textContent = 'Artwork must be 8 MB or smaller.'; e.target.value=''; return }
-    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { $('csError').textContent = 'Choose a PNG, JPEG, GIF or WebP image.'; e.target.value=''; return }
-    uploadedArtwork = await new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result)); r.onerror=reject; r.readAsDataURL(file) })
-    $('csArtworkThumb').src = uploadedArtwork; $('csArtworkThumb').style.display='block'; $('csError').textContent='Artwork ready.'
+    const file = e.target.files?.[0]
+    if (!file) { $('csArtworkThumb').style.display='none'; return }
+    try {
+      const previewData = await readSelectedArtwork()
+      $('csArtworkThumb').src = previewData
+      $('csArtworkThumb').style.display = 'block'
+      $('csError').textContent = `Artwork selected: ${file.name}`
+    } catch (error) {
+      e.target.value = ''
+      $('csArtworkThumb').style.display = 'none'
+      $('csError').textContent = error.message
+    }
   })
   $('csComplete')?.addEventListener('click', async () => {
     $('csError').textContent='AI is completing only empty fields…'
     try {
-      const data = await api('complete', {fields:fields()})
+      const data = await api('complete', {fields:await fields()})
       const f=data.fields || {}; const set=(id,v)=>{ if(v!==undefined && v!==null && $(id).value==='') $(id).value=String(v) }
       set('csName',f.name); set('csVersion',f.version); set('csArc',f.arc); set('csDamage',f.baseDamage); set('csCoin',f.coin); set('csZen',f.zen); set('csPercent',f.percentRating); set('csStars',f.starRating); set('csRarity',f.rarity)
       if (Array.isArray(f.abilities) && !$('csAbilities').value.trim()) $('csAbilities').value=f.abilities.map(x=>`${x.name} : ${x.damage}`).join('\n')
