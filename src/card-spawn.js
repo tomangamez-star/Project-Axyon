@@ -10,7 +10,10 @@
 const crypto = require('crypto')
 const store = require('./axyon-store')
 const artwork = require('./card-artwork')
-const renderers = [{ key: 'old-gen', render: require('./card-renderers/special-hunt-card') }]
+const renderers = [
+  { key: 'old-gen', label: 'Old Gen', render: require('./card-renderers/special-hunt-card') },
+  { key: 'ai-custom', label: 'AI Custom', render: require('./card-renderers/ai-custom-card') }
+]
 
 const AUTO_INTERVAL_MS = 6 * 60 * 60 * 1000
 // Generated drops default to a 30-day validity window; set 0 for permanent.

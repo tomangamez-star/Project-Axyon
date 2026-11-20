@@ -270,6 +270,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
     if (!name) throw Object.assign(Error('Character name is required.'), { status: 400 })
     return {
       name, version: clean(input.version, 100), arc: clean(input.arc, 100), cardType: clean(input.cardType || 'character', 20).toLowerCase() === 'weapon' ? 'weapon' : 'character',
+      renderer: ['old-gen', 'ai-custom'].includes(String(input.renderer || 'old-gen')) ? String(input.renderer || 'old-gen') : 'old-gen',
       rarity: n(input.rarity, 1, 6, 3), percentRating: n(input.percentRating, 0, 100, 50), starRating: n(input.starRating, 0, 10, 5),
       baseDamage: n(input.baseDamage, 0, 100000), abilities, weapons, coin: n(input.coin, 0, 100000000), zen: n(input.zen, 0, 100000000),
       claimLimit: n(input.claimLimit, 1, 100000, 30), expiresAt: expiresAt ? expiresAt.toISOString() : null, imageUrl, imageData: imageData ? imageData.toString('base64') : null
@@ -277,7 +278,8 @@ function createDashboard ({ sessions, database, lease, logger }) {
   }
   async function renderStudioCard (data) {
     const art = data.imageData ? Buffer.from(data.imageData, 'base64') : await cardSpawner.artwork.fetchBuffer(data.imageUrl)
-    const renderer = cardSpawner.renderers[0].render
+    const rendererEntry = cardSpawner.renderers.find(x => x.key === data.renderer) || cardSpawner.renderers[0]
+    const renderer = rendererEntry.render
     const card = {
       name: data.name, series: [data.version, data.arc].filter(Boolean).join(' • ') || 'AXYON CUSTOM CARD', card_type: data.cardType,
       weapon: data.weapons.map(x => x.name).join(', ') || '—', damage: data.baseDamage,
@@ -286,7 +288,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
       percent_rating: data.percentRating, star_rating: data.starRating, expires_at: data.expiresAt
     }
     const rendered = await renderer.render(card, art)
-    if (!rendered?.buffer) throw Error('The existing AXYON card renderer could not render this artwork.')
+    if (!rendered?.buffer) throw Error(`The ${rendererEntry.label || rendererEntry.key} renderer could not render this artwork.`)
     return { art, rendered }
   }
   function studioCaption (d, claim = 0) {
