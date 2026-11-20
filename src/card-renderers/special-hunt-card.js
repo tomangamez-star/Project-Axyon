@@ -90,9 +90,9 @@ function expiryLabel (value) {
   return remaining <= 0 ? `EXPIRED • ${dateText}` : `${dateText} • ${dayCount}D LEFT`
 }
 function starRow (rating, accent) {
-  const n = Math.max(1, Math.min(6, Number(rating) || 1))
-  const gap = 29, start = 350 - ((n - 1) * gap) / 2
-  return Array.from({ length: n }, (_, i) => `<text x="${start + i * gap}" y="607" text-anchor="middle" font-size="26" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${accent}" stroke="#101018" stroke-width="1.5" paint-order="stroke">★</text>`).join('')
+  const n = Math.max(0, Math.min(10, Number(rating ?? 5) || 0))
+  const gap = 24, start = 350 - (9 * gap) / 2
+  return Array.from({ length: 10 }, (_, i) => `<text x="${start + i * gap}" y="607" text-anchor="middle" font-size="22" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${i < n ? accent : '#667085'}" opacity="${i < n ? 1 : .55}" stroke="#101018" stroke-width="1.5" paint-order="stroke">★</text>`).join('')
 }
 function overlaySvg (card, palette = null) {
   const tier = oldTier(card)
@@ -106,6 +106,8 @@ function overlaySvg (card, palette = null) {
   const rarity = esc(tier.label)
   const damage = Math.max(0, Number(card.damage) || 0)
   const abilityDamage = Math.max(0, Number(card.ability_damage ?? card.abilityDamage) || 0)
+  const percentRating = Math.max(0, Math.min(100, Number(card.percent_rating ?? card.percentRating ?? Math.round((Number(card.rating) || tier.tier) / 6 * 100))))
+  const starRating = Math.max(0, Math.min(10, Number(card.star_rating ?? card.starRating ?? Math.round((Number(card.rating) || tier.tier) / 6 * 10))))
   const expiry = esc(expiryLabel(card.expires_at || card.expiresAt))
   const weapon = esc(card.weapon || '—')
   const id = esc(String(card.character_id || card.id || 'AXYON').replace(/^anilist-/i, ''))
@@ -130,10 +132,10 @@ function overlaySvg (card, palette = null) {
   <text x="94" y="123" text-anchor="middle" font-size="10" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1" fill="#FFFFFF">T${tier.tier} ${rarity}</text>
   <path d="M570 48 L650 48 L650 133 L608 151 L566 133 Z" fill="#080B13" fill-opacity=".93" stroke="url(#edge)" stroke-width="3"/>
   <text x="608" y="83" text-anchor="middle" font-size="12" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.2" fill="#DCE6F5">RATING</text>
-  <text x="608" y="124" text-anchor="middle" font-size="34" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${colors.accent2}">${Math.max(1, Math.min(6, Number(card.rating) || tier.tier))}<tspan font-size="15" fill="#FFFFFF">/6</tspan></text>
+  <text x="608" y="124" text-anchor="middle" font-size="34" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="${colors.accent2}">${percentRating}<tspan font-size="15" fill="#FFFFFF">/100</tspan></text>
   <text x="350" y="535" text-anchor="middle" font-size="${nameSize}" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="#FFFFFF" stroke="#080B13" stroke-width="4" paint-order="stroke" filter="url(#glow)">${name}</text>
   <text x="350" y="571" text-anchor="middle" font-size="16" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="3" fill="${colors.accent2}">${subtitle}</text>
-  ${starRow(card.rating || tier.tier, colors.accent2)}
+  ${starRow(starRating, colors.accent2)}
   <text x="82" y="660" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.5" fill="${colors.accent2}">BASE DAMAGE</text>
   <text x="82" y="693" font-size="32" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" fill="#FFFFFF">${damage}</text>
   <text x="350" y="660" font-size="13" font-family="DejaVu Sans,Arial,sans-serif" font-weight="900" letter-spacing="1.5" fill="${colors.accent2}">CARD TYPE</text>

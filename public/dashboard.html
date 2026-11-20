@@ -141,6 +141,30 @@
     <div id="adminBody-log"></div>
   </section>
 
+  <!-- ---------------------------- CARD STUDIO --------------------------- -->
+  <section class="screen" data-screen="cardstudio">
+    <div class="screen-head"><p class="eyebrow">AXYON &bull; CARD FORGE</p><h2>Card Customizer</h2><p class="muted">Design a card with the existing renderer, preview it, save it, then manually send it to a WhatsApp group. This does not trigger random spawning.</p></div>
+    <div class="panel"><div class="detail-grid">
+      <label>Character name<input id="csName" placeholder="Naruto Uzumaki" required></label>
+      <label>Version<input id="csVersion" placeholder="Six Paths Mode"></label>
+      <label>Arc<input id="csArc" placeholder="War Arc version"></label>
+      <label>Card type<select id="csType"><option value="character">Character</option><option value="weapon">Weapon</option></select></label>
+      <label>Artwork URL (direct HTTPS)<input id="csImage" type="url" placeholder="https://..." required></label>
+      <label>Rarity tier (1–6)<input id="csRarity" type="number" min="1" max="6" value="3"></label>
+      <label>Percent rating (0–100)<input id="csPercent" type="number" min="0" max="100" value="92"></label>
+      <label>Star rating (0–10)<input id="csStars" type="number" min="0" max="10" value="9"></label>
+      <label>Base damage<input id="csDamage" type="number" min="0" value="29"></label>
+      <label>Abilities (one per line: name : damage)<textarea id="csAbilities" rows="3" placeholder="Rasengan : 13&#10;Rasenshuriken : 16"></textarea></label>
+      <label>Weapons (one per line: name : damage)<textarea id="csWeapons" rows="3" placeholder="Kunai : 7"></textarea></label>
+      <label>Coin price<input id="csCoin" type="number" min="0" value="1100"></label>
+      <label>Zen price<input id="csZen" type="number" min="0" value="12000"></label>
+      <label>Claim limit<input id="csClaims" type="number" min="1" value="30"></label>
+      <label>Expires date<input id="csExpiry" type="date"></label>
+    </div><div class="actions"><button id="csPreview" class="primary" type="button">Render preview</button><button id="csSave" type="button">Save card</button></div><p class="error" id="csError"></p></div>
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">LIVE RENDER</p><h3>Card preview</h3></div></div><img id="csPreviewImage" alt="Rendered card preview" style="display:none;width:min(100%,420px);height:auto;border-radius:12px;margin:auto"><pre id="csCaption" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></div>
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">SAVED CARDS</p><h3>Manual releases</h3></div><button id="csRefresh" type="button">Refresh</button></div><div id="csSavedList" class="list empty">No saved cards yet.</div><label>Target WhatsApp group JID<input id="csGroupJid" placeholder="1234567890-123456789@g.us"></label></div>
+  </section>
+
   <!-- ----------------------------- FEEDBACK --------------------------- -->
   <section class="screen" data-screen="feedback">
     <div class="screen-head"><p class="eyebrow">AXYON &bull; FEEDBACK</p><h2>Talk to AXYON</h2><p class="muted">Send a message without signing in. Nothing identifies you &mdash; the conversation is tied to this tab only and is gone when you close it.</p></div>
@@ -247,6 +271,7 @@
     <button type="button" data-goto="stages"><span class="ico" aria-hidden="true">&#9876;</span><span class="lbl">Stages</span></button>
     <button type="button" data-goto="floors"><span class="ico" aria-hidden="true">&#127961;</span><span class="lbl">Floors</span></button>
     <button type="button" data-goto="modes"><span class="ico" aria-hidden="true">&#9881;</span><span class="lbl">Modes</span></button>
+    <button type="button" data-goto="cardstudio"><span class="ico" aria-hidden="true">&#127912;</span><span class="lbl">Card Studio</span></button>
     <button type="button" data-goto="visuals"><span class="ico" aria-hidden="true">&#127912;</span><span class="lbl">Visuals</span></button>
     <button type="button" data-goto="authority"><span class="ico" aria-hidden="true">&#128737;</span><span class="lbl">Authority</span></button>
     <button type="button" data-goto="settings"><span class="ico" aria-hidden="true">&#128295;</span><span class="lbl">Settings</span></button>
@@ -259,5 +284,5 @@
 
 <div id="toast" class="toast"></div>
 <script src="/dashboard/app.js" defer></script>
-<script src="/dashboard/admin.js" defer></script>
+<script src="/dashboard/admin.js" defer></script><script src="/dashboard/card-studio.js" defer></script>
 </body></html>

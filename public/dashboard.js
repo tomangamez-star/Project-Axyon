@@ -32,6 +32,7 @@ let refreshTimer = null
 let pairCode = ''
 let currentScreen = 'overview'
 let pendingPhone = ''
+window.architectCsrf = () => csrf
 
 /* ------------------------------------------------------------- feedback */
 
@@ -76,7 +77,7 @@ async function api (path, options = {}) {
 
 /* ------------------------------------------------------- SCREEN SWITCHER */
 
-const SCREENS = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'visuals', 'authority', 'settings', 'log', 'feedback', 'help']
+const SCREENS = ['overview', 'pairing', 'groups', 'players', 'shop', 'stages', 'floors', 'modes', 'cardstudio', 'visuals', 'authority', 'settings', 'log', 'feedback', 'help']
 
 /* Which permission a screen needs. A screen the role cannot read is hidden
  * from the side panel and refused if reached by hash. */
@@ -90,6 +91,7 @@ const SCREEN_PERMISSION = {
   floors: 'floors.read',
   modes: 'modes.read',
   visuals: 'visuals.read',
+  cardstudio: 'overview.control',
   authority: 'authority.read',
   settings: 'settings.read',
   log: 'log.read',

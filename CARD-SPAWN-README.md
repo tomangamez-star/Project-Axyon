@@ -59,3 +59,9 @@ Set these variables in Render → your service → Environment:
 - `SERPAPI_REQUIRED=true` — makes card generation report a Pinterest/SerpApi error instead of silently switching to the legacy artwork providers.
 
 The repository's `render.yaml` declares the secret as `sync: false`, so the key is not stored in source control. Never paste the key into code or commit it. Pinterest search results may include artwork owned by third parties; only use images you have permission to reproduce in generated cards and follow the applicable Pinterest and SerpApi terms.
+
+## Dashboard Card Studio
+
+The dashboard includes a manual Card Studio for authorized control users. It accepts a direct HTTPS artwork URL, character name, version, arc, rarity tier, percent rating (0–100), star rating (0–10), base damage, multiple ability/weapon damage rows, Coin/Zen prices, claim limit and expiry date. It previews through the existing Old Gen renderer, saves the rendered image and structured card data in `axyon_card_studio`, and only sends the saved card when an admin explicitly chooses Spawn and supplies a WhatsApp group JID. The complete card-code text is sent as the image caption. Saving does not broadcast or trigger the random `!spawncard` process.
+
+The card renderer now displays percent rating out of 100 and stars out of 10. Rarity tier remains a separate 1–6 field used for the existing tier styling.

@@ -40,6 +40,7 @@ const { createCommands } = require('./axyon-commands')
 const access = require('./access')
 const dashAuth = require('./dash-auth')
 const store = require('./axyon-store')
+const cardSpawner = require('./card-spawn')
 
 const PUBLIC = path.join(__dirname, '..', 'public')
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8' }
@@ -215,7 +216,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
   async function page (req, res) {
     try {
       let html = await fs.readFile(path.join(PUBLIC, 'dashboard.html'), 'utf8')
-      const FILES = { 'app.js': 'dashboard.js', 'app.css': 'dashboard.css', 'admin.js': 'admin.js', 'admin.css': 'admin.css', 'controls.css': 'controls.css' }
+      const FILES = { 'app.js': 'dashboard.js', 'app.css': 'dashboard.css', 'admin.js': 'admin.js', 'admin.css': 'admin.css', 'controls.css': 'controls.css', 'card-studio.js': 'card-studio.js' }
       const names = [...new Set([...html.matchAll(/\/dashboard\/([a-z]+\.(?:js|css))/g)].map(m => m[1]))]
       for (const name of names) {
         const file = FILES[name] || name
@@ -287,6 +288,107 @@ function createDashboard ({ sessions, database, lease, logger }) {
     }
   }
 
+  /*
+   * CARD STUDIO
+   * -----------
+   * A manual card forge for control users: render through the existing Old Gen
+   * renderer, preview, save, then send to a group on explicit request. Saving
+   * never broadcasts and never touches the random `!spawncard` path.
+   */
+  async function ensureCardStudioSchema () {
+    const d = database()
+    if (!d) throw Object.assign(Error('DATABASE_URL is required'), { status: 503 })
+    await d.query(`CREATE TABLE IF NOT EXISTS axyon_card_studio (
+      id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, card_data JSONB NOT NULL,
+      artwork_url TEXT NOT NULL DEFAULT '', image_data BYTEA NOT NULL,
+      rendered_data BYTEA NOT NULL, created_by TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), spawned_at TIMESTAMPTZ
+    )`)
+    return d
+  }
+
+  function normalizeStudioInput (input) {
+    const clean = (v, max = 180) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max)
+    const n = (v, min, max, fallback = 0) => Math.max(min, Math.min(max, Number.isFinite(Number(v)) ? Number(v) : fallback))
+    const abilities = Array.isArray(input.abilities) ? input.abilities.slice(0, 12).map(x => ({ name: clean(x.name, 80), damage: n(x.damage, 0, 100000) })).filter(x => x.name) : []
+    const weapons = Array.isArray(input.weapons) ? input.weapons.slice(0, 8).map(x => ({ name: clean(x.name, 80), damage: n(x.damage, 0, 100000) })).filter(x => x.name) : []
+    const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null
+    if (expiresAt && Number.isNaN(expiresAt.getTime())) throw Object.assign(Error('Invalid expiry date'), { status: 400 })
+    const imageUrl = clean(input.imageUrl, 2048)
+    if (!/^https:\/\//i.test(imageUrl)) throw Object.assign(Error('Artwork must be a direct HTTPS image URL.'), { status: 400 })
+    const name = clean(input.name, 100)
+    if (!name) throw Object.assign(Error('Character name is required.'), { status: 400 })
+    return {
+      name,
+      version: clean(input.version, 100),
+      arc: clean(input.arc, 100),
+      cardType: clean(input.cardType || 'character', 20).toLowerCase() === 'weapon' ? 'weapon' : 'character',
+      rarity: n(input.rarity, 1, 6, 3),
+      percentRating: n(input.percentRating, 0, 100, 50),
+      starRating: n(input.starRating, 0, 10, 5),
+      baseDamage: n(input.baseDamage, 0, 100000),
+      abilities,
+      weapons,
+      coin: n(input.coin, 0, 100000000),
+      zen: n(input.zen, 0, 100000000),
+      claimLimit: n(input.claimLimit, 1, 100000, 30),
+      expiresAt: expiresAt ? expiresAt.toISOString() : null,
+      imageUrl
+    }
+  }
+
+  async function renderStudioCard (data) {
+    const art = await cardSpawner.artwork.fetchBuffer(data.imageUrl)
+    const renderer = cardSpawner.renderers[0].render
+    const card = {
+      name: data.name,
+      series: data.arc || data.version || 'AXYON CUSTOM CARD',
+      card_type: data.cardType,
+      weapon: data.weapons.map(x => x.name).join(', ') || '\u2014',
+      damage: data.baseDamage,
+      ability: data.abilities.map(x => x.name).join(', ') || '\u2014',
+      ability_damage: data.abilities.reduce((sum, x) => sum + x.damage, 0),
+      rating: data.rarity,
+      percent_rating: data.percentRating,
+      star_rating: data.starRating,
+      expires_at: data.expiresAt
+    }
+    const rendered = await renderer.render(card, art)
+    if (!rendered?.buffer) throw Error('The existing AXYON card renderer could not render this artwork.')
+    return { art, rendered }
+  }
+
+  function studioCaption (d, claim = 0) {
+    const date = d.expiresAt ? new Date(d.expiresAt).toISOString().slice(0, 10) : 'Never'
+    const abilities = d.abilities.length ? d.abilities.map(x => `${x.name} : ${x.damage}`).join('\n') : '\u2014'
+    const weapons = d.weapons.length ? d.weapons.map(x => `${x.name} : ${x.damage}`).join('\n') : '\u2014'
+    return [
+      '*AXYN CORE - Lil Clutch & Montai*',
+      '*CARD CODE*',
+      '',
+      `Name : ${d.name}`,
+      `Version : ${d.version || '\u2014'}`,
+      `Arc : ${d.arc || '\u2014'}`,
+      `Ability : ${d.abilities.map(x => x.name).join(' , ') || '\u2014'}`,
+      `Weapon : ${d.weapons.map(x => x.name).join(' , ') || '\u2014'}`,
+      '',
+      '*Ability damage*',
+      abilities,
+      '',
+      '*Weapon damage*',
+      weapons,
+      '',
+      `Rating : ${d.percentRating}/100`,
+      `Star Rating : ${d.starRating}/10`,
+      '*Price*',
+      `Coin : ${d.coin}`,
+      `Zen : ${d.zen}`,
+      '',
+      `Claim : ${claim} / ${d.claimLimit}`,
+      `Expires date : ${date}`
+    ].join('\n')
+  }
+
   async function handle (req, res) {
     const url = new URL(req.url, 'http://localhost')
     if (!url.pathname.startsWith('/dashboard')) return false
@@ -298,6 +400,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
       if (req.method === 'GET' && url.pathname === '/dashboard/app.js') { await asset(req, res, 'dashboard.js'); return true }
       if (req.method === 'GET' && url.pathname === '/dashboard/admin.js') { await asset(req, res, 'admin.js'); return true }
       if (req.method === 'GET' && url.pathname === '/dashboard/admin.css') { await asset(req, res, 'admin.css'); return true }
+      if (req.method === 'GET' && url.pathname === '/dashboard/card-studio.js') { await asset(req, res, 'card-studio.js'); return true }
 
       /* ----------------------------------------------------------- login */
       if (req.method === 'GET' && url.pathname === '/dashboard/api/session') {
@@ -454,6 +557,57 @@ function createDashboard ({ sessions, database, lease, logger }) {
         if (!await requireAuth(req, res, 'commands.read')) return true
         json(res, 200, { ok: true, commands: commandIndex })
         return true
+      }
+
+      /* ------------------------------------------------------ card studio */
+      if (url.pathname.startsWith('/dashboard/api/card-studio')) {
+        const s = await requireAuth(req, res, 'overview.control', req.method !== 'GET')
+        if (!s) return true
+        const d = await ensureCardStudioSchema()
+
+        if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/preview') {
+          const input = normalizeStudioInput(await body(req, 65536))
+          const { rendered } = await renderStudioCard(input)
+          json(res, 200, { ok: true, preview: rendered.buffer.toString('base64'), caption: studioCaption(input) })
+          return true
+        }
+
+        if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/save') {
+          const input = normalizeStudioInput(await body(req, 65536))
+          const { art, rendered } = await renderStudioCard(input)
+          const saved = await d.query(
+            `INSERT INTO axyon_card_studio(name,card_data,artwork_url,image_data,rendered_data,created_by)
+             VALUES($1,$2::jsonb,$3,$4,$5,$6) RETURNING id, name, created_at`,
+            [input.name, JSON.stringify(input), input.imageUrl, art, rendered.buffer, String(s.phone || '')]
+          )
+          json(res, 200, { ok: true, card: saved.rows[0] })
+          return true
+        }
+
+        if (req.method === 'GET' && url.pathname === '/dashboard/api/card-studio/list') {
+          const rows = await d.query('SELECT id,name,created_at,spawned_at FROM axyon_card_studio ORDER BY id DESC LIMIT 50')
+          json(res, 200, { ok: true, cards: rows.rows })
+          return true
+        }
+
+        if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/spawn') {
+          const input = await body(req)
+          const jid = String(input.groupJid || '').trim()
+          if (!/^\d{5,25}-\d{5,25}@g\.us$/.test(jid)) { json(res, 400, { ok: false, error: 'Enter a valid WhatsApp group JID ending in @g.us.' }); return true }
+          if (!lease.status().owned) { json(res, 409, { ok: false, error: 'This deployment is in standby. Take control first.' }); return true }
+          const result = await d.query('SELECT * FROM axyon_card_studio WHERE id=$1', [Number(input.id)])
+          const saved = result.rows[0]
+          if (!saved) { json(res, 404, { ok: false, error: 'Saved card not found.' }); return true }
+          const state = sessions.status()
+          const live = sessions.get(state.primary?.sessionId)
+          if (!live?.sock || live.state !== 'connected') { json(res, 503, { ok: false, error: 'Primary WhatsApp session is not connected.' }); return true }
+          const data = saved.card_data
+          const caption = studioCaption(data)
+          await live.sock.sendMessage(jid, { image: saved.rendered_data, caption })
+          await d.query('UPDATE axyon_card_studio SET spawned_at=NOW() WHERE id=$1', [saved.id])
+          json(res, 200, { ok: true, message: 'Saved card sent to WhatsApp.' })
+          return true
+        }
       }
 
       /* --------------------------------------------------------- controls */
