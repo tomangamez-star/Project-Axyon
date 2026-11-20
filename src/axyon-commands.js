@@ -48,13 +48,10 @@ const MODE_LIST = {
 }
 
 function parseNum (v) {
-  // Number('') is 0. Treat a missing/blank argument as absent so commands
-  // such as !fight and !floor can select the player's next progression step.
   const raw = String(v ?? '').replace(/,/g, '').trim()
   if (!raw) return null
   const n = Number(raw)
-  const whole = Math.floor(n)
-  return Number.isFinite(n) && Number.isSafeInteger(whole) && whole >= 1 ? whole : null
+  return Number.isFinite(n) ? Math.floor(n) : null
 }
 
 function createCommands ({ axyon, economy, logger, ai }) {
@@ -136,10 +133,11 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const b = await store.getBattle(ctx.userId)
     const p = await store.player(ctx.userId)
     if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
-    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), axyon.battleButtons(), true)
+    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), [], true)
   }, { hidden: true })
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
+  cmd('defend', 'battle', '{p}defend', 'Alias for guard.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('heal', 'battle', '{p}heal', 'Recover 25% HP. 5 uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
   cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
     /*
@@ -161,6 +159,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     return axyon.battleAct(s, m, ctx, 'class', 1, args.join(' '))
   }, { hidden: true })
   cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
+  cmd('ability', 'battle', '{p}ability', 'Use your equipped card ability in battle.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
   cmd('retreat', 'battle', '{p}retreat', 'Leave the fight with no rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
 
   /* --------------------------------------------------------------- dungeon */
@@ -195,7 +194,11 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const b = { mode: 'floor', ordinal, enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
-    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p, `You descend into *${f.name}*.`), axyon.battleButtons(), true)
+    // The existing anthology is now part of floor entry. The seed keeps a
+    // player's intro stable for the same floor, while !fight remains story-free.
+    const floorStory = lore.story(`${ctx.userId}:floor:${ordinal}`)
+    await axyon.send(s, ctx.jid, m, lore.storyCard(floorStory, ctx.prefix))
+    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p), [], true)
   })
 
   /* ----------------------------------------------------------------- party */
@@ -581,7 +584,12 @@ function createCommands ({ axyon, economy, logger, ai }) {
   cmd('cards', 'cards', '{p}cards [page]', 'Your full card collection and stats.', async (s, m, ctx, args) => axyon.cardPanel(s, m, ctx, parseNum(args[0]) || 1))
   cmd('card', 'cards', '{p}card <number|equip|unequip|slots|abilities|use|inventory>', 'Inspect, equip and use your collectible cards.', async (s, m, ctx, args) => {
     const sub = String(args[0] || '').toLowerCase()
-    if (!sub || sub === 'inventory') return axyon.cardPanel(s, m, ctx, parseNum(args[1]) || 1)
+    if (!sub) {
+      const activeBattle = await store.getBattle(ctx.userId)
+      if (activeBattle) return axyon.battleAct(s, m, ctx, 'card')
+      return axyon.cardPanel(s, m, ctx, 1)
+    }
+    if (sub === 'inventory') return axyon.cardPanel(s, m, ctx, parseNum(args[1]) || 1)
     if (sub === 'slots') return axyon.cardSlots(s, m, ctx)
     if (sub === 'abilities') return axyon.cardAbilities(s, m, ctx)
     if (sub === 'equip') {
@@ -609,7 +617,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
       const studio = await store.claimStudioCard(ctx.userId, target).catch(() => null)
       if (studio?.ok) return axyon.send(s, ctx.jid, m, `🎴 *CARD CLAIMED*\n\n${studio.card.name} · Collection #${studio.slot}\nClaims: ${studio.claimed}/${studio.limit}`)
       if (studio && studio.reason !== 'not_found') {
-        const messages = { not_registered: 'Use !arise first.', claimed: 'You have already claimed this card.', expired: 'This card has expired.', limit: 'All copies of this card have been claimed.' }
+        const messages = {not_registered:'Use !arise first.',claimed:'You have already claimed this card.',expired:'This card has expired.',limit:'All copies of this card have been claimed.'}
         return axyon.send(s, ctx.jid, m, `❌ ${messages[studio.reason] || 'This card cannot be claimed.'}`)
       }
       return axyon.claimDrop(s, m, ctx, target)
@@ -851,13 +859,8 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (['cardadmin', 'spawncard', 'grantcard'].includes(command.name)) return 'cards'
     if (command.name === 'carduse') return { all: ['cards'], any: ['combat', 'dungeon'] }
     if (['arise', 'help', 'ping', 'ai', 'profile'].includes(command.name)) return null
-
-    // Core progression entry points are shared across registration modes.
-    // Their turn actions must be shared too, otherwise !fight/!floor could
-    // start a battle in one mode but !attack/!guard would be blocked in another.
-    if (['fight', 'floor', 'stages'].includes(command.name)) return null
-    if (command.section === 'battle') return null
-
+    // The same battle actions resolve both Combat stages and Dungeon floors.
+    if (command.section === 'battle' && !['fight', 'stages'].includes(command.name)) return ['combat', 'dungeon']
     return SECTION_FEATURE[command.section] || null
   }
   const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel>\` — Change mode (AXYON)`
@@ -1783,22 +1786,6 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   async function handle (sock, m, content) {
     const ctx = await buildContext(sock, m, content)
-
-    /*
-     * NUMBERED OPTION REPLY
-     * ---------------------
-     * With native buttons gone, a card offers its actions as a numbered list
-     * and the player answers with the number. This runs BEFORE command parsing
-     * so a bare "2" is understood as "the second option on the card I was just
-     * shown" — but only when that player actually has a live card pending, so
-     * ordinary chat containing a number is never hijacked.
-     */
-    const bare = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
-    if (/^\d{1,2}$/.test(bare)) {
-      const id = axyon.takePendingOption(ctx.jid, ctx.userId, bare)
-      if (id && await section(sock, m, id)) return true
-    }
-
     const parsed = parse(content, ctx.prefix)
     if (!parsed) return false
 

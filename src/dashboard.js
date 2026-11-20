@@ -39,8 +39,8 @@ const { createAxyon } = require('./axyon-rpg')
 const { createCommands } = require('./axyon-commands')
 const access = require('./access')
 const dashAuth = require('./dash-auth')
-const store = require('./axyon-store')
 const cardSpawner = require('./card-spawn')
+const cardStore = require('./axyon-store')
 
 const PUBLIC = path.join(__dirname, '..', 'public')
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8' }
@@ -68,54 +68,6 @@ async function body (req, max = 16384) {
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw Object.assign(Error('Invalid JSON'), { status: 400 }) }
 }
-
-async function multipart (req, max = 8 * 1024 * 1024 + 65536) {
-  const chunks = []
-  let size = 0
-  for await (const chunk of req) {
-    size += chunk.length
-    if (size > max) throw Object.assign(Error('Image is too large. Maximum size is 8 MB.'), { status: 413 })
-    chunks.push(chunk)
-  }
-  const raw = Buffer.concat(chunks)
-  const type = String(req.headers['content-type'] || '')
-  const boundary = type.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
-  if (!/^multipart\/form-data/i.test(type) || !boundary) throw Object.assign(Error('Expected an image upload.'), { status: 400 })
-  const marker = Buffer.from(`--${(boundary[1] || boundary[2]).trim()}`)
-  const fields = {}
-  let pos = 0
-  while ((pos = raw.indexOf(marker, pos)) !== -1) {
-    pos += marker.length
-    if (raw[pos] === 45 && raw[pos + 1] === 45) break
-    if (raw[pos] === 13 && raw[pos + 1] === 10) pos += 2
-    const headerEnd = raw.indexOf(Buffer.from('\r\n\r\n'), pos)
-    if (headerEnd < 0) break
-    const headers = raw.subarray(pos, headerEnd).toString('utf8')
-    const next = raw.indexOf(marker, headerEnd + 4)
-    if (next < 0) break
-    let end = next
-    if (raw[end - 2] === 13 && raw[end - 1] === 10) end -= 2
-    const disposition = headers.match(/content-disposition:\s*form-data;\s*name="([^"]+)"(?:;\s*filename="([^"]*)")?/i)
-    if (disposition) {
-      const name = disposition[1]
-      const data = raw.subarray(headerEnd + 4, end)
-      const mime = (headers.match(/content-type:\s*([^\r\n]+)/i) || [])[1] || ''
-      fields[name] = disposition[2] !== undefined ? { data: Buffer.from(data), mime: mime.trim(), filename: disposition[2] } : data.toString('utf8')
-    }
-    pos = next
-  }
-  return fields
-}
-
-function imageMime (data) {
-  if (!Buffer.isBuffer(data)) return ''
-  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png'
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg'
-  if (data.length >= 12 && data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
-  if (data.length >= 6 && /^GIF8[79]a$/.test(data.toString('ascii', 0, 6))) return 'image/gif'
-  return ''
-}
-
 function maskPhone (value) {
   const x = String(value || '').split(':')[0].split('@')[0].replace(/\D/g, '')
   return x.length > 7 ? `+${x.slice(0, 3)} ••• ••${x.slice(-4)}` : x ? 'Connected account' : 'Not available'
@@ -288,13 +240,6 @@ function createDashboard ({ sessions, database, lease, logger }) {
     }
   }
 
-  /*
-   * CARD STUDIO
-   * -----------
-   * A manual card forge for control users: render through the existing Old Gen
-   * renderer, preview, save, then send to a group on explicit request. Saving
-   * never broadcasts and never touches the random `!spawncard` path.
-   */
   async function ensureCardStudioSchema () {
     const d = database()
     if (!d) throw Object.assign(Error('DATABASE_URL is required'), { status: 503 })
@@ -302,6 +247,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
       id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, card_data JSONB NOT NULL,
       artwork_url TEXT NOT NULL DEFAULT '', image_data BYTEA NOT NULL,
       rendered_data BYTEA NOT NULL, created_by TEXT NOT NULL DEFAULT '',
+      claim_code TEXT UNIQUE, claim_count INT NOT NULL DEFAULT 0,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), spawned_at TIMESTAMPTZ
     )`)
     await d.query('ALTER TABLE axyon_card_studio ADD COLUMN IF NOT EXISTS claim_code TEXT UNIQUE')
@@ -309,7 +255,6 @@ function createDashboard ({ sessions, database, lease, logger }) {
     await d.query(`CREATE TABLE IF NOT EXISTS axyon_card_studio_claims (card_id BIGINT NOT NULL REFERENCES axyon_card_studio(id) ON DELETE CASCADE, user_id TEXT NOT NULL, claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(card_id,user_id))`)
     return d
   }
-
   function normalizeStudioInput (input) {
     const clean = (v, max = 180) => String(v ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, max)
     const n = (v, min, max, fallback = 0) => Math.max(min, Math.min(max, Number.isFinite(Number(v)) ? Number(v) : fallback))
@@ -319,79 +264,36 @@ function createDashboard ({ sessions, database, lease, logger }) {
     if (expiresAt && Number.isNaN(expiresAt.getTime())) throw Object.assign(Error('Invalid expiry date'), { status: 400 })
     const imageUrl = clean(input.imageUrl, 2048)
     const imageData = input.imageData ? Buffer.from(String(input.imageData).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, ''), 'base64') : null
-    if (imageData && (imageData.length > 8 * 1024 * 1024 || !['89504e47', 'ffd8ff', '47494638', '52494646'].some(sig => imageData.subarray(0, 4).toString('hex').startsWith(sig)))) throw Object.assign(Error('Upload a valid PNG, JPEG, GIF or WebP image under 8 MB.'), { status: 400 })
+    if (imageData && (imageData.length > 8 * 1024 * 1024 || !['89504e47','ffd8ff','47494638','52494646'].some(sig => imageData.subarray(0,4).toString('hex').startsWith(sig)))) throw Object.assign(Error('Upload a valid PNG, JPEG, GIF or WebP image under 8 MB.'), { status: 400 })
     if (!imageData && !/^https:\/\//i.test(imageUrl)) throw Object.assign(Error('Choose an artwork file or enter a direct HTTPS image URL.'), { status: 400 })
     const name = clean(input.name, 100)
     if (!name) throw Object.assign(Error('Character name is required.'), { status: 400 })
     return {
-      name,
-      version: clean(input.version, 100),
-      arc: clean(input.arc, 100),
-      cardType: clean(input.cardType || 'character', 20).toLowerCase() === 'weapon' ? 'weapon' : 'character',
-      rarity: n(input.rarity, 1, 6, 3),
-      percentRating: n(input.percentRating, 0, 100, 50),
-      starRating: n(input.starRating, 0, 10, 5),
-      baseDamage: n(input.baseDamage, 0, 100000),
-      abilities,
-      weapons,
-      coin: n(input.coin, 0, 100000000),
-      zen: n(input.zen, 0, 100000000),
-      claimLimit: n(input.claimLimit, 1, 100000, 30),
-      expiresAt: expiresAt ? expiresAt.toISOString() : null,
-      imageUrl,
-      imageData: imageData ? imageData.toString('base64') : null
+      name, version: clean(input.version, 100), arc: clean(input.arc, 100), cardType: clean(input.cardType || 'character', 20).toLowerCase() === 'weapon' ? 'weapon' : 'character',
+      rarity: n(input.rarity, 1, 6, 3), percentRating: n(input.percentRating, 0, 100, 50), starRating: n(input.starRating, 0, 10, 5),
+      baseDamage: n(input.baseDamage, 0, 100000), abilities, weapons, coin: n(input.coin, 0, 100000000), zen: n(input.zen, 0, 100000000),
+      claimLimit: n(input.claimLimit, 1, 100000, 30), expiresAt: expiresAt ? expiresAt.toISOString() : null, imageUrl, imageData: imageData ? imageData.toString('base64') : null
     }
   }
-
   async function renderStudioCard (data) {
     const art = data.imageData ? Buffer.from(data.imageData, 'base64') : await cardSpawner.artwork.fetchBuffer(data.imageUrl)
     const renderer = cardSpawner.renderers[0].render
     const card = {
-      name: data.name,
-      series: data.arc || data.version || 'AXYON CUSTOM CARD',
-      card_type: data.cardType,
-      weapon: data.weapons.map(x => x.name).join(', ') || '\u2014',
-      damage: data.baseDamage,
-      ability: data.abilities.map(x => x.name).join(', ') || '\u2014',
-      ability_damage: data.abilities.reduce((sum, x) => sum + x.damage, 0),
-      rating: data.rarity,
-      percent_rating: data.percentRating, star_rating: data.starRating,
-      expires_at: data.expiresAt
+      name: data.name, series: [data.version, data.arc].filter(Boolean).join(' • ') || 'AXYON CUSTOM CARD', card_type: data.cardType,
+      weapon: data.weapons.map(x => x.name).join(', ') || '—', damage: data.baseDamage,
+      ability: data.abilities.map(x => x.name).join(', ') || '—',
+      ability_damage: data.abilities.reduce((sum, x) => sum + x.damage, 0), rating: data.rarity,
+      percent_rating: data.percentRating, star_rating: data.starRating, expires_at: data.expiresAt
     }
     const rendered = await renderer.render(card, art)
     if (!rendered?.buffer) throw Error('The existing AXYON card renderer could not render this artwork.')
     return { art, rendered }
   }
-
   function studioCaption (d, claim = 0) {
     const date = d.expiresAt ? new Date(d.expiresAt).toISOString().slice(0, 10) : 'Never'
-    const abilities = d.abilities.length ? d.abilities.map(x => `${x.name} : ${x.damage}`).join('\n') : '\u2014'
-    const weapons = d.weapons.length ? d.weapons.map(x => `${x.name} : ${x.damage}`).join('\n') : '\u2014'
-    return [
-      '*AXYN CORE - Lil Clutch & Montai*',
-      '*CARD CODE*',
-      '',
-      `Name : ${d.name}`,
-      `Version : ${d.version || '\u2014'}`,
-      `Arc : ${d.arc || '\u2014'}`,
-      `Ability : ${d.abilities.map(x => x.name).join(' , ') || '\u2014'}`,
-      `Weapon : ${d.weapons.map(x => x.name).join(' , ') || '\u2014'}`,
-      '',
-      '*Ability damage*',
-      abilities,
-      '',
-      '*Weapon damage*',
-      weapons,
-      '',
-      `Rating : ${d.percentRating}/100`,
-      `Star Rating : ${d.starRating}/10`,
-      '*Price*',
-      `Coin : ${d.coin}`,
-      `Zen : ${d.zen}`,
-      '',
-      `Claim : ${claim} / ${d.claimLimit}`,
-      `Expires date : ${date}`
-    ].join('\n')
+    const abilities = d.abilities.length ? d.abilities.map(x => `${x.name} : ${x.damage}`).join('\n') : '—'
+    const weapons = d.weapons.length ? d.weapons.map(x => `${x.name} : ${x.damage}`).join('\n') : '—'
+    return ['*AXYN CORE - Lil Clutch & Montai*','*CARD CODE*','',`Name : ${d.name}`,`Version : ${d.version || '—'}`,`Arc : ${d.arc || '—'}`,`Ability : ${d.abilities.map(x => x.name).join(' , ') || '—'}`,`Weapon : ${d.weapons.map(x => x.name).join(' , ') || '—'}`,'','*Ability damage*',abilities,'','*Weapon damage*',weapons,'',`Rating : ${d.percentRating}/100`,`Star Rating : ${d.starRating}/10`,'*Price*',`Coin : ${d.coin}`,`Zen : ${d.zen}`,'',`Claim : ${claim} / ${d.claimLimit}`,`Expires date : ${date}`].join('\n')
   }
 
   async function handle (req, res) {
@@ -529,24 +431,6 @@ function createDashboard ({ sessions, database, lease, logger }) {
         return true
       }
 
-      if (req.method === 'POST' && url.pathname === '/dashboard/api/visual-upload') {
-        const s = await requireAuth(req, res, 'visuals.write', true)
-        if (!s) return true
-        const fields = await multipart(req)
-        const mode = String(fields.mode || '').trim().toLowerCase()
-        const caption = String(fields.caption || '').trim()
-        const file = fields.image
-        if (!['arise', 'profile', 'battle', 'boss', 'dungeon', 'duel'].includes(mode)) { json(res, 400, { ok: false, error: 'Choose a valid visual type.' }); return true }
-        if (!file?.data?.length) { json(res, 400, { ok: false, error: 'Choose an image from your phone first.' }); return true }
-        const mime = imageMime(file.data)
-        if (!mime) { json(res, 400, { ok: false, error: 'Unsupported image. Use JPG, PNG, WEBP or GIF.' }); return true }
-        if (file.data.length > 8 * 1024 * 1024) { json(res, 413, { ok: false, error: 'Image is too large. Maximum size is 8 MB.' }); return true }
-        await store.setVisualImage(mode, file.data, mime, caption)
-        await store.log('dashboard', 'admin_visual_upload', mode, { mime, bytes: file.data.length })
-        json(res, 200, { ok: true, message: `Image uploaded for ${mode}.` })
-        return true
-      }
-
       if (req.method === 'POST' && url.pathname === '/dashboard/api/admin/action') {
         const input = await body(req, 65536)
         const action = String(input.action || '')
@@ -569,51 +453,95 @@ function createDashboard ({ sessions, database, lease, logger }) {
         const s = await requireAuth(req, res, 'overview.control', req.method !== 'GET')
         if (!s) return true
         const d = await ensureCardStudioSchema()
-
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/complete') {
           const input = await body(req, 12 * 1024 * 1024)
           const fields = input.fields || {}
-          const missing = ['name', 'version', 'arc', 'baseDamage', 'abilities', 'weapons', 'coin', 'zen', 'percentRating', 'starRating', 'rarity'].filter(k => fields[k] == null || fields[k] === '' || (Array.isArray(fields[k]) && !fields[k].length))
+          const missing = ['name','version','arc','baseDamage','abilities','weapons','coin','zen','percentRating','starRating','rarity'].filter(k => fields[k] == null || fields[k] === '' || (Array.isArray(fields[k]) && !fields[k].length))
           if (!missing.length) { json(res, 200, { ok: true, fields: {} }); return true }
-          if (!process.env.GROQ_API_KEY) { json(res, 503, { ok: false, error: 'AI completion requires GROQ_API_KEY in the Render environment.' }); return true }
-          const prompt = `Complete only these missing fields for an original collectible anime-style card. Return ONLY valid JSON with keys from this list: ${missing.join(', ')}. Preserve all supplied values; do not return or change them. Supplied card: ${JSON.stringify(fields)}. Use plausible fictional game stats. abilities and weapons must be arrays of {name,damage}. Ratings are percent 0-100 and stars 0-10.`
-          const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile', messages: [{ role: 'user', content: prompt }], temperature: 0.4, response_format: { type: 'json_object' } }), signal: AbortSignal.timeout(20000) })
-          if (!aiRes.ok) throw Object.assign(Error('AI completion service failed. Check the Groq key and try again.'), { status: 502 })
-          const payload = await aiRes.json(); const raw = payload.choices?.[0]?.message?.content || '{}'
-          let completed; try { completed = JSON.parse(raw) } catch { throw Object.assign(Error('AI returned invalid card data. Try again.'), { status: 502 }) }
-          const safe = Object.fromEntries(missing.filter(k => Object.hasOwn(completed, k)).map(k => [k, completed[k]]))
-          json(res, 200, { ok: true, fields: safe }); return true
+          // Character completion is search-assisted and does not depend on a paid LLM.
+          // SerpApi is already configured for the Pinterest card-artwork workflow.
+          const apiKey = String(process.env.SERPAPI_API_KEY || '').trim()
+          if (!apiKey) { json(res, 503, { ok:false, error:'SERPAPI_API_KEY is missing. Add the same SerpApi key used by card artwork search in Render.' }); return true }
+          if (!String(fields.name || '').trim()) { json(res, 400, { ok:false, error:'Enter the character name first so Axyon can look up the correct character.' }); return true }
+          const query = [fields.name, fields.version, fields.arc, 'anime character profile abilities powers techniques'].filter(Boolean).join(' ')
+          const params = new URLSearchParams({ engine:'google', q:query, num:'8', api_key:apiKey })
+          const lookup = await fetch(`https://serpapi.com/search.json?${params}`, { headers:{Accept:'application/json'}, signal:AbortSignal.timeout(20000) })
+          if (!lookup.ok) throw Object.assign(Error(`Character lookup failed (${lookup.status}).`), {status:502})
+          const search = await lookup.json()
+          if (search.error) throw Object.assign(Error(`Character lookup failed: ${String(search.error).slice(0,180)}`), {status:502})
+          const snippets = (search.organic_results || []).slice(0,8).map(x => `${x.title || ''}. ${x.snippet || ''}`).join(' ')
+          let artworkUrl = ''
+          if (!fields.imageUrl && !fields.imageData) {
+            // Use the same SerpApi credential to find artwork from the character
+            // name/version/arc; the existing card renderer still handles rendering.
+            const imageParams = new URLSearchParams({ engine:'google_images', q:`${query} official anime character artwork portrait`, num:'10', api_key:apiKey })
+            const imageLookup = await fetch(`https://serpapi.com/search.json?${imageParams}`, { headers:{Accept:'application/json'}, signal:AbortSignal.timeout(20000) })
+            if (imageLookup.ok) {
+              const imageSearch = await imageLookup.json()
+              const candidate = (imageSearch.images_results || []).find(x => /^https:\/\//i.test(String(x.original || '')))
+              if (candidate) artworkUrl = candidate.original
+            }
+          }
+          if (!snippets.trim()) throw Object.assign(Error(`No useful character information found for ${fields.name}. Try adding a more specific version or arc.`), {status:404})
+          const safe = {}
+          if (artworkUrl) safe.imageUrl = artworkUrl
+          // Only supply missing identity metadata from search context. Game balance
+          // values are deterministic estimates, not claims about canonical power levels.
+          if (missing.includes('version') && fields.version) safe.version = fields.version
+          if (missing.includes('arc') && fields.arc) safe.arc = fields.arc
+          const abilityCandidates = [...new Set((snippets.match(/\b[A-Z][A-Za-z'-]{2,}(?:\s+[A-Z][A-Za-z'-]{2,}){0,2}(?=\s+(?:is|was|are|uses|used|can|technique|ability|attack|power))/g) || []).filter(x => !/^(The|This|That|They|Anime|Character|Series|Story)$/i.test(x)))].slice(0,3)
+          const scale = Math.max(1, Math.min(6, Number(fields.rarity) || 3))
+          if (missing.includes('abilities')) safe.abilities = abilityCandidates.map((name,i) => ({name,damage:10 + scale * 3 + i * 2}))
+          if (missing.includes('weapons')) safe.weapons = []
+          if (missing.includes('baseDamage')) safe.baseDamage = 15 + scale * 5
+          if (missing.includes('percentRating')) safe.percentRating = Math.min(99, 55 + scale * 7)
+          if (missing.includes('starRating')) safe.starRating = Math.min(10, Math.round((55 + scale * 7) / 10))
+          if (missing.includes('coin')) safe.coin = 500 * scale
+          if (missing.includes('zen')) safe.zen = 5000 * scale
+          if (missing.includes('rarity')) safe.rarity = scale
+          json(res, 200, { ok:true, fields:safe, source:'SerpApi character and artwork search', note: artworkUrl ? 'Character details and artwork were found with SerpApi; damage, ratings and prices are Axyon game-balance estimates.' : 'Character details were search-assisted. No suitable artwork URL was found, so choose artwork manually. Damage, ratings and prices are Axyon game-balance estimates.' }); return true
         }
-
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/preview') {
           const input = normalizeStudioInput(await body(req, 12 * 1024 * 1024))
           const { rendered } = await renderStudioCard(input)
           json(res, 200, { ok: true, preview: rendered.buffer.toString('base64'), caption: studioCaption(input) })
           return true
         }
-
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/save') {
           const input = normalizeStudioInput(await body(req, 12 * 1024 * 1024))
           const { art, rendered } = await renderStudioCard(input)
-          const saved = await d.query(
-            `INSERT INTO axyon_card_studio(name,card_data,artwork_url,image_data,rendered_data,created_by)
-             VALUES($1,$2::jsonb,$3,$4,$5,$6) RETURNING id, name, created_at`,
-            [input.name, JSON.stringify(input), input.imageUrl || '', art, rendered.buffer, String(s.phone || '')]
-          )
+          const saved = await d.query(`INSERT INTO axyon_card_studio(name,card_data,artwork_url,image_data,rendered_data,created_by)
+            VALUES($1,$2::jsonb,$3,$4,$5,$6) RETURNING id, name, created_at`,
+            [input.name, JSON.stringify(input), input.imageUrl || '', art, rendered.buffer, String(s.phone || '')])
           json(res, 200, { ok: true, card: saved.rows[0] })
           return true
         }
-
         if (req.method === 'GET' && url.pathname === '/dashboard/api/card-studio/list') {
-          const rows = await d.query("SELECT id,name,created_at,spawned_at,claim_code,claim_count, (card_data->>'claimLimit')::int AS claim_limit FROM axyon_card_studio ORDER BY id DESC LIMIT 50")
+          const rows = await d.query('SELECT id,name,created_at,spawned_at,claim_code,claim_count, (card_data->>\'claimLimit\')::int AS claim_limit FROM axyon_card_studio ORDER BY id DESC LIMIT 50')
           json(res, 200, { ok: true, cards: rows.rows })
           return true
         }
-
+        if (req.method === 'GET' && url.pathname === '/dashboard/api/card-studio/groups') {
+          const state = sessions.status()
+          const live = sessions.get(state.primary?.sessionId)
+          if (!live?.sock || live.state !== 'connected') { json(res, 503, {ok:false,error:'Primary WhatsApp session is not connected.'}); return true }
+          const [participating, registered] = await Promise.all([
+            live.sock.groupFetchAllParticipating(),
+            cardStore.groups()
+          ])
+          const rows = registered
+            .filter(g => g.status === 'ACTIVE' && g.enabled !== false && participating?.[g.group_jid])
+            .map(g => ({ jid: g.group_jid, name: String(g.name || participating[g.group_jid]?.subject || g.group_jid) }))
+            .sort((a,b) => a.name.localeCompare(b.name))
+          json(res,200,{ok:true,groups:rows}); return true
+        }
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/spawn') {
           const input = await body(req)
           const jid = String(input.groupJid || '').trim()
-          if (!/^\d{5,25}-\d{5,25}@g\.us$/.test(jid)) { json(res, 400, { ok: false, error: 'Enter a valid WhatsApp group JID ending in @g.us.' }); return true }
+          if (!/^\d{5,25}-\d{5,25}@g\.us$/.test(jid)) { json(res, 400, { ok: false, error: 'Select a registered WhatsApp group.' }); return true }
+          const registeredGroups = await cardStore.groups()
+          const registeredGroup = registeredGroups.find(g => g.group_jid === jid && g.status === 'ACTIVE' && g.enabled !== false)
+          if (!registeredGroup) { json(res, 403, { ok:false, error:'That group is not actively registered with AXYON CORE.' }); return true }
           if (!lease.status().owned) { json(res, 409, { ok: false, error: 'This deployment is in standby. Take control first.' }); return true }
           const result = await d.query('SELECT * FROM axyon_card_studio WHERE id=$1', [Number(input.id)])
           const saved = result.rows[0]
@@ -621,12 +549,20 @@ function createDashboard ({ sessions, database, lease, logger }) {
           const state = sessions.status()
           const live = sessions.get(state.primary?.sessionId)
           if (!live?.sock || live.state !== 'connected') { json(res, 503, { ok: false, error: 'Primary WhatsApp session is not connected.' }); return true }
+          const participating = await live.sock.groupFetchAllParticipating()
+          if (!participating?.[jid]) { json(res, 409, {ok:false,error:'The registered group is not available in the connected WhatsApp session. Refresh groups or reconnect the session.'}); return true }
           const data = saved.card_data
           const code = saved.claim_code || crypto.randomBytes(3).toString('hex').toUpperCase()
-          const updated = await d.query('UPDATE axyon_card_studio SET spawned_at=NOW(),claim_code=$2 WHERE id=$1 RETURNING claim_count', [saved.id, code])
-          const caption = `${studioCaption(data, updated.rows[0].claim_count)}\n\nClaim with *!claim card #${code}*`
-          await live.sock.sendMessage(jid, { image: saved.rendered_data, caption })
-          json(res, 200, { ok: true, message: 'Saved card sent to WhatsApp.' })
+          const caption = `${studioCaption(data, saved.claim_count || 0)}\n\nClaim with *!claim card #${code}*`
+          const image = Buffer.isBuffer(saved.rendered_data) ? saved.rendered_data : Buffer.from(saved.rendered_data || [])
+          if (!image.length) { json(res, 500, {ok:false,error:'Saved card image is missing. Re-render and save this card.'}); return true }
+          // Mark as spawned only after WhatsApp accepts the send request.
+          try { await live.sock.sendMessage(jid, { image, caption }) } catch (sendError) {
+            logger.error({ err: sendError, groupJid: jid, cardId: saved.id }, 'Card Studio WhatsApp send failed')
+            json(res, 502, {ok:false,error:`WhatsApp rejected the card send: ${String(sendError?.message || 'unknown send error').slice(0,240)}`}); return true
+          }
+          await d.query('UPDATE axyon_card_studio SET spawned_at=NOW(),claim_code=COALESCE(claim_code,$2) WHERE id=$1', [saved.id, code])
+          json(res, 200, { ok: true, message: 'Card image and complete card code sent to WhatsApp.' })
           return true
         }
       }
@@ -676,4 +612,4 @@ function createDashboard ({ sessions, database, lease, logger }) {
   return { handle, _test: { safeEqual, maskPhone, formatPairingCode, filterSnapshot, ACTION_PERMISSION } }
 }
 
-module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode, multipart, imageMime } }
+module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode } }

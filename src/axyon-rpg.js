@@ -17,80 +17,9 @@ const music = require('./music')
 const classes = require('./axyon-classes')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
-const { canonicalUserId } = require('./identity')
 const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
-
-/*
- * NUMBERED OPTIONS — the replacement for native buttons.
- *
- * Every screen that used to hand WhatsApp a button grid now renders the same
- * options as a numbered list, and the player answers with the number. The
- * mapping is kept in one place so the renderer and the resolver can never
- * disagree about what "3" means.
- *
- * `defs` is the old button shape: [[label, id], ...]. The ids are unchanged
- * (`ax_b_attack`, `ax_duel_accept_7`, ...), so the existing action router still
- * understands them — only the transport changed.
- */
-function renderOptions (body, defs) {
-  if (!Array.isArray(defs) || !defs.length) return body
-  const lines = defs.map(([label], i) => `*${i + 1}.* ${label}`)
-  return `${body}\n\n${lines.join('\n')}\n\nReply with a number to choose.`
-}
-
-/**
- * Resolves a bare number reply against the options a screen last offered.
- *
- * Returns the option id, or null when the number is out of range. The caller
- * decides what to do with a null (usually: ignore, so ordinary chat is not
- * hijacked by a stray digit).
- */
-function resolveOptionNumber (defs, n) {
-  if (!Array.isArray(defs) || !defs.length) return null
-  const i = Number(n)
-  if (!Number.isInteger(i) || i < 1 || i > defs.length) return null
-  return defs[i - 1][1]
-}
-
-/*
- * PENDING OPTIONS — what each player was last offered, so a bare number reply
- * can be resolved back to an action.
- *
- * Keyed by chat + sender, because a group can have several players mid-battle
- * at once and "2" must mean *that player's* second option, not the last one
- * anyone in the group was shown. Entries expire so a stale card cannot hijack
- * a number typed an hour later.
- */
-const PENDING_OPTIONS = new Map()
-const PENDING_TTL_MS = Number(process.env.AXYON_OPTION_TTL_MS) || 15 * 60 * 1000
-
-function optionKey (jid, userId) { return `${jid}|${userId}` }
-
-function rememberOptions (jid, userId, defs) {
-  if (!jid || !userId || !Array.isArray(defs) || !defs.length) return
-  PENDING_OPTIONS.set(optionKey(jid, userId), { defs, at: Date.now() })
-  if (PENDING_OPTIONS.size > 2000) {
-    const cutoff = Date.now() - PENDING_TTL_MS
-    for (const [k, v] of PENDING_OPTIONS) if (v.at < cutoff) PENDING_OPTIONS.delete(k)
-  }
-}
-
-/** The action id a bare number picks for this player, or null. */
-function takePendingOption (jid, userId, n) {
-  const entry = PENDING_OPTIONS.get(optionKey(jid, userId))
-  if (!entry) return null
-  if (Date.now() - entry.at > PENDING_TTL_MS) {
-    PENDING_OPTIONS.delete(optionKey(jid, userId))
-    return null
-  }
-  return resolveOptionNumber(entry.defs, n)
-}
-
-function clearPendingOptions (jid, userId) {
-  PENDING_OPTIONS.delete(optionKey(jid, userId))
-}
 
 /*
  * CLASSES and CLASS_MOVES are now DERIVED from the class catalogue.
@@ -212,11 +141,14 @@ function playerHit (p, enemy, mult = 1, bonus = 0) {
   return Math.max(1, Math.round(dmg))
 }
 
+function enemyHitDetails (enemy, p, guardRatio = 0) {
+  const incoming = Math.max(1, Math.round(enemy.atk + rnd(6) - p.def * 0.3))
+  const finalDamage = guardRatio ? Math.max(1, Math.round(incoming * (1 - guardRatio))) : incoming
+  return { incoming, finalDamage, blocked: Math.max(0, incoming - finalDamage) }
+}
+
 function enemyHit (enemy, p, guardRatio = 0) {
-  let dmg = enemy.atk + rnd(6) - p.def * 0.3
-  dmg = Math.max(1, Math.round(dmg))
-  if (guardRatio) dmg = Math.max(1, Math.round(dmg * (1 - guardRatio)))
-  return dmg
+  return enemyHitDetails(enemy, p, guardRatio).finalDamage
 }
 
 /* ------------------------------------------------------------- formatting */
@@ -296,62 +228,36 @@ function profileCard (p, extra = {}) {
  */
 function battleCard (b, p, note = '') {
   const e = b.enemy
-
-  /*
-   * RENDERED THROUGH THE SPEC'S DISPLAY LAYER.
-   *
-   * The engine has already computed every number by the time we get here, so
-   * this only formats them: a 20-segment HP/PE bar beside the exact values,
-   * the enemy and hunter panels, and the live usage tracker. Nothing below
-   * rolls a die or clamps a stat — if a value is absent it is omitted rather
-   * than filled with something plausible.
-   */
-  const playerPanel = display.combatantPanel({
-    name: p.name,
-    rank: p.rank,
-    level: p.level,
-    class: p.class,
-    hp: Math.max(0, b.playerHp),
-    maxHp: p.maxHp,
-    pe: Math.max(0, b.energy),
-    maxPe: p.maxPowerEnergy,
-    atk: p.atk,
-    def: p.def
-  }, 'player')
-
-  const enemyPanel = display.combatantPanel({
-    name: e.name,
-    type: e.boss ? 'BOSS' : 'MONSTER',
-    rank: e.rank,
-    level: e.level,
-    class: e.className,
-    grade: e.grade,
-    hp: Math.max(0, b.enemyHp),
-    maxHp: e.hp,
-    pe: e.pe != null ? e.pe : undefined,
-    maxPe: e.maxPe != null ? e.maxPe : undefined,
-    atk: e.atk,
-    def: e.def,
-    abilities: Array.isArray(e.abilities) ? e.abilities : undefined
-  }, 'enemy')
-
-  const tracker = display.usageTracker({
-    moves: liveClassMoves(p).map(m => ({ name: m.name, used: p.classMovesUsed || 0, limit: 3 })),
-    heals: { used: Math.max(0, 5 - Math.max(0, b.healsLeft ?? 5)), limit: 5 }
-  })
-
+  const xpNeed = store.xpNeed(p.level)
+  const activity = [
+    'BATTLE ACTIVITY',
+    `Damage taken: ${Math.max(0, Number(b.damageTaken) || 0)}`,
+    `Damage blocked: ${Math.max(0, Number(b.damageBlocked) || 0)}`
+  ].join('\n')
+  const playerName = String(p.name || 'Hunter')
   return [
     T.header({ creators: greetings.creatorsOf({}) }),
     '',
-    `${T.b('BATTLE')} \u2022 ${T.i(`turn ${b.turn}`)}${e.boss ? ` \u2022 ${T.b('BOSS')}` : ''}`,
+    `${T.b('BATTLE')} · ${T.i(`Turn ${b.turn}`)}${e.boss ? ` · ${T.b('BOSS')}` : ''}`,
     '',
-    note ? `${note}\n` : null,
-    enemyPanel,
+    note || null,
+    `🔵 *MONSTER*`,
+    `*${String(e.name || 'UNKNOWN').toUpperCase()}*`,
+    `*${Math.max(0, Number(b.enemyHp) || 0)} / ${Number(e.hp) || 0} HP*`,
     '',
-    playerPanel,
+    `🔴 *PLAYER — ${playerName}*`,
+    `${p.rank || 'E'} Rank · Level ${p.level || 1} · ${p.class || 'Fighter'}`,
+    `${Math.max(0, Number(p.xp) || 0)} / ${xpNeed} XP`,
+    `*${Math.max(0, Number(b.playerHp) || 0)} / ${Number(p.maxHp) || 0} HP*`,
     '',
-    tracker
-  ].filter(x => x !== null && x !== undefined).join('\n')
+    activity,
+    '',
+    '*BATTLE COMMANDS*',
+    '`!attack` · `!heal` · `!guard` · `!defend`',
+    '`!ability` · `!class` · `!card` · `!retreat`',
+    '',
+    T.i('Type a command to perform an action.')
+  ].filter(x => x !== null && x !== undefined && x !== '').join('\n')
 }
 
 /**
@@ -377,51 +283,56 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   const send = (s, j, m, t) => s.sendMessage(j, { text: t }, { quoted: m })
 
   /*
-   * NO NATIVE BUTTONS
-   * -----------------
-   * The native-flow button transport is gone. It was the reason `!fight` and
-   * `!floor` produced no reply at all: the battle card existed only inside an
-   * interactive payload, and when WhatsApp rejected or stalled that payload the
-   * whole message vanished. Every reply is now ordinary text.
+   * BUTTON POLICY
+   * -------------
+   * Most of this bot is plain commands. Buttons are reserved for the two
+   * places where tapping genuinely beats typing: the six battle actions, and
+   * accepting or declining a duel (where the other player has to answer).
    *
-   * Where a screen used to offer buttons it renders a numbered list instead,
-   * and a bare number reply is resolved back to the same action id (see
-   * `resolveOptionNumber` and the number branch in axyon-commands `handle`).
+   * `buttons()` therefore renders plain text and ignores any button defs it is
+   * handed, so no screen can quietly grow a button grid again. `tapButtons()`
+   * is the explicit opt-in used only by battle and duels.
    */
-  const buttons = (s, j, m, body, footer, defs) => {
-    rememberOptions(j, canonicalUserId(m?.key), defs)
-    return s.sendMessage(j, { text: renderOptions(body, defs) }, { quoted: m })
-  }
-
-  /* The same renderer, kept under its old name so call sites stay readable. */
-  const tapButtons = async (s, j, m, body, footer, defs) => {
-    rememberOptions(j, canonicalUserId(m?.key), defs)
-    return s.sendMessage(j, { text: renderOptions(body, defs) }, { quoted: m })
+  const buttons = (s, j, m, body) => s.sendMessage(j, { text: body }, { quoted: m })
+  const tapButtons = async (s, j, m, body, footer, defs, owner, fallbackBody = body) => {
+    // Native-flow is optional. Never let a failed button send swallow the
+    // battle/floor response: send the full playable text card instead.
+    if (sendButtons) {
+      try {
+        const result = await sendButtons(s, j, body, footer || WATERMARK, defs, owner)
+        if (result === true) return true
+      } catch (e) {
+        logger?.warn?.({ err: e?.message || e }, 'native buttons unavailable; falling back to text')
+      }
+    }
+    return s.sendMessage(j, { text: fallbackBody }, { quoted: m })
   }
 
   /* ---------------------------------------------------------- media helper */
   async function withVisual (sock, jid, m, mode, text, defs, tappable = false) {
-    /*
-     * The numbered options ride along in the caption now. They used to be a
-     * second message carrying a button grid; with buttons gone there is no
-     * reason to split the card, and one message is one thing to read.
-     */
-    const body = renderOptions(text, defs)
-    if (defs && defs.length) rememberOptions(jid, canonicalUserId(m?.key), defs)
     const v = await store.visual(mode).catch(() => null)
-    if (v && (v.image_data || v.url)) {
+    if (v && v.url) {
       try {
-        const payload = { caption: body }
-        if (v.image_data) payload.image = Buffer.isBuffer(v.image_data) ? v.image_data : Buffer.from(v.image_data)
-        else if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
+        const payload = { caption: text }
+        if (/\.(mp4|webm|mov)(\?|$)/i.test(v.url)) payload.video = { url: v.url }
         else payload.image = { url: v.url }
         await sock.sendMessage(jid, payload, { quoted: m })
+        if (defs && defs.length) {
+          return tappable
+            ? tapButtons(sock, jid, m, v.caption || '\u2728', WATERMARK, defs, null, text)
+            : buttons(sock, jid, m, v.caption || '\u2728')
+        }
         return true
       } catch (e) {
         logger?.warn?.({ err: e, mode }, 'axyon visual send failed')
       }
     }
-    return send(sock, jid, m, body)
+    if (defs && defs.length) {
+      return tappable
+        ? tapButtons(sock, jid, m, text, WATERMARK, defs)
+        : buttons(sock, jid, m, text)
+    }
+    return send(sock, jid, m, text)
   }
 
   /* -------------------------------------------------------------- registry */
@@ -497,18 +408,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'battle_start', String(stage.ordinal), { enemy: enemy.name })
     return withVisual(sock, ctx.jid, m, enemy.boss ? 'boss' : 'battle',
-      battleCard(b, p, `You step into *${enemy.name}*.`), battleButtons(), true)
+      battleCard(b, p), [], true)
   }
 
   function battleButtons () {
-    return [
-      ['\u2694\ufe0f Attack', 'ax_b_attack'],
-      ['\ud83e\udde0 Class Move', 'ax_b_class'],
-      ['\u2764\ufe0f Self-Heal', 'ax_b_heal'],
-      ['\ud83c\udccf Card', 'ax_b_card'],
-      ['\ud83d\udee1\ufe0f Guard', 'ax_b_guard'],
-      ['\ud83c\udfc3 Retreat', 'ax_b_retreat']
-    ]
+    // Combat is command-driven; no numbered or quick-reply action menu.
+    return []
   }
 
   function cardExpiryText (value) {
@@ -830,7 +735,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const move = npc.npcMoveDamage(b.enemy)
       if (move.damaging && move.final > 0) {
         b.playerHp -= move.final
-        note += `\n\u2728 ${b.enemy.name} uses *${b.enemy.signature}* for *${move.final}*.`
+        b.damageTaken = Math.max(0, Number(b.damageTaken) || 0) + move.final
+        note += `\n\u2728 ${b.enemy.name} uses *${b.enemy.signature}* for *${move.final}* damage.`
       } else if (b.enemy.signature) {
         note += `\n\u2728 ${b.enemy.name} invokes *${b.enemy.signature}*.`
       }
@@ -1259,7 +1165,6 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
-    renderOptions, resolveOptionNumber, rememberOptions, takePendingOption, clearPendingOptions,
     arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
     classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
@@ -1271,6 +1176,5 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 module.exports = {
   createAxyon, applyProgress, buildEnemy, playerHit, enemyHit,
   powerEnergyForRank, profileCard, battleCard,
-  renderOptions, resolveOptionNumber, rememberOptions, takePendingOption, clearPendingOptions,
   CLASSES, CLASS_MOVES, MODES, WATERMARK
 }
