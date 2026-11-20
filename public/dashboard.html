@@ -160,9 +160,9 @@
       <label>Zen price<input id="csZen" type="number" min="0" value="12000"></label>
       <label>Claim limit<input id="csClaims" type="number" min="1" value="30"></label>
       <label>Expires date<input id="csExpiry" type="date"></label>
-    </div><div class="actions"><button id="csComplete" type="button">AI fill empty fields</button><button id="csPreview" class="primary" type="button">Render preview</button><button id="csSave" type="button">Save card</button></div><p class="error" id="csError"></p></div>
+    </div><div class="actions"><button id="csComplete" type="button">Look up character &amp; fill empty fields</button><button id="csPreview" class="primary" type="button">Render preview</button><button id="csSave" type="button">Save card</button></div><p class="error" id="csError"></p></div>
     <div class="panel"><div class="panel-head"><div><p class="eyebrow">LIVE RENDER</p><h3>Card preview</h3></div></div><img id="csPreviewImage" alt="Rendered card preview" style="display:none;width:min(100%,420px);height:auto;border-radius:12px;margin:auto"><pre id="csCaption" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></div>
-    <div class="panel"><div class="panel-head"><div><p class="eyebrow">SAVED CARDS</p><h3>Manual releases</h3></div><button id="csRefresh" type="button">Refresh</button></div><div id="csSavedList" class="list empty">No saved cards yet.</div><label>Target WhatsApp group JID<input id="csGroupJid" placeholder="1234567890-123456789@g.us"></label></div>
+    <div class="panel"><div class="panel-head"><div><p class="eyebrow">SAVED CARDS</p><h3>Manual releases</h3></div><button id="csRefresh" type="button">Refresh</button></div><div id="csSavedList" class="list empty">No saved cards yet.</div><label>Choose registered WhatsApp group<select id="csGroupSelect"><option value="">Loading registered groups…</option></select></label><p class="muted">Only active groups registered with AXYON CORE and available in the connected WhatsApp session are listed.</p></div>
   </section>
 
   <!-- ----------------------------- FEEDBACK --------------------------- -->
@@ -284,5 +284,5 @@
 
 <div id="toast" class="toast"></div>
 <script src="/dashboard/app.js" defer></script>
-<script src="/dashboard/admin.js" defer></script><script src="/dashboard/card-studio.js?v=3" defer></script>
+<script src="/dashboard/admin.js" defer></script><script src="/dashboard/card-studio.js?v=5" defer></script>
 </body></html>

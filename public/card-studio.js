@@ -83,13 +83,20 @@
       const data = await api('list')
       $('csSavedList').className = data.cards.length ? 'list' : 'list empty'
       $('csSavedList').innerHTML = data.cards.length ? data.cards.map(c => `<div class="list-row"><div><b>${String(c.name).replace(/[&<>"']/g, '')}</b><small>Card #${c.id} · ${new Date(c.created_at).toLocaleString()} · ${c.spawned_at ? 'Spawned' : 'Not spawned'} · Claims ${c.claim_count || 0}/${c.claim_limit || 30}${c.claim_code ? ' · Code #' + c.claim_code : ''}</small></div><button type="button" data-spawn-card="${c.id}">Spawn</button></div>`).join('') : 'No saved cards yet.'
+      try {
+        const groups = await api('groups')
+        const select = $('csGroupSelect')
+        const current = select.value
+        select.innerHTML = groups.groups.length ? '<option value="">Select a registered group…</option>' + groups.groups.map(g => `<option value="${g.jid}">${String(g.name).replace(/[&<>"']/g, '')}</option>`).join('') : '<option value="">No active registered groups available</option>'
+        if (groups.groups.some(g => g.jid === current)) select.value = current
+      } catch (groupError) { $('csGroupSelect').innerHTML = `<option value="">${String(groupError.message || 'Could not load registered groups').replace(/[&<>"']/g, '')}</option>` }
     } catch (e) { $('csSavedList').textContent = e.message }
   }
   document.addEventListener('click', async e => {
     const b = e.target.closest('[data-spawn-card]')
     if (!b) return
-    const jid = $('csGroupJid').value.trim()
-    if (!jid) { $('csError').textContent = 'Enter the target WhatsApp group JID first.'; return }
+    const jid = String($('csGroupSelect')?.value || '').trim()
+    if (!jid) { $('csError').textContent = 'Select an active registered WhatsApp group first.'; return }
     b.disabled = true
     try { const r = await api('spawn', { id: b.dataset.spawnCard, groupJid: jid }); $('csError').textContent = r.message; await refresh() }
     catch (err) { $('csError').textContent = err.message }
@@ -110,14 +117,14 @@
     }
   })
   $('csComplete')?.addEventListener('click', async () => {
-    $('csError').textContent='AI is completing only empty fields…'
+    $('csError').textContent='Searching character details and filling empty fields…'
     try {
       const data = await api('complete', {fields:await fields()})
       const f=data.fields || {}; const set=(id,v)=>{ if(v!==undefined && v!==null && $(id).value==='') $(id).value=String(v) }
-      set('csName',f.name); set('csVersion',f.version); set('csArc',f.arc); set('csDamage',f.baseDamage); set('csCoin',f.coin); set('csZen',f.zen); set('csPercent',f.percentRating); set('csStars',f.starRating); set('csRarity',f.rarity)
+      set('csName',f.name); set('csImage',f.imageUrl); set('csVersion',f.version); set('csArc',f.arc); set('csDamage',f.baseDamage); set('csCoin',f.coin); set('csZen',f.zen); set('csPercent',f.percentRating); set('csStars',f.starRating); set('csRarity',f.rarity)
       if (Array.isArray(f.abilities) && !$('csAbilities').value.trim()) $('csAbilities').value=f.abilities.map(x=>`${x.name} : ${x.damage}`).join('\n')
       if (Array.isArray(f.weapons) && !$('csWeapons').value.trim()) $('csWeapons').value=f.weapons.map(x=>`${x.name} : ${x.damage}`).join('\n')
-      $('csError').textContent='AI completion applied to empty fields only.'
+      $('csError').textContent=(data.note ? `${data.note} ` : '') + 'Completed empty fields only.'
     } catch(e) { $('csError').textContent=e.message }
   })
   $('csPreview')?.addEventListener('click', preview)
