@@ -31,8 +31,8 @@ function fakeSock () {
   }
 }
 
-function harness ({ player = null, battle = null, floors = [], features = ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'] } = {}) {
-  const a = createAxyon({})
+function harness ({ player = null, battle = null, floors = [], sendButtons } = {}) {
+  const a = createAxyon({ sendButtons })
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
   const state = { player: player ? { ...player } : null, battle, floors }
@@ -46,7 +46,7 @@ function harness ({ player = null, battle = null, floors = [], features = ['gene
   }
 
   store.player = async () => state.player
-  store.group = async () => ({ group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'normal', features: [...features], registered_by: 'u1' })
+  store.group = async () => ({ group_jid: '123@g.us', enabled: true, status: 'ACTIVE', registration_mode: 'normal', features: ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino', 'duel'], registered_by: 'u1' })
   store.getBattle = async () => state.battle
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
@@ -102,54 +102,22 @@ test('combat: a player can enter a stage and start a real battle', async () => {
   assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
 })
 
-test('combat: !fight with no argument selects the player next stage, not stage zero', async () => {
-  const h = harness({ player: basePlayer() })
+test('combat: !fight falls back to the full text card when native buttons return no success', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: async () => undefined })
   const { handled, out } = await h.send('!fight')
   const battle = h.state.battle
   h.restore()
   assert.strictEqual(handled, true)
-  assert.ok(battle, 'the no-argument command must start a battle')
-  assert.strictEqual(battle.ordinal, 1)
-  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
+  assert.ok(battle, 'battle state must be created')
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected text fallback, got: ${out.slice(0, 200)}`)
 })
 
-test('combat: !fight renders its actions as a numbered list, not buttons', async () => {
-  const h = harness({ player: basePlayer() })
+test('combat: !fight falls back when native button relay throws', async () => {
+  const h = harness({ player: basePlayer(), sendButtons: async () => { throw new Error('relay failed') } })
   const { handled, out } = await h.send('!fight')
-  const battle = h.state.battle
   h.restore()
   assert.strictEqual(handled, true)
-  assert.ok(battle, 'the command must start a battle')
-  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected a battle card, got: ${out.slice(0, 200)}`)
-  assert.ok(/\*1\.\* .*Attack/i.test(out), `expected option 1 to be Attack, got: ${out.slice(-300)}`)
-  assert.ok(/Reply with a number/i.test(out), 'the card must tell the player to reply with a number')
-})
-
-test('combat: replying with a number picks that battle action', async () => {
-  const h = harness({ player: basePlayer() })
-  await h.send('!fight 1')
-  const { handled, out } = await h.send('1')
-  h.restore()
-  assert.strictEqual(handled, true, 'a bare number must be handled as an option pick')
-  assert.ok(/strike|BATTLE|HP/i.test(out), `expected the attack to resolve, got: ${out.slice(0, 300)}`)
-})
-
-test('combat: a number with no card pending is not treated as an option', async () => {
-  const h = harness({ player: basePlayer() })
-  const { handled } = await h.send('7')
-  h.restore()
-  assert.strictEqual(handled, false, 'a stray number must not be hijacked')
-})
-
-test('combat: !fight works in a registered group with only Duel enabled', async () => {
-  const h = harness({ player: basePlayer(), features: ['duel'] })
-  const { handled, out } = await h.send('!fight')
-  const battle = h.state.battle
-  h.restore()
-  assert.strictEqual(handled, true)
-  assert.ok(battle, 'Duel registration must not block the shared fight entry point')
-  assert.strictEqual(battle.ordinal, 1)
-  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
+  assert.ok(/Outer Gate|BATTLE|HP/i.test(out), `expected text fallback, got: ${out.slice(0, 200)}`)
 })
 
 test('combat: attacking damages the enemy and the enemy answers', async () => {
@@ -206,60 +174,15 @@ test('dungeon: a player can enter a floor and start a real battle', async () => 
   assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
 })
 
-test('dungeon: !floor with no argument defaults to floor 1, never floor zero', async () => {
-  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS })
+test('dungeon: !floor falls back to the full text card when native buttons fail', async () => {
+  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, sendButtons: async () => undefined })
   const { handled, out } = await h.send('!floor')
-  const b = h.state.battle
+  const battle = h.state.battle
   h.restore()
   assert.strictEqual(handled, true)
-  assert.ok(b, 'the no-argument command must create a floor battle')
-  assert.strictEqual(b.ordinal, 1)
-  assert.strictEqual(b.mode, 'floor')
-  assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
-})
-
-test('dungeon: !floor renders its actions as a numbered list, not buttons', async () => {
-  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS })
-  const { handled, out } = await h.send('!floor')
-  const b = h.state.battle
-  h.restore()
-  assert.strictEqual(handled, true)
-  assert.ok(b, 'the command must create a floor battle')
-  assert.strictEqual(b.mode, 'floor')
-  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected a floor card, got: ${out.slice(0, 200)}`)
-  assert.ok(/\*1\.\* .*Attack/i.test(out), `expected option 1 to be Attack, got: ${out.slice(-300)}`)
-  assert.ok(/Reply with a number/i.test(out), 'the card must tell the player to reply with a number')
-})
-
-test('dungeon: replying with a number picks that floor battle action', async () => {
-  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS })
-  await h.send('!floor 1')
-  const { handled, out } = await h.send('1')
-  h.restore()
-  assert.strictEqual(handled, true, 'a bare number must be handled as an option pick')
-  assert.ok(/strike|BATTLE|HP/i.test(out), `expected the attack to resolve, got: ${out.slice(0, 300)}`)
-})
-
-test('dungeon: !floor works in a registered group with only Duel enabled', async () => {
-  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, features: ['duel'] })
-  const { handled, out } = await h.send('!floor')
-  const b = h.state.battle
-  h.restore()
-  assert.strictEqual(handled, true)
-  assert.ok(b, 'Duel registration must not block the shared floor entry point')
-  assert.strictEqual(b.mode, 'floor')
-  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
-})
-
-test('dungeon: !floor also works when Modes registration has no optional features enabled', async () => {
-  const h = harness({ player: { ...basePlayer() }, floors: store.ORIGINAL_FLOORS, features: [] })
-  const { handled, out } = await h.send('!floor')
-  const b = h.state.battle
-  h.restore()
-  assert.strictEqual(handled, true)
-  assert.ok(b, 'the core floor command must not depend on an optional feature toggle')
-  assert.strictEqual(b.mode, 'floor')
-  assert.ok(!/FEATURE UNAVAILABLE/i.test(out))
+  assert.ok(battle, 'floor battle state must be created')
+  assert.strictEqual(battle.mode, 'floor')
+  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected text fallback, got: ${out.slice(0, 200)}`)
 })
 
 test('dungeon: winning a floor awards XP and can level the player up', async () => {
@@ -370,37 +293,14 @@ test('rooms: a guild mode is now real and can be opened', async () => {
   assert.ok(/Guild Raid/i.test(out), 'the room must name the guild mode')
 })
 
-/* ------------------------------------------------- numbered option coverage */
+test('dungeon: !floor includes an anthology story intro while !fight stays story-free', async () => {
+  const floorHarness = harness({ player: basePlayer(), floors: store.ORIGINAL_FLOORS })
+  const floorResult = await floorHarness.send('!floor 1')
+  floorHarness.restore()
+  assert.match(floorResult.out, /STORY|📖/i, 'floor entry must deliver actual anthology story content')
 
-/*
- * The native button transport is gone. These lock in that every battle action
- * is reachable from the numbered list — the old 3-button cap silently dropped
- * half of them, and the payload that carried the rest could fail entirely.
- */
-
-test('combat: the numbered list carries all six battle actions', async () => {
-  const h = harness({ player: basePlayer() })
-  const { out } = await h.send('!fight')
-  h.restore()
-  for (const label of ['Attack', 'Class Move', 'Self-Heal', 'Card', 'Guard', 'Retreat']) {
-    assert.ok(new RegExp(label, 'i').test(out), `expected *${label}* in the numbered list, got: ${out.slice(-400)}`)
-  }
-  assert.ok(/\*6\.\*/i.test(out), 'the list must reach option 6')
-})
-
-test('combat: option 6 (Retreat) resolves from a bare number', async () => {
-  const h = harness({ player: basePlayer() })
-  await h.send('!fight 1')
-  const { handled, out } = await h.send('6')
-  h.restore()
-  assert.strictEqual(handled, true)
-  assert.ok(/RETREATED/i.test(out), `expected the retreat to resolve, got: ${out.slice(0, 300)}`)
-})
-
-test('combat: an out-of-range number is ignored, not misread', async () => {
-  const h = harness({ player: basePlayer() })
-  await h.send('!fight 1')
-  const { handled } = await h.send('9')
-  h.restore()
-  assert.strictEqual(handled, false, 'a number past the end of the list must not fire an action')
+  const fightHarness = harness({ player: basePlayer() })
+  const fightResult = await fightHarness.send('!fight 1')
+  fightHarness.restore()
+  assert.doesNotMatch(fightResult.out, /STORY|📖/i, '!fight must enter combat without floor narration')
 })

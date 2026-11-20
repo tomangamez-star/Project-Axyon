@@ -29,16 +29,17 @@ const battle = {
   enemy: { name: 'Shadow Beast', hp: 460, atk: 55, def: 20, xp: 120, zen: 90 }
 }
 
-test('battle card: renders the exact HP and PE values from the engine', () => {
+test('battle card: shows monster and player HP with compact XP', () => {
   const text = card(battle, player)
-  assert.ok(text.includes('520 / 550 HP'), `expected the exact HP line, got:\n${text}`)
-  assert.ok(text.includes('135 / 145 PE'), `expected the exact PE line, got:\n${text}`)
+  assert.ok(text.includes('520 / 550 HP'), `expected player HP, got:\n${text}`)
+  assert.ok(text.includes('415 / 460 HP'), `expected monster HP, got:\n${text}`)
+  assert.ok(text.includes('0 / 250 XP'), `expected compact XP, got:\n${text}`)
 })
 
-test('battle card: a damaged combatant never shows a full bar', () => {
+test('battle card: omits PE bars and raw combat stats', () => {
   const text = card(battle, player)
-  /* 520/550 and 415/460 both leave empty segments. */
-  assert.ok(text.includes('\u2591'), 'a damaged combatant must show empty segments')
+  assert.ok(!/POWER ENERGY|\bPE\b/i.test(text), 'PE must not clutter the battle screen')
+  assert.ok(!/ATTACK:|DEFENCE:|\bATK\b|\bDEF\b/i.test(text), 'raw attack and defence must be hidden')
 })
 
 test('battle card: the enemy is shown as a monster, not as a player', () => {
@@ -47,10 +48,11 @@ test('battle card: the enemy is shown as a monster, not as a player', () => {
   assert.ok(!text.includes('EQUIPPED CARD'), 'a monster must not be given a player card')
 })
 
-test('battle card: the usage tracker is present and counted', () => {
+test('battle card: hides permanent usage trackers and shows command actions', () => {
   const text = card(battle, player)
-  assert.ok(/ABILITY & USAGE TRACKER/i.test(text), `expected the tracker, got:\n${text}`)
-  assert.ok(/CLASS MOVES/i.test(text) || /SELF-HEALING/i.test(text), 'the tracker must list counters')
+  assert.ok(!/ABILITY & USAGE TRACKER|CLASS MOVES|SELF-HEALING/i.test(text))
+  assert.ok(text.includes('!attack') && text.includes('!heal') && text.includes('!defend'))
+  assert.ok(text.includes('Damage taken: 0') && text.includes('Damage blocked: 0'))
 })
 
 test('battle card: a boss enemy is labelled BOSS', () => {
