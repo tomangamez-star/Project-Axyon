@@ -921,6 +921,38 @@ async function createCardDrop (drop) {
   return r.rows[0]
 }
 
+async function claimStudioCard (ownerId, rawCode) {
+  await ensureSchema()
+  const code = String(rawCode || '').replace(/^#/, '').trim().toUpperCase()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const player = await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
+    if (!player.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_registered' } }
+    const found = await client.query('SELECT * FROM axyon_card_studio WHERE claim_code=$1 FOR UPDATE', [code])
+    const drop = found.rows[0]
+    if (!drop) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' } }
+    const data = drop.card_data || {}
+    if (data.expiresAt && new Date(data.expiresAt).getTime() <= Date.now()) { await client.query('ROLLBACK'); return {ok:false,reason:'expired'} }
+    const limit = Math.max(1, Number(data.claimLimit) || 30)
+    if (Number(drop.claim_count) >= limit) { await client.query('ROLLBACK'); return { ok: false, reason: 'limit' } }
+    const prior = await client.query('SELECT 1 FROM axyon_card_studio_claims WHERE card_id=$1 AND user_id=$2', [drop.id, ownerId])
+    if (prior.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'claimed' } }
+    const slotResult = await client.query('SELECT COALESCE(MAX(slot),0)+1 AS next FROM axyon_cards WHERE owner_id=$1', [ownerId])
+    const slot = Number(slotResult.rows[0].next)
+    const weapon = (data.weapons || []).map(x => x.name).join(', ')
+    const ability = (data.abilities || []).map(x => x.name).join(', ')
+    const abilityDamage = (data.abilities || []).reduce((n, x) => n + (Number(x.damage) || 0), 0)
+    await client.query('INSERT INTO axyon_card_studio_claims(card_id,user_id) VALUES($1,$2)', [drop.id, ownerId])
+    const card = await client.query(`INSERT INTO axyon_cards(owner_id,slot,card_type,series,name,weapon,damage,ability,ability_damage,rating,claimed,expires_at,image_url,image_data,renderer,source_url,source_artist,drop_code)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12,$13,'old-gen',$12,'',$14) RETURNING *`,
+    [ownerId, slot, data.cardType || 'character', data.arc || data.version || '', data.name, weapon, Number(data.baseDamage) || 0, ability, abilityDamage, Math.max(1, Math.min(6, Number(data.rarity) || 1)), data.expiresAt || null, drop.artwork_url || '', drop.image_data, code])
+    const count = await client.query('UPDATE axyon_card_studio SET claim_count=claim_count+1 WHERE id=$1 RETURNING claim_count', [drop.id])
+    await client.query('COMMIT')
+    return { ok: true, card: card.rows[0], slot, claimed: Number(count.rows[0].claim_count), limit }
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }
+}
+
 async function claimCardDrop (ownerId, rawCode) {
   await ensureSchema()
   const code = String(rawCode || '').replace(/^#/, '').trim().toUpperCase()
@@ -1754,6 +1786,7 @@ module.exports = {
   addCard,
   claimCard,
   createCardDrop,
+  claimStudioCard,
   claimCardDrop,
   equipCard,
   unequipCard,

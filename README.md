@@ -116,6 +116,14 @@ If YouTube still refuses, the Audius fallback serves full tracks. A missing Deno
 | `WA_MAX_SESSIONS` | Maximum paired accounts (default `5`). |
 | `DASHBOARD_SESSION_HOURS` | How long a dashboard login lasts (default `720`). |
 | `YTDLP_COOKIES_FILE` | Optional path to an externally managed YouTube cookie jar. |
+| `GROQ_API_KEY` | Optional Groq API key for Card Studio AI completion. Required only for the “AI fill empty fields” action. |
+| `GROQ_MODEL` | Optional Groq chat model override (default `llama-3.3-70b-versatile`). |
+
+## Dashboard Card Studio
+
+Card Studio lets an admin upload PNG, JPEG, GIF or WebP artwork (8 MB maximum), complete blank fields with Groq AI, preview with the existing Old Gen card renderer, save a card, and manually publish it to a WhatsApp group. Saved cards publish a six-character claim code; players use `!claim card #CODE`. Claims are unique per player and respect the configured claim limit and expiry. The random `!spawncard` flow remains independent.
+
+To enable AI completion, add `GROQ_API_KEY` as a secret in the Render service environment. File upload, preview, save, manual publishing and claim tracking do not require the AI key.
 
 ## Development
 

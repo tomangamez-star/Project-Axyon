@@ -4,8 +4,9 @@
     const at = line.lastIndexOf(':')
     return at < 0 ? { name: line.trim(), damage: 0 } : { name: line.slice(0, at).trim(), damage: Number(line.slice(at + 1).trim()) || 0 }
   }).filter(x => x.name)
+  let uploadedArtwork = ''
   const fields = () => ({
-    name: $('csName').value, version: $('csVersion').value, arc: $('csArc').value,
+    imageData: uploadedArtwork, name: $('csName').value, version: $('csVersion').value, arc: $('csArc').value,
     cardType: $('csType').value, imageUrl: $('csImage').value, rarity: $('csRarity').value,
     percentRating: $('csPercent').value, starRating: $('csStars').value, baseDamage: $('csDamage').value,
     abilities: parseRows($('csAbilities').value), weapons: parseRows($('csWeapons').value),
@@ -42,7 +43,7 @@
     try {
       const data = await api('list')
       $('csSavedList').className = data.cards.length ? 'list' : 'list empty'
-      $('csSavedList').innerHTML = data.cards.length ? data.cards.map(c => `<div class="list-row"><div><b>${String(c.name).replace(/[&<>"']/g, '')}</b><small>Card #${c.id} · ${new Date(c.created_at).toLocaleString()} · ${c.spawned_at ? 'Spawned' : 'Not spawned'}</small></div><button type="button" data-spawn-card="${c.id}">Spawn</button></div>`).join('') : 'No saved cards yet.'
+      $('csSavedList').innerHTML = data.cards.length ? data.cards.map(c => `<div class="list-row"><div><b>${String(c.name).replace(/[&<>"']/g, '')}</b><small>Card #${c.id} · ${new Date(c.created_at).toLocaleString()} · ${c.spawned_at ? 'Spawned' : 'Not spawned'} · Claims ${c.claim_count || 0}/${c.claim_limit || 30}${c.claim_code ? ' · Code #' + c.claim_code : ''}</small></div><button type="button" data-spawn-card="${c.id}">Spawn</button></div>`).join('') : 'No saved cards yet.'
     } catch (e) { $('csSavedList').textContent = e.message }
   }
   document.addEventListener('click', async e => {
@@ -54,6 +55,24 @@
     try { const r = await api('spawn', { id: b.dataset.spawnCard, groupJid: jid }); $('csError').textContent = r.message; await refresh() }
     catch (err) { $('csError').textContent = err.message }
     finally { b.disabled = false }
+  })
+  $('csImageFile')?.addEventListener('change', async e => {
+    const file = e.target.files?.[0]; if (!file) { uploadedArtwork = ''; return }
+    if (file.size > 8 * 1024 * 1024) { $('csError').textContent = 'Artwork must be 8 MB or smaller.'; e.target.value=''; return }
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) { $('csError').textContent = 'Choose a PNG, JPEG, GIF or WebP image.'; e.target.value=''; return }
+    uploadedArtwork = await new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result)); r.onerror=reject; r.readAsDataURL(file) })
+    $('csArtworkThumb').src = uploadedArtwork; $('csArtworkThumb').style.display='block'; $('csError').textContent='Artwork ready.'
+  })
+  $('csComplete')?.addEventListener('click', async () => {
+    $('csError').textContent='AI is completing only empty fields…'
+    try {
+      const data = await api('complete', {fields:fields()})
+      const f=data.fields || {}; const set=(id,v)=>{ if(v!==undefined && v!==null && $(id).value==='') $(id).value=String(v) }
+      set('csName',f.name); set('csVersion',f.version); set('csArc',f.arc); set('csDamage',f.baseDamage); set('csCoin',f.coin); set('csZen',f.zen); set('csPercent',f.percentRating); set('csStars',f.starRating); set('csRarity',f.rarity)
+      if (Array.isArray(f.abilities) && !$('csAbilities').value.trim()) $('csAbilities').value=f.abilities.map(x=>`${x.name} : ${x.damage}`).join('\n')
+      if (Array.isArray(f.weapons) && !$('csWeapons').value.trim()) $('csWeapons').value=f.weapons.map(x=>`${x.name} : ${x.damage}`).join('\n')
+      $('csError').textContent='AI completion applied to empty fields only.'
+    } catch(e) { $('csError').textContent=e.message }
   })
   $('csPreview')?.addEventListener('click', preview)
   $('csSave')?.addEventListener('click', save)

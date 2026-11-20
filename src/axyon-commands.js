@@ -605,7 +605,15 @@ function createCommands ({ axyon, economy, logger, ai }) {
   })
   cmd('claim', 'cards', '{p}claim card <number|#CODE>', 'Claim a granted card or a global spawned drop.', async (s, m, ctx, args) => {
     const target = String(args[1] ?? args[0] ?? '').trim()
-    if (/^#?[A-Z0-9]{6}$/i.test(target)) return axyon.claimDrop(s, m, ctx, target)
+    if (/^#?[A-Z0-9]{6}$/i.test(target)) {
+      const studio = await store.claimStudioCard(ctx.userId, target).catch(() => null)
+      if (studio?.ok) return axyon.send(s, ctx.jid, m, `🎴 *CARD CLAIMED*\n\n${studio.card.name} · Collection #${studio.slot}\nClaims: ${studio.claimed}/${studio.limit}`)
+      if (studio && studio.reason !== 'not_found') {
+        const messages = { not_registered: 'Use !arise first.', claimed: 'You have already claimed this card.', expired: 'This card has expired.', limit: 'All copies of this card have been claimed.' }
+        return axyon.send(s, ctx.jid, m, `❌ ${messages[studio.reason] || 'This card cannot be claimed.'}`)
+      }
+      return axyon.claimDrop(s, m, ctx, target)
+    }
     const collectionNo = parseNum(target)
     if (!collectionNo) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}claim card 1* or *${ctx.prefix}claim card #F9GGK0*`)
     return axyon.claimCard(s, m, ctx, collectionNo)

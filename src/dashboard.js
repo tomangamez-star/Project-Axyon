@@ -304,6 +304,9 @@ function createDashboard ({ sessions, database, lease, logger }) {
       rendered_data BYTEA NOT NULL, created_by TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), spawned_at TIMESTAMPTZ
     )`)
+    await d.query('ALTER TABLE axyon_card_studio ADD COLUMN IF NOT EXISTS claim_code TEXT UNIQUE')
+    await d.query('ALTER TABLE axyon_card_studio ADD COLUMN IF NOT EXISTS claim_count INT NOT NULL DEFAULT 0')
+    await d.query(`CREATE TABLE IF NOT EXISTS axyon_card_studio_claims (card_id BIGINT NOT NULL REFERENCES axyon_card_studio(id) ON DELETE CASCADE, user_id TEXT NOT NULL, claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(card_id,user_id))`)
     return d
   }
 
@@ -315,7 +318,9 @@ function createDashboard ({ sessions, database, lease, logger }) {
     const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null
     if (expiresAt && Number.isNaN(expiresAt.getTime())) throw Object.assign(Error('Invalid expiry date'), { status: 400 })
     const imageUrl = clean(input.imageUrl, 2048)
-    if (!/^https:\/\//i.test(imageUrl)) throw Object.assign(Error('Artwork must be a direct HTTPS image URL.'), { status: 400 })
+    const imageData = input.imageData ? Buffer.from(String(input.imageData).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, ''), 'base64') : null
+    if (imageData && (imageData.length > 8 * 1024 * 1024 || !['89504e47', 'ffd8ff', '47494638', '52494646'].some(sig => imageData.subarray(0, 4).toString('hex').startsWith(sig)))) throw Object.assign(Error('Upload a valid PNG, JPEG, GIF or WebP image under 8 MB.'), { status: 400 })
+    if (!imageData && !/^https:\/\//i.test(imageUrl)) throw Object.assign(Error('Choose an artwork file or enter a direct HTTPS image URL.'), { status: 400 })
     const name = clean(input.name, 100)
     if (!name) throw Object.assign(Error('Character name is required.'), { status: 400 })
     return {
@@ -333,12 +338,13 @@ function createDashboard ({ sessions, database, lease, logger }) {
       zen: n(input.zen, 0, 100000000),
       claimLimit: n(input.claimLimit, 1, 100000, 30),
       expiresAt: expiresAt ? expiresAt.toISOString() : null,
-      imageUrl
+      imageUrl,
+      imageData: imageData ? imageData.toString('base64') : null
     }
   }
 
   async function renderStudioCard (data) {
-    const art = await cardSpawner.artwork.fetchBuffer(data.imageUrl)
+    const art = data.imageData ? Buffer.from(data.imageData, 'base64') : await cardSpawner.artwork.fetchBuffer(data.imageUrl)
     const renderer = cardSpawner.renderers[0].render
     const card = {
       name: data.name,
@@ -349,8 +355,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
       ability: data.abilities.map(x => x.name).join(', ') || '\u2014',
       ability_damage: data.abilities.reduce((sum, x) => sum + x.damage, 0),
       rating: data.rarity,
-      percent_rating: data.percentRating,
-      star_rating: data.starRating,
+      percent_rating: data.percentRating, star_rating: data.starRating,
       expires_at: data.expiresAt
     }
     const rendered = await renderer.render(card, art)
@@ -565,27 +570,42 @@ function createDashboard ({ sessions, database, lease, logger }) {
         if (!s) return true
         const d = await ensureCardStudioSchema()
 
+        if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/complete') {
+          const input = await body(req, 12 * 1024 * 1024)
+          const fields = input.fields || {}
+          const missing = ['name', 'version', 'arc', 'baseDamage', 'abilities', 'weapons', 'coin', 'zen', 'percentRating', 'starRating', 'rarity'].filter(k => fields[k] == null || fields[k] === '' || (Array.isArray(fields[k]) && !fields[k].length))
+          if (!missing.length) { json(res, 200, { ok: true, fields: {} }); return true }
+          if (!process.env.GROQ_API_KEY) { json(res, 503, { ok: false, error: 'AI completion requires GROQ_API_KEY in the Render environment.' }); return true }
+          const prompt = `Complete only these missing fields for an original collectible anime-style card. Return ONLY valid JSON with keys from this list: ${missing.join(', ')}. Preserve all supplied values; do not return or change them. Supplied card: ${JSON.stringify(fields)}. Use plausible fictional game stats. abilities and weapons must be arrays of {name,damage}. Ratings are percent 0-100 and stars 0-10.`
+          const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { authorization: `Bearer ${process.env.GROQ_API_KEY}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile', messages: [{ role: 'user', content: prompt }], temperature: 0.4, response_format: { type: 'json_object' } }), signal: AbortSignal.timeout(20000) })
+          if (!aiRes.ok) throw Object.assign(Error('AI completion service failed. Check the Groq key and try again.'), { status: 502 })
+          const payload = await aiRes.json(); const raw = payload.choices?.[0]?.message?.content || '{}'
+          let completed; try { completed = JSON.parse(raw) } catch { throw Object.assign(Error('AI returned invalid card data. Try again.'), { status: 502 }) }
+          const safe = Object.fromEntries(missing.filter(k => Object.hasOwn(completed, k)).map(k => [k, completed[k]]))
+          json(res, 200, { ok: true, fields: safe }); return true
+        }
+
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/preview') {
-          const input = normalizeStudioInput(await body(req, 65536))
+          const input = normalizeStudioInput(await body(req, 12 * 1024 * 1024))
           const { rendered } = await renderStudioCard(input)
           json(res, 200, { ok: true, preview: rendered.buffer.toString('base64'), caption: studioCaption(input) })
           return true
         }
 
         if (req.method === 'POST' && url.pathname === '/dashboard/api/card-studio/save') {
-          const input = normalizeStudioInput(await body(req, 65536))
+          const input = normalizeStudioInput(await body(req, 12 * 1024 * 1024))
           const { art, rendered } = await renderStudioCard(input)
           const saved = await d.query(
             `INSERT INTO axyon_card_studio(name,card_data,artwork_url,image_data,rendered_data,created_by)
              VALUES($1,$2::jsonb,$3,$4,$5,$6) RETURNING id, name, created_at`,
-            [input.name, JSON.stringify(input), input.imageUrl, art, rendered.buffer, String(s.phone || '')]
+            [input.name, JSON.stringify(input), input.imageUrl || '', art, rendered.buffer, String(s.phone || '')]
           )
           json(res, 200, { ok: true, card: saved.rows[0] })
           return true
         }
 
         if (req.method === 'GET' && url.pathname === '/dashboard/api/card-studio/list') {
-          const rows = await d.query('SELECT id,name,created_at,spawned_at FROM axyon_card_studio ORDER BY id DESC LIMIT 50')
+          const rows = await d.query("SELECT id,name,created_at,spawned_at,claim_code,claim_count, (card_data->>'claimLimit')::int AS claim_limit FROM axyon_card_studio ORDER BY id DESC LIMIT 50")
           json(res, 200, { ok: true, cards: rows.rows })
           return true
         }
@@ -602,9 +622,10 @@ function createDashboard ({ sessions, database, lease, logger }) {
           const live = sessions.get(state.primary?.sessionId)
           if (!live?.sock || live.state !== 'connected') { json(res, 503, { ok: false, error: 'Primary WhatsApp session is not connected.' }); return true }
           const data = saved.card_data
-          const caption = studioCaption(data)
+          const code = saved.claim_code || crypto.randomBytes(3).toString('hex').toUpperCase()
+          const updated = await d.query('UPDATE axyon_card_studio SET spawned_at=NOW(),claim_code=$2 WHERE id=$1 RETURNING claim_count', [saved.id, code])
+          const caption = `${studioCaption(data, updated.rows[0].claim_count)}\n\nClaim with *!claim card #${code}*`
           await live.sock.sendMessage(jid, { image: saved.rendered_data, caption })
-          await d.query('UPDATE axyon_card_studio SET spawned_at=NOW() WHERE id=$1', [saved.id])
           json(res, 200, { ok: true, message: 'Saved card sent to WhatsApp.' })
           return true
         }

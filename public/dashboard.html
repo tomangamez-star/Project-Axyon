@@ -149,7 +149,7 @@
       <label>Version<input id="csVersion" placeholder="Six Paths Mode"></label>
       <label>Arc<input id="csArc" placeholder="War Arc version"></label>
       <label>Card type<select id="csType"><option value="character">Character</option><option value="weapon">Weapon</option></select></label>
-      <label>Artwork URL (direct HTTPS)<input id="csImage" type="url" placeholder="https://..." required></label>
+      <label>Artwork URL (optional)<input id="csImage" type="url" placeholder="https://..."></label><label>Upload artwork (PNG/JPG/GIF/WebP, max 8 MB)<input id="csImageFile" type="file" accept="image/png,image/jpeg,image/gif,image/webp"></label><img id="csArtworkThumb" alt="Selected artwork" style="display:none;width:120px;height:150px;object-fit:cover;border-radius:10px">
       <label>Rarity tier (1–6)<input id="csRarity" type="number" min="1" max="6" value="3"></label>
       <label>Percent rating (0–100)<input id="csPercent" type="number" min="0" max="100" value="92"></label>
       <label>Star rating (0–10)<input id="csStars" type="number" min="0" max="10" value="9"></label>
@@ -160,7 +160,7 @@
       <label>Zen price<input id="csZen" type="number" min="0" value="12000"></label>
       <label>Claim limit<input id="csClaims" type="number" min="1" value="30"></label>
       <label>Expires date<input id="csExpiry" type="date"></label>
-    </div><div class="actions"><button id="csPreview" class="primary" type="button">Render preview</button><button id="csSave" type="button">Save card</button></div><p class="error" id="csError"></p></div>
+    </div><div class="actions"><button id="csComplete" type="button">AI fill empty fields</button><button id="csPreview" class="primary" type="button">Render preview</button><button id="csSave" type="button">Save card</button></div><p class="error" id="csError"></p></div>
     <div class="panel"><div class="panel-head"><div><p class="eyebrow">LIVE RENDER</p><h3>Card preview</h3></div></div><img id="csPreviewImage" alt="Rendered card preview" style="display:none;width:min(100%,420px);height:auto;border-radius:12px;margin:auto"><pre id="csCaption" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></div>
     <div class="panel"><div class="panel-head"><div><p class="eyebrow">SAVED CARDS</p><h3>Manual releases</h3></div><button id="csRefresh" type="button">Refresh</button></div><div id="csSavedList" class="list empty">No saved cards yet.</div><label>Target WhatsApp group JID<input id="csGroupJid" placeholder="1234567890-123456789@g.us"></label></div>
   </section>

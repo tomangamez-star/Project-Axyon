@@ -1,0 +1,38 @@
+'use strict'
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const root = path.join(__dirname, '..')
+const dashboard = fs.readFileSync(path.join(root, 'src/dashboard.js'), 'utf8')
+const commands = fs.readFileSync(path.join(root, 'src/axyon-commands.js'), 'utf8')
+const store = fs.readFileSync(path.join(root, 'src/axyon-store.js'), 'utf8')
+const client = fs.readFileSync(path.join(root, 'public/card-studio.js'), 'utf8')
+test('Card Studio supports phone artwork upload and persists the source image', () => {
+  assert.match(client, /csImageFile/)
+  assert.match(client, /readAsDataURL/)
+  assert.match(dashboard, /imageData/)
+  assert.match(dashboard, /8 \* 1024 \* 1024/)
+  assert.match(dashboard, /renderStudioCard/)
+})
+test('AI completion only requests missing fields and applies them to blank inputs', () => {
+  assert.match(dashboard, /GROQ_API_KEY/)
+  assert.match(dashboard, /missing\.join\(', '\)/)
+  assert.match(client, /\$\(id\)\.value===''/)
+})
+test('manual spawn publishes the saved image with the full card code and claim code', () => {
+  assert.match(dashboard, /sendMessage\(jid, \{ image: saved\.rendered_data, caption \}\)/)
+  assert.match(dashboard, /Claim with \*\!claim card #\$\{code\}\*/)
+  assert.match(dashboard, /Claim : \$\{claim\} \/ \$\{d\.claimLimit\}/)
+})
+test('custom card claims are unique per player and enforce expiry and claim limits', () => {
+  assert.match(dashboard, /PRIMARY KEY\(card_id,user_id\)/)
+  assert.match(store, /drop\.claim_count\) >= limit/)
+  assert.match(store, /reason:'expired'/)
+  assert.match(commands, /store\.claimStudioCard\(ctx\.userId, target\)/)
+})
+test('the card customizer preserves the 100-point and 10-star rating scales', () => {
+  assert.match(dashboard, /percentRating: n\(input\.percentRating, 0, 100/)
+  assert.match(dashboard, /starRating: n\(input\.starRating, 0, 10/)
+  assert.match(dashboard, /percent_rating: data\.percentRating, star_rating: data\.starRating/)
+})
