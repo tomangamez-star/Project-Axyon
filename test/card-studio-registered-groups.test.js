@@ -15,6 +15,8 @@ test('Card Studio lists only active registered groups available in WhatsApp', ()
 
 test('Card Studio spawn validates registration and live group membership server-side', () => {
   assert.match(dashboard, /registeredGroups\.find\(g => g\.group_jid === jid && g\.status === 'ACTIVE' && g\.enabled !== false\)/)
+  // WhatsApp uses both modern numeric-only group JIDs and legacy numeric-numeric JIDs.
+  assert.match(dashboard, /\\d\{5,30\}\(\?:-\\d\{5,25\}\)\?@g\\\.us/)
   assert.match(dashboard, /participating\?\.\[jid\]/)
   assert.match(dashboard, /WhatsApp rejected the card send/)
 })
