@@ -8,6 +8,7 @@ const { createAxyon } = require('../src/axyon-rpg')
 const spawn = require('../src/card-spawn')
 const artwork = require('../src/card-artwork')
 const oldGen = require('../src/card-renderers/special-hunt-card')
+const aiCustom = require('../src/card-renderers/ai-custom-card')
 
 test('card collection, management and drop commands remain registered', () => {
   const router = createCommands({ axyon: createAxyon({}) })
@@ -20,9 +21,22 @@ test('automatic card spawn interval remains six hours and new drops expire after
   assert.equal(spawn.CARD_VALIDITY_DAYS, 30)
 })
 
-test('new card drops use Old Gen renderer only', () => {
-  assert.deepEqual(spawn.renderers.map(x => x.key), ['old-gen'])
+test('Old Gen remains the automatic drop renderer while AI Custom is available for Card Studio', () => {
+  assert.deepEqual(spawn.renderers.map(x => x.key), ['old-gen', 'ai-custom'])
   assert.equal(spawn.renderers[0].render, oldGen)
+  assert.equal(spawn.renderers[1].render.style, undefined)
+})
+
+
+test('AI Custom is an independent 700x900 battle-card renderer with a gloss layer', async () => {
+  const source = await sharp({ create: { width: 480, height: 720, channels: 3, background: '#9B302A' } }).png().toBuffer()
+  const card = { name: 'Makima', series: 'Chainsaw Man', card_type: 'character', damage: 35, ability: 'Control', ability_damage: 40, forced_tier: 5, percent_rating: 80, star_rating: 7 }
+  const result = await aiCustom.render(card, source)
+  assert.equal(result.style, 'ai-custom')
+  assert.equal(result.width, 700)
+  assert.equal(result.height, 900)
+  assert.equal((await sharp(result.buffer).metadata()).format, 'png')
+  assert.match(aiCustom.svgOverlay(card, { a: '#C33A35', b: '#F0B45B' }).toString(), /SPECIAL ABILITY/)
 })
 
 test('Danbooru tag matching is exact and supports series-qualified tags', () => {
