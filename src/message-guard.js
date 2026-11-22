@@ -78,7 +78,14 @@ function isKnownButtonInteraction (c = {}) { return !!resolveButtonId(c) }
  */
 function isCommandText (c = {}, prefix = '!') {
   const raw = visibleText(c)
-  if (!raw || !prefix) return false
+  if (!raw) return false
+  /*
+   * `.play` is a DOT-PREFIX command that is deliberately independent of the
+   * configured prefix, so it is recognised here whatever `prefix` is set to.
+   * Without this the guard would drop it before the router ever saw it.
+   */
+  if (/^\.play(?:\s|$)/i.test(raw)) return true
+  if (!prefix) return false
   if (!raw.startsWith(prefix)) return false
   const rest = raw.slice(prefix.length).trim()
   return rest.length > 0

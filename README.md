@@ -167,3 +167,7 @@ public/
 tools/
   e2e.js             end-to-end harness
 ```
+
+## Guild organisations
+
+AXYON now includes a persistent guild registry for creating guilds, suggesting guilds for owner review, joining/leaving, viewing rosters, transferring leadership and linking a guild to one registered WhatsApp group. See [GUILD-SYSTEM.md](GUILD-SYSTEM.md) for the complete command reference. The existing guild raid/duel/gauntlet combat engine remains separate and unchanged.

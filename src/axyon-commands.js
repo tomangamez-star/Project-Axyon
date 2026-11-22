@@ -18,6 +18,7 @@ const cardSpawner = require('./card-spawn')
 const classes = require('./axyon-classes')
 const modesLib = require('./axyon-modes')
 const guild = require('./axyon-guild')
+const lyrics = require('./lyrics')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -1325,6 +1326,133 @@ function createCommands ({ axyon, economy, logger, ai }) {
     ].join('\n'))
   })
 
+  /* --------------------------------------------------------- guild registry */
+
+  cmd('guild', 'social', '{p}guild <list|info|suggest|create|join|leave|members|group|ungroup|leader|disband|suggestions|approve|reject>', 'Create and join guilds, submit guild proposals, and link guilds to registered group chats.', async (s, m, ctx, args, content) => {
+    const sub = String(args[0] || 'help').toLowerCase()
+    const ownerOnly = ['create', 'group', 'ungroup', 'leader', 'disband', 'suggestions', 'approve', 'reject'].includes(sub)
+    if (ownerOnly && !ctx.auth.owner) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON OWNER ONLY*\n\nOnly the bot owner can perform that guild-management action.`)
+
+    if (sub === 'list' || sub === 'browse') {
+      const rows = await store.guilds()
+      if (!rows.length) return axyon.send(s, ctx.jid, m, `${W}\n\n⚔️ *GUILDS*\n\nNo guilds have been created yet.`)
+      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *GUILD DIRECTORY*', '', ...rows.map(g => `*#${g.id} [${g.tag}]* ${g.name}\n   ${g.member_count} member(s)${g.group_jid ? ` · linked group` : ''}\n   ${g.description || 'No description set.'}`), '', `Join with *${ctx.prefix}guild join <id|tag>*`].join('\n'))
+    }
+
+    if (sub === 'suggest') {
+      const raw = args.slice(1).join(' ')
+      const [name, tag, description] = raw.split('|').map(x => String(x || '').trim())
+      if (!name || !tag) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild suggest <name> | <tag> | <description>*`)
+      const result = await store.suggestGuild({ suggestedBy: ctx.userId, name, tag, description })
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_suggest', String(result.suggestion.id), { name, tag })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n📨 *GUILD SUGGESTION SENT*\n\n*${name}* [${tag.toUpperCase()}]\nRequest: *#${result.suggestion.id}*\n\nThe owner will review it. Approval creates the guild and makes you its first leader.`)
+    }
+
+    if (sub === 'create') {
+      const raw = args.slice(1).join(' ')
+      const [name, tagInput, description] = raw.split('|').map(x => String(x || '').trim())
+      if (!name) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild create <name> | <tag> | <description>*`)
+      const tag = tagInput || name.toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 8)
+      const leaderId = mentionedId(content) || ctx.userId
+      const result = await store.createGuild({ name, tag, description, leaderId, createdBy: ctx.userId })
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_create', String(result.guild.id), { name, tag, leaderId })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *GUILD CREATED*\n\n*${result.guild.name}* [${result.guild.tag}]\nID: *#${result.guild.id}*\nLeader appointed.\n\nPlayers can join with *${ctx.prefix}guild join ${result.guild.id}*`)
+    }
+
+    if (sub === 'join') {
+      const target = await store.guild(args[1])
+      if (!target) return axyon.send(s, ctx.jid, m, `❌ Guild not found. Use *${ctx.prefix}guild list*.`)
+      if (target.group_jid && ctx.jid !== target.group_jid) return axyon.send(s, ctx.jid, m, `📍 This guild is linked to its registered group. Join from that group chat.`)
+      const result = await store.joinGuild(target.id, ctx.userId)
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_join', String(target.id))
+      return axyon.send(s, ctx.jid, m, `${W}\n\n⚔️ *GUILD JOINED*\n\nWelcome to *${target.name}* [${target.tag}].`)
+    }
+
+    if (sub === 'leave') {
+      const result = await store.leaveGuild(ctx.userId)
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_leave', String(result.guild.id))
+      return axyon.send(s, ctx.jid, m, `${W}\n\n👋 You left *${result.guild.name}* [${result.guild.tag}].`)
+    }
+
+    if (sub === 'info' || sub === 'view') {
+      const target = args[1] ? await store.guild(args[1]) : await store.guildForUser(ctx.userId)
+      if (!target) return axyon.send(s, ctx.jid, m, `You are not in a guild. Use *${ctx.prefix}guild list* or *${ctx.prefix}guild suggest ...*.`)
+      const members = await store.guildMembers(target.id)
+      return axyon.send(s, ctx.jid, m, [W, '', `⚔️ *${target.name}* [${target.tag}]`, '', `ID: *#${target.id}*`, `Leader: *${members.find(x => x.role === 'leader')?.name || 'Unknown hunter'}*`, `Members: *${members.length}*`, `Linked group: ${target.group_jid ? 'configured' : 'not set'}`, target.description || 'No description set.', '', `Use *${ctx.prefix}guild members ${target.id}* to view the roster.`].join('\n'))
+    }
+
+    if (sub === 'members') {
+      const target = args[1] ? await store.guild(args[1]) : await store.guildForUser(ctx.userId)
+      if (!target) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild members <id|tag>*`)
+      const members = await store.guildMembers(target.id)
+      return axyon.send(s, ctx.jid, m, [W, '', `👥 *${target.name} — MEMBERS*`, '', ...members.map((x, i) => `${i + 1}. ${x.role === 'leader' ? '👑 ' : ''}*${x.name || `Hunter ${i + 1}`}* · ${x.rank || 'E'} / Lv.${x.level || 1}`)].join('\n'))
+    }
+
+    if (sub === 'group') {
+      const id = args[1]
+      if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, `Run *${ctx.prefix}guild group <id|tag>* inside the WhatsApp group you want to link.`)
+      const registered = await store.group(ctx.jid)
+      if (!registered || registered.status !== 'ACTIVE') return axyon.send(s, ctx.jid, m, '❌ Register this WhatsApp group with AXYON before linking a guild.')
+      const target = await store.guild(id)
+      if (!target) return axyon.send(s, ctx.jid, m, '❌ Guild not found.')
+      const result = await store.bindGuildGroup(target.id, ctx.jid)
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_group_bind', String(target.id), { groupJid: ctx.jid })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n🔗 *GUILD LINKED*\n\n*${target.name}* [${target.tag}] is now linked to this group.`)
+    }
+
+    if (sub === 'ungroup') {
+      const target = await store.guild(args[1])
+      if (!target) return axyon.send(s, ctx.jid, m, '❌ Guild not found.')
+      const result = await store.unbindGuildGroup(target.id)
+      if (!result) return axyon.send(s, ctx.jid, m, '❌ Guild not found.')
+      await store.log(ctx.userId, 'guild_group_unbind', String(target.id))
+      return axyon.send(s, ctx.jid, m, `🔓 *${target.name}* is no longer linked to a WhatsApp group.`)
+    }
+
+    if (sub === 'leader') {
+      const target = await store.guild(args[1])
+      const leaderId = mentionedId(content)
+      if (!target || !leaderId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild leader <id|tag> @member*`)
+      const result = await store.transferGuildLeader(target.id, leaderId)
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, 'guild_leader_transfer', String(target.id), { leaderId })
+      return axyon.send(s, ctx.jid, m, `👑 Leadership of *${target.name}* has been transferred.`)
+    }
+
+    if (sub === 'disband') {
+      const target = await store.guild(args[1])
+      if (!target) return axyon.send(s, ctx.jid, m, '❌ Guild not found.')
+      const result = await store.disbandGuild(target.id)
+      if (!result) return axyon.send(s, ctx.jid, m, '❌ Guild is already inactive.')
+      await store.log(ctx.userId, 'guild_disband', String(target.id))
+      return axyon.send(s, ctx.jid, m, `🛑 *${target.name}* has been disbanded. Its members are free to join another guild.`)
+    }
+
+    if (sub === 'suggestions') {
+      const rows = await store.guildSuggestions()
+      return axyon.send(s, ctx.jid, m, [W, '', '📨 *PENDING GUILD SUGGESTIONS*', '', rows.length ? rows.map(x => `*#${x.id}* ${x.name} [${x.tag}]\n   By: ${x.suggested_by}\n   ${x.description || 'No description.'}`).join('\n\n') : 'No pending suggestions.', '', `Approve: *${ctx.prefix}guild approve <id>*`, `Reject: *${ctx.prefix}guild reject <id>*`].join('\n'))
+    }
+
+    if (sub === 'approve' || sub === 'reject') {
+      const id = parseNum(args[1])
+      if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild ${sub} <suggestion id>*`)
+      const result = await store.resolveGuildSuggestion(id, ctx.userId, sub === 'approve')
+      if (!result.ok) return axyon.send(s, ctx.jid, m, `❌ ${result.message}`)
+      await store.log(ctx.userId, `guild_suggestion_${sub}`, String(id), { guildId: result.guild?.id || null })
+      return axyon.send(s, ctx.jid, m, sub === 'approve'
+        ? `${W}\n\n✅ *SUGGESTION APPROVED*\n\n*${result.guild.name}* [${result.guild.tag}] created. The suggester is its first leader.`
+        : `${W}\n\n🗑️ *SUGGESTION REJECTED*\n\nRequest *#${id}* was declined.`)
+    }
+
+    const own = await store.guildForUser(ctx.userId)
+    return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *GUILD SYSTEM*', '', own ? `Your guild: *${own.name}* [${own.tag}]` : 'You are not currently in a guild.', '', `*${ctx.prefix}guild list* — browse guilds`, `*${ctx.prefix}guild info [id|tag]* — guild details`, `*${ctx.prefix}guild members [id|tag]* — roster`, `*${ctx.prefix}guild suggest <name> | <tag> | <description>* — submit a proposal`, `*${ctx.prefix}guild join <id|tag>* — join a guild`, `*${ctx.prefix}guild leave* — leave your guild`, '', 'Owner controls: create, link/unlink group, transfer leader, disband, approve/reject suggestions.'].join('\n'))
+  })
+
   /* ------------------------------------------------------- stage management */
 
   cmd('stage', 'management', '{p}stage <add|edit|move|lock|unlock|remove> ...', 'Manage battle stages (AXYON / RHM).', async (s, m, ctx, args) => {
@@ -1788,6 +1916,34 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   async function handle (sock, m, content) {
     const ctx = await buildContext(sock, m, content)
+
+    /*
+     * `.play` — DOT PREFIX ONLY
+     * -------------------------
+     * Deliberately independent of the configured command prefix: it answers
+     * `.play <song>` and nothing else, so it keeps working whatever `!prefix`
+     * is set to, and a bare `!play` is NOT this command.
+     *
+     * It never downloads or sends audio. It looks the lyrics up and posts them
+     * as plain text; when nothing is found it says so in plain text.
+     */
+    const rawText = String(content?.conversation || content?.extendedTextMessage?.text || '').trim()
+    if (/^\.play(?:\s|$)/i.test(rawText)) {
+      const query = rawText.replace(/^\.play/i, '').trim()
+      if (!query) {
+        await axyon.send(sock, ctx.jid, m, '🎵 *PLAY*\n\nUsage: *.play <song name>*\nExample: *.play Blinding Lights The Weeknd*')
+        return true
+      }
+      let result = { found: false }
+      try { result = await lyrics.lookup(query) } catch { result = { found: false } }
+      if (!result.found) {
+        await axyon.send(sock, ctx.jid, m, `🎵 *LYRICS NOT FOUND*\n\nI could not find lyrics for *${query}*.\nTry adding the artist, e.g. *.play ${query} <artist>*.`)
+        return true
+      }
+      await axyon.send(sock, ctx.jid, m, `🎵 *${result.title}* — ${result.artist}\n\n${result.lyrics}`)
+      return true
+    }
+
     const parsed = parse(content, ctx.prefix)
     if (!parsed) return false
 

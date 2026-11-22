@@ -337,6 +337,40 @@ async function ensureSchema () {
       qty INT NOT NULL DEFAULT 0,
       PRIMARY KEY(user_id, item_key));
 
+    CREATE TABLE IF NOT EXISTS axyon_guilds(
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      tag TEXT NOT NULL UNIQUE,
+      description TEXT NOT NULL DEFAULT '',
+      leader_id TEXT NOT NULL,
+      group_jid TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
+    CREATE TABLE IF NOT EXISTS axyon_guild_members(
+      guild_id BIGINT NOT NULL REFERENCES axyon_guilds(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL DEFAULT 'member',
+      joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(guild_id,user_id));
+    CREATE INDEX IF NOT EXISTS axyon_guild_members_guild ON axyon_guild_members(guild_id,joined_at);
+
+    CREATE TABLE IF NOT EXISTS axyon_guild_suggestions(
+      id BIGSERIAL PRIMARY KEY,
+      suggested_by TEXT NOT NULL,
+      name TEXT NOT NULL,
+      tag TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'PENDING',
+      reviewed_by TEXT,
+      guild_id BIGINT REFERENCES axyon_guilds(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ);
+    CREATE INDEX IF NOT EXISTS axyon_guild_suggestions_pending ON axyon_guild_suggestions(status,created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS axyon_guild_suggestions_one_pending ON axyon_guild_suggestions(suggested_by) WHERE status='PENDING';
+
     CREATE TABLE IF NOT EXISTS axyon_log(
       id BIGSERIAL PRIMARY KEY,
       actor TEXT NOT NULL DEFAULT '',
@@ -1710,6 +1744,226 @@ async function deleteRoomType (typeId) {
   return r.rows[0] || null
 }
 
+/* ------------------------------------------------------------- guild registry */
+
+async function guildTagTaken (tag) {
+  await ensureSchema()
+  return (await db().query('SELECT 1 FROM axyon_guilds WHERE LOWER(tag)=LOWER($1)', [tag])).rowCount > 0
+}
+
+async function createGuild ({ name, tag, description = '', leaderId, createdBy = '' } = {}) {
+  await ensureSchema()
+  const cleanName = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 48)
+  const cleanTag = String(tag || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 12)
+  const leader = String(leaderId || '').replace(/\D/g, '')
+  if (!cleanName || !cleanTag || !leader) return { ok: false, reason: 'invalid', message: 'Guild name, tag and leader are required.' }
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query('SELECT guild_id FROM axyon_guild_members WHERE user_id=$1 FOR UPDATE', [leader])
+    if (existing.rowCount) { await client.query('ROLLBACK'); return { ok: false, reason: 'leader_joined', message: 'That leader already belongs to a guild.' } }
+    const inserted = await client.query(
+      `INSERT INTO axyon_guilds(name,tag,description,leader_id,created_by)
+       VALUES($1,$2,$3,$4,$5) RETURNING *`,
+      [cleanName, cleanTag, String(description || '').trim().slice(0, 240), leader, String(createdBy || '')]
+    )
+    const guild = inserted.rows[0]
+    await client.query("INSERT INTO axyon_guild_members(guild_id,user_id,role) VALUES($1,$2,'leader')", [guild.id, leader])
+    await client.query('COMMIT')
+    return { ok: true, guild }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (error.code === '23505') return { ok: false, reason: 'duplicate', message: 'That guild tag is already in use, or the leader already belongs to a guild.' }
+    throw error
+  } finally { client.release() }
+}
+
+async function guild (identifier) {
+  await ensureSchema()
+  const value = String(identifier || '').trim()
+  if (!value) return null
+  const byId = /^\d+$/.test(value)
+  return (await db().query(
+    `SELECT g.*, (SELECT COUNT(*)::int FROM axyon_guild_members m WHERE m.guild_id=g.id) AS member_count
+     FROM axyon_guilds g WHERE ${byId ? 'g.id=$1' : 'LOWER(g.tag)=LOWER($1)'} LIMIT 1`, [byId ? Number(value) : value]
+  )).rows[0] || null
+}
+
+async function guilds ({ activeOnly = true } = {}) {
+  await ensureSchema()
+  return (await db().query(
+    `SELECT g.*, COUNT(m.user_id)::int AS member_count
+     FROM axyon_guilds g LEFT JOIN axyon_guild_members m ON m.guild_id=g.id
+     ${activeOnly ? "WHERE g.status='ACTIVE'" : ''}
+     GROUP BY g.id ORDER BY g.created_at DESC`
+  )).rows
+}
+
+async function guildForUser (userId) {
+  await ensureSchema()
+  return (await db().query(
+    `SELECT g.*, m.role AS member_role FROM axyon_guild_members m
+     JOIN axyon_guilds g ON g.id=m.guild_id WHERE m.user_id=$1 AND g.status='ACTIVE' LIMIT 1`,
+    [String(userId || '').replace(/\D/g, '')]
+  )).rows[0] || null
+}
+
+async function guildMembers (guildId) {
+  await ensureSchema()
+  return (await db().query(
+    `SELECT m.user_id,m.role,m.joined_at,p.name,p.rank,p.level
+     FROM axyon_guild_members m LEFT JOIN axyon_players p ON p.user_id=m.user_id
+     WHERE m.guild_id=$1 ORDER BY CASE WHEN m.role='leader' THEN 0 ELSE 1 END,m.joined_at`, [Number(guildId)]
+  )).rows
+}
+
+async function joinGuild (guildId, userId) {
+  await ensureSchema()
+  const id = Number(guildId)
+  const user = String(userId || '').replace(/\D/g, '')
+  if (!Number.isSafeInteger(id) || id < 1 || !user) return { ok: false, reason: 'invalid', message: 'Choose a valid guild.' }
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const target = await client.query("SELECT * FROM axyon_guilds WHERE id=$1 AND status='ACTIVE' FOR UPDATE", [id])
+    if (!target.rowCount) { await client.query('ROLLBACK'); return { ok: false, reason: 'missing', message: 'That guild does not exist or is inactive.' } }
+    const current = await client.query('SELECT guild_id FROM axyon_guild_members WHERE user_id=$1 FOR UPDATE', [user])
+    if (current.rowCount) { await client.query('ROLLBACK'); return { ok: false, reason: 'already_member', message: Number(current.rows[0].guild_id) === id ? 'You are already in this guild.' : 'Leave your current guild before joining another.' } }
+    await client.query("INSERT INTO axyon_guild_members(guild_id,user_id,role) VALUES($1,$2,'member')", [id, user])
+    await client.query('COMMIT')
+    return { ok: true, guild: target.rows[0] }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (error.code === '23505') return { ok: false, reason: 'already_member', message: 'You already belong to a guild.' }
+    throw error
+  } finally { client.release() }
+}
+
+async function leaveGuild (userId) {
+  await ensureSchema()
+  const user = String(userId || '').replace(/\D/g, '')
+  const current = await guildForUser(user)
+  if (!current) return { ok: false, reason: 'not_member', message: 'You are not in a guild.' }
+  if (current.member_role === 'leader') return { ok: false, reason: 'leader', message: 'The guild leader cannot leave. Transfer leadership or ask AXYON to disband the guild.' }
+  await db().query('DELETE FROM axyon_guild_members WHERE guild_id=$1 AND user_id=$2', [current.id, user])
+  return { ok: true, guild: current }
+}
+
+async function bindGuildGroup (guildId, groupJid) {
+  await ensureSchema()
+  const id = Number(guildId)
+  const jid = String(groupJid || '').trim()
+  if (!Number.isSafeInteger(id) || id < 1 || !jid.endsWith('@g.us')) return { ok: false, reason: 'invalid', message: 'A valid guild and WhatsApp group are required.' }
+  try {
+    const r = await db().query("UPDATE axyon_guilds SET group_jid=$2,updated_at=NOW() WHERE id=$1 AND status='ACTIVE' RETURNING *", [id, jid])
+    if (!r.rowCount) return { ok: false, reason: 'missing', message: 'That guild does not exist or is inactive.' }
+    return { ok: true, guild: r.rows[0] }
+  } catch (error) {
+    if (error.code === '23505') return { ok: false, reason: 'group_taken', message: 'That WhatsApp group is already linked to another guild.' }
+    throw error
+  }
+}
+
+async function unbindGuildGroup (guildId) {
+  await ensureSchema()
+  const r = await db().query('UPDATE axyon_guilds SET group_jid=NULL,updated_at=NOW() WHERE id=$1 RETURNING *', [Number(guildId)])
+  return r.rows[0] || null
+}
+
+async function transferGuildLeader (guildId, newLeaderId) {
+  await ensureSchema()
+  const id = Number(guildId)
+  const user = String(newLeaderId || '').replace(/\D/g, '')
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const g = await client.query("SELECT * FROM axyon_guilds WHERE id=$1 AND status='ACTIVE' FOR UPDATE", [id])
+    if (!g.rowCount) { await client.query('ROLLBACK'); return { ok: false, message: 'Guild not found.' } }
+    const member = await client.query('SELECT 1 FROM axyon_guild_members WHERE guild_id=$1 AND user_id=$2 FOR UPDATE', [id, user])
+    if (!member.rowCount) { await client.query('ROLLBACK'); return { ok: false, message: 'The new leader must already be a guild member.' } }
+    await client.query("UPDATE axyon_guild_members SET role='member' WHERE guild_id=$1 AND role='leader'", [id])
+    await client.query("UPDATE axyon_guild_members SET role='leader' WHERE guild_id=$1 AND user_id=$2", [id, user])
+    await client.query('UPDATE axyon_guilds SET leader_id=$2,updated_at=NOW() WHERE id=$1', [id, user])
+    await client.query('COMMIT')
+    return { ok: true, guild: g.rows[0], leaderId: user }
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }
+}
+
+async function disbandGuild (guildId) {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const r = await client.query("UPDATE axyon_guilds SET status='DISBANDED',group_jid=NULL,updated_at=NOW() WHERE id=$1 AND status='ACTIVE' RETURNING *", [Number(guildId)])
+    if (!r.rowCount) { await client.query('ROLLBACK'); return null }
+    // Release members so they can join another guild; the guild record itself remains as history.
+    await client.query('DELETE FROM axyon_guild_members WHERE guild_id=$1', [Number(guildId)])
+    await client.query('COMMIT')
+    return r.rows[0]
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }
+}
+
+async function suggestGuild ({ suggestedBy, name, tag, description = '' } = {}) {
+  await ensureSchema()
+  const cleanName = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 48)
+  const cleanTag = String(tag || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 12)
+  const user = String(suggestedBy || '').replace(/\D/g, '')
+  if (!cleanName || !cleanTag || !user) return { ok: false, message: 'Name, tag and requester are required.' }
+  const existing = await db().query("SELECT id FROM axyon_guild_suggestions WHERE suggested_by=$1 AND status='PENDING'", [user])
+  if (existing.rowCount) return { ok: false, message: 'You already have a pending guild suggestion.' }
+  try {
+    const r = await db().query(
+      `INSERT INTO axyon_guild_suggestions(suggested_by,name,tag,description)
+       VALUES($1,$2,$3,$4) RETURNING *`, [user, cleanName, cleanTag, String(description || '').trim().slice(0, 240)]
+    )
+    return { ok: true, suggestion: r.rows[0] }
+  } catch (error) {
+    if (error.code === '23505') return { ok: false, message: 'You already have a pending guild suggestion.' }
+    throw error
+  }
+}
+
+async function guildSuggestions ({ pendingOnly = true } = {}) {
+  await ensureSchema()
+  return (await db().query(
+    `SELECT s.*,p.name AS suggester_name FROM axyon_guild_suggestions s
+     LEFT JOIN axyon_players p ON p.user_id=s.suggested_by
+     ${pendingOnly ? "WHERE s.status='PENDING'" : ''} ORDER BY s.created_at DESC LIMIT 50`
+  )).rows
+}
+
+async function resolveGuildSuggestion (suggestionId, reviewerId, approve = false) {
+  await ensureSchema()
+  const id = Number(suggestionId)
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const q = await client.query("SELECT * FROM axyon_guild_suggestions WHERE id=$1 AND status='PENDING' FOR UPDATE", [id])
+    if (!q.rowCount) { await client.query('ROLLBACK'); return { ok: false, message: 'No pending suggestion with that ID.' } }
+    let created = null
+    if (approve) {
+      const s = q.rows[0]
+      const inserted = await client.query(
+        `INSERT INTO axyon_guilds(name,tag,description,leader_id,created_by)
+         VALUES($1,$2,$3,$4,$5) RETURNING *`,
+        [s.name, s.tag, s.description, s.suggested_by, String(reviewerId || '')]
+      )
+      created = inserted.rows[0]
+      await client.query("INSERT INTO axyon_guild_members(guild_id,user_id,role) VALUES($1,$2,'leader')", [created.id, s.suggested_by])
+    }
+    await client.query(
+      `UPDATE axyon_guild_suggestions SET status=$2,reviewed_by=$3,guild_id=$4,reviewed_at=NOW() WHERE id=$1`,
+      [id, approve ? 'APPROVED' : 'REJECTED', String(reviewerId || ''), created?.id || null]
+    )
+    await client.query('COMMIT')
+    return { ok: true, suggestion: q.rows[0], guild: created }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    if (error.code === '23505') return { ok: false, message: 'The proposed tag is already in use, or the suggester already belongs to a guild.' }
+    throw error
+  } finally { client.release() }
+}
+
 /* --------------------------------------------------------------------- log */
 
 async function log (actor, action, target = '', detail = {}) {
@@ -1850,6 +2104,20 @@ module.exports = {
   roomTypes,
   upsertRoomType,
   deleteRoomType,
+  createGuild,
+  guild,
+  guilds,
+  guildForUser,
+  guildMembers,
+  joinGuild,
+  leaveGuild,
+  bindGuildGroup,
+  unbindGuildGroup,
+  transferGuildLeader,
+  disbandGuild,
+  suggestGuild,
+  guildSuggestions,
+  resolveGuildSuggestion,
   log,
   recentLog
 }
