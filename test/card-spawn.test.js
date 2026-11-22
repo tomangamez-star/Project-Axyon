@@ -39,6 +39,17 @@ test('AI Custom is an independent 700x900 battle-card renderer with a gloss laye
   assert.match(aiCustom.svgOverlay(card, { a: '#C33A35', b: '#F0B45B' }).toString(), /SPECIAL ABILITY/)
 })
 
+test('AI Custom derives two distinct accents from artwork colours instead of a fixed pink complement', () => {
+  const samples = []
+  for (let i = 0; i < 120; i++) samples.push({ r: 210, g: 28, b: 24 })
+  for (let i = 0; i < 100; i++) samples.push({ r: 24, g: 92, b: 220 })
+  const palette = aiCustom.paletteFrom(samples)
+  assert.equal(palette.source, 'artwork-multi')
+  assert.notEqual(palette.a, palette.b)
+  assert.match(palette.a, /^#[0-9a-f]{6}$/i)
+  assert.match(palette.b, /^#[0-9a-f]{6}$/i)
+})
+
 test('Danbooru tag matching is exact and supports series-qualified tags', () => {
   assert.equal(artwork.tagMatches('yor_forger anya_forger', 'Yor Forger'), true)
   assert.equal(artwork.tagMatches('yor_forger_(spy_x_family)', 'Yor Forger'), true)
