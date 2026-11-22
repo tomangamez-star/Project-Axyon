@@ -15,6 +15,10 @@ const renderers = [
   { key: 'ai-custom', label: 'AI Custom', render: require('./card-renderers/ai-custom-card') }
 ]
 
+function rendererFor (key, fallback = 'old-gen') {
+  return renderers.find(item => item.key === String(key || '').toLowerCase()) || renderers.find(item => item.key === fallback) || renderers[0]
+}
+
 const AUTO_INTERVAL_MS = 6 * 60 * 60 * 1000
 // Generated drops default to a 30-day validity window; set 0 for permanent.
 const CARD_VALIDITY_DAYS = process.env.AXYON_CARD_VALIDITY_DAYS == null
@@ -315,7 +319,8 @@ async function createPlayerCard (ownerId, input = {}) {
     forced_tier: Math.max(1, Math.min(6, Number(input.rating) || 1)),
     character_id: `admin-${Date.now()}`
   }
-  const renderer = renderers[0]
+  // Studio-created cards use AI Custom; scheduled/global drops retain Old Gen.
+  const renderer = rendererFor(input.renderer, 'ai-custom')
   if (!renderer.render.available()) throw new Error('Sharp is required for card image rendering.')
   const rendered = await renderer.render.render(card, art.buffer)
   const saved = await store.addCard(ownerId, {
@@ -342,7 +347,7 @@ async function renderUpdatedArtwork (card, imageUrl) {
   const art = imageUrl
     ? { buffer: await artwork.fetchBuffer(imageUrl), source: 'AXYON supplied artwork', sourceUrl: imageUrl, fileUrl: imageUrl, sourceArtist: '' }
     : await artwork.resolveArtwork({ name: card.name, kind: card.card_type || 'character' })
-  const renderer = renderers[0]
+  const renderer = rendererFor(card.renderer, 'ai-custom')
   const payload = {
     name: card.name,
     series: card.series || (card.card_type === 'weapon' ? 'AXYON ARMORY' : 'ANIME'),
@@ -401,6 +406,7 @@ module.exports = {
   fetchCharacter,
   createPlayerCard,
   renderUpdatedArtwork,
+  rendererFor,
   renderers,
   artwork
 }

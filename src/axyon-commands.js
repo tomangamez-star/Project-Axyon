@@ -62,6 +62,8 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* How many stories each player has read, so `!story` walks the anthology
    * instead of repeating. In memory on purpose: it is a reading position. */
   const storyReads = new Map()
+  // Short-lived conversational memory, scoped per chat and speaker.
+  const architectHistory = new Map()
 
   /* ------------------------------------------------------------ authority */
 
@@ -786,8 +788,14 @@ function createCommands ({ axyon, economy, logger, ai }) {
      * more permissive than the command layer.
      */
     const authority = ctx.auth?.axyon ? 'owner' : ctx.auth?.rhm ? 'rhm' : 'member'
-
-    const text = await ai.ask({ question: q, commands: catalogue, prefix: ctx.prefix, authority })
+    const threadKey = `${ctx.jid}:${ctx.userId}`
+    const history = architectHistory.get(threadKey) || []
+    const text = await ai.ask({ question: q, history, commands: catalogue, prefix: ctx.prefix, authority })
+    if (text) {
+      history.push({ role: 'user', content: q }, { role: 'assistant', content: text })
+      architectHistory.set(threadKey, history.slice(-12))
+      if (architectHistory.size > 500) architectHistory.delete(architectHistory.keys().next().value)
+    }
 
     /*
      * NO ERRORS IN CHAT.
@@ -795,26 +803,11 @@ function createCommands ({ axyon, economy, logger, ai }) {
      * a provider name, never a retry loop that spams the group.
      */
     if (!text) {
-      await axyon.send(sock, ctx.jid, m, [
-        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-        '',
-        `🤖 ${T.i('I could not reach my knowledge base just now.')}`,
-        '',
-        `Try ${T.b(`${ctx.prefix}help`)} for the full command list.`
-      ].join('\n'))
+      await axyon.send(sock, ctx.jid, m, 'I’m having a little trouble responding right now. Try again in a moment.')
       return true
     }
 
-    await axyon.send(sock, ctx.jid, m, [
-      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-      '',
-      `🤖 ${T.font('ARCHITECT', 'bold')}`,
-      '',
-      text,
-      '',
-      T.rule('', 'hair'),
-      T.i('I can explain commands. I cannot run them.')
-    ].join('\n'))
+    await axyon.send(sock, ctx.jid, m, text)
     return true
   }
 
@@ -1450,7 +1443,33 @@ function createCommands ({ axyon, economy, logger, ai }) {
     }
 
     const own = await store.guildForUser(ctx.userId)
-    return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *GUILD SYSTEM*', '', own ? `Your guild: *${own.name}* [${own.tag}]` : 'You are not currently in a guild.', '', `*${ctx.prefix}guild list* — browse guilds`, `*${ctx.prefix}guild info [id|tag]* — guild details`, `*${ctx.prefix}guild members [id|tag]* — roster`, `*${ctx.prefix}guild suggest <name> | <tag> | <description>* — submit a proposal`, `*${ctx.prefix}guild join <id|tag>* — join a guild`, `*${ctx.prefix}guild leave* — leave your guild`, '', 'Owner controls: create, link/unlink group, transfer leader, disband, approve/reject suggestions.'].join('\n'))
+    const line = '━━━━━━━━━━━━━━━━━━━━'
+    const help = [
+      W, '', '⚔️ *GUILD NETWORK*',
+      '┌──────────────────────',
+      own ? `│  🏰 *${own.name}*  ·  [${own.tag}]` : '│  ◇ *NO GUILD AFFILIATION*',
+      own ? `│  ${own.member_role === 'leader' ? 'Guild Leader' : 'Guild Member'} · ${own.member_count || 1} member(s)` : '│  Your place in the network is open.',
+      '└──────────────────────', '',
+      '*⌬  EXPLORE THE NETWORK*',
+      `  ◈  *${ctx.prefix}guild list*`, '      Browse active guilds',
+      `  ◈  *${ctx.prefix}guild info <id|tag>*`, '      View a guild profile',
+      `  ◈  *${ctx.prefix}guild members <id|tag>*`, '      Meet its members', '',
+      line, '', '*⚔️  MEMBERSHIP*',
+      `  ⟡  *${ctx.prefix}guild suggest <name> | <tag> | <description>*`,
+      '      Propose a new guild for review',
+      `  ⟡  *${ctx.prefix}guild join <id|tag>*`, '      Join an open guild',
+      `  ⟡  *${ctx.prefix}guild leave*`, '      Leave your current guild', '',
+      line, '', '*♛  NETWORK ADMINISTRATION*',
+      `  • *${ctx.prefix}guild create <name> | <tag> | <description>*`,
+      `  • *${ctx.prefix}guild group <id|tag>*  ·  ${ctx.prefix}guild ungroup <id|tag>`,
+      `  • *${ctx.prefix}guild leader <id|tag> @member*`,
+      `  • *${ctx.prefix}guild disband <id|tag>*`,
+      `  • *${ctx.prefix}guild suggestions*`,
+      `  • *${ctx.prefix}guild approve <id>*  ·  ${ctx.prefix}guild reject <id>*`,
+      T.i('Administration commands are reserved for AXYON.'), '',
+      '└─ *Find your people. Build your banner.*'
+    ].join('\n')
+    return axyon.send(s, ctx.jid, m, help)
   })
 
   /* ------------------------------------------------------- stage management */

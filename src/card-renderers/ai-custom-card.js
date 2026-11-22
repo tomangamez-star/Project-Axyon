@@ -82,7 +82,7 @@ function paletteFrom (samples, tier = { tier: 1 }) {
     return hslHex(h, Math.max(.48, Math.min(.88, s * 1.12)), Math.max(.43, Math.min(.68, l)))
   }
   const second = bins.find(x => x.weight > first.weight * .16 && x.weight > 0 && Math.min(Math.abs(x.hue - first.hue), 360 - Math.abs(x.hue - first.hue)) >= 30)
-  return { a: color(first), b: second ? color(second) : hslHex((first.hue + 22) % 360, .52, .66), source: second ? 'artwork-multi' : 'artwork-single' }
+  return { a: color(first), b: second ? color(second) : hslHex(first.hue, .42, .78), source: second ? 'artwork-multi' : 'artwork-single' }
 }
 async function samplePalette (sharpFactory, imageBuffer) {
   try {
@@ -121,74 +121,67 @@ function svgOverlay (card, colors) {
   const id = esc(String(card.character_id || card.id || 'AXYON').replace(/^anilist-/i, ''), 32)
   const series = esc(card.series || 'AXYON CORE', 38)
   const expiry = esc(expiryLabel(card.expires_at || card.expiresAt), 36)
-  const starText = Array.from({ length: 10 }, (_, i) => `<text x="${100 + i * 34}" y="603" font-size="27" text-anchor="middle" fill="${i < stars ? colors.b : '#59616D'}" stroke="#080B12" stroke-width="2" paint-order="stroke">★</text>`).join('')
-  const nameSize = name.length > 22 ? 34 : name.length > 15 ? 42 : 50
+  const starText = Array.from({ length: 10 }, (_, i) => `<text x="${88 + i * 31}" y="592" font-size="24" text-anchor="middle" fill="${i < stars ? colors.b : '#59616D'}" stroke="#080B12" stroke-width="2" paint-order="stroke">★</text>`).join('')
+  const nameSize = name.length > 22 ? 32 : name.length > 15 ? 40 : 48
   const abilityFont = ability.length > 22 ? 16 : 20
   return Buffer.from(`<svg width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="frame" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors.a}"/><stop offset=".48" stop-color="#F5F0E8"/><stop offset="1" stop-color="${colors.b}"/></linearGradient>
-    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#080B12" stop-opacity=".95"/><stop offset=".55" stop-color="${colors.a}" stop-opacity=".32"/><stop offset="1" stop-color="#080B12" stop-opacity=".96"/></linearGradient>
-    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff" stop-opacity="0"/><stop offset=".46" stop-color="#fff" stop-opacity=".035"/><stop offset=".50" stop-color="#fff" stop-opacity=".25"/><stop offset=".54" stop-color="#fff" stop-opacity=".025"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
-    <linearGradient id="sideMetal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors.a}" stop-opacity=".82"/><stop offset=".48" stop-color="#F5F0E8" stop-opacity=".18"/><stop offset="1" stop-color="${colors.b}" stop-opacity=".82"/></linearGradient>
-    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="8"/></filter>
-    <clipPath id="cardClip"><path d="M42 26 H658 L674 44 V852 L638 878 H62 L26 842 V62 Z"/></clipPath>
+    <linearGradient id="frame" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors.a}"/><stop offset=".52" stop-color="#F5F0E8" stop-opacity=".72"/><stop offset="1" stop-color="${colors.b}"/></linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#080B12" stop-opacity=".97"/><stop offset=".55" stop-color="${colors.a}" stop-opacity=".26"/><stop offset="1" stop-color="#080B12" stop-opacity=".98"/></linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff" stop-opacity="0"/><stop offset=".47" stop-color="#fff" stop-opacity=".035"/><stop offset=".50" stop-color="#fff" stop-opacity=".22"/><stop offset=".53" stop-color="#fff" stop-opacity=".025"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    <linearGradient id="monolith" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${colors.a}" stop-opacity=".72"/><stop offset=".45" stop-color="#080B12" stop-opacity=".94"/><stop offset="1" stop-color="${colors.b}" stop-opacity=".62"/></linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <clipPath id="cardClip"><path d="M38 24 H662 L676 42 V850 L640 878 H60 L24 842 V60 Z"/></clipPath>
   </defs>
   <g clip-path="url(#cardClip)">
-    <!-- Large, asymmetric right-side structure: deliberate visual mass, not hairline decoration. -->
-    <path d="M486 146 L690 214 V624 L596 716 L492 642 L536 500 L480 390 Z" fill="#070A12" fill-opacity=".58" stroke="url(#sideMetal)" stroke-width="12"/>
-    <path d="M514 190 L660 244 V590 L590 664 L526 610 L566 490 L510 382 Z" fill="${colors.a}" fill-opacity=".12" stroke="${colors.a}" stroke-opacity=".88" stroke-width="5"/>
-    <path d="M548 244 L632 277 V558 L586 614 L548 578 L580 488 L540 386 Z" fill="${colors.b}" fill-opacity=".10" stroke="${colors.b}" stroke-opacity=".78" stroke-width="4"/>
-    <path d="M500 286 L660 346 L660 394 L510 338 Z M500 430 L660 488 L660 532 L510 474 Z" fill="url(#sideMetal)" fill-opacity=".42"/>
-    <path d="M530 216 L628 252 L628 568 L584 620" fill="none" stroke="#FFF" stroke-opacity=".62" stroke-width="3"/>
-    <path d="M555 300 L620 325 L620 515 L584 560" fill="none" stroke="${colors.a}" stroke-width="8" stroke-opacity=".42"/>
-    <polygon points="574,354 626,374 626,465 584,510 550,482 575,430" fill="${colors.b}" fill-opacity=".16" stroke="url(#frame)" stroke-width="3"/>
-    <circle cx="592" cy="430" r="38" fill="none" stroke="${colors.b}" stroke-width="4" stroke-opacity=".78"/>
-    <circle cx="592" cy="430" r="20" fill="${colors.a}" fill-opacity=".16" stroke="#FFF" stroke-opacity=".55" stroke-width="2"/>
-    <path d="M492 170 L492 640 L558 692 M666 216 L688 198 M486 620 L460 680" fill="none" stroke="url(#frame)" stroke-width="7"/>
-    <!-- Compact floating identity header; keeps the character portrait unobstructed. -->
-    <path d="M38 38 H662 V128 L625 151 H38 Z" fill="#050810" fill-opacity=".66" stroke="url(#frame)" stroke-width="3"/>
-    <path d="M176 42 H622 L604 120 H154 Z" fill="#080B12" fill-opacity=".60" stroke="${colors.a}" stroke-opacity=".68" stroke-width="2"/>
-    <text x="385" y="98" text-anchor="middle" font-size="${nameSize}" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="#FFF" stroke="#080B12" stroke-width="3" paint-order="stroke">${name}</text>
-    <path d="M48 58 L112 34 L158 70 L146 142 L86 160 L38 116 Z" fill="#080B12" stroke="url(#frame)" stroke-width="5" filter="url(#glow)"/>
-    <text x="98" y="103" text-anchor="middle" font-size="46" font-weight="900" fill="${colors.a}">${esc(tier.symbol, 3)}</text>
-    <text x="98" y="128" text-anchor="middle" font-size="10" letter-spacing="1.2" font-weight="900" fill="#FFF">T${tier.tier} ${rarity}</text>
-    <path d="M564 42 H646 L658 58 V136 L610 158 L562 136 Z" fill="#080B12" stroke="url(#frame)" stroke-width="3"/>
-    <text x="610" y="78" text-anchor="middle" font-size="12" letter-spacing="1.4" font-weight="900" fill="#E9EDF4">RATING</text>
-    <text x="610" y="119" text-anchor="middle" font-size="32" font-weight="900" fill="${colors.b}">${rating}<tspan font-size="13" fill="#FFF">/100</tspan></text>
-    <!-- Character name / star rail is deliberately lower than the face. -->
-    <path d="M42 566 L438 566 L496 612 L42 612 Z" fill="#070A12" fill-opacity=".84" stroke="url(#frame)" stroke-width="4"/>
+    <!-- A single architectural monolith: large, quiet geometry instead of circuit clutter. -->
+    <path d="M548 154 L690 204 V648 L614 732 L526 660 L558 520 L526 376 Z" fill="#050810" fill-opacity=".72" stroke="url(#frame)" stroke-width="10"/>
+    <path d="M568 210 L660 242 V614 L610 676 L558 630 L588 510 L558 390 Z" fill="url(#monolith)" fill-opacity=".88" stroke="${colors.a}" stroke-opacity=".82" stroke-width="3"/>
+    <path d="M590 276 L638 294 V584 L608 624 L580 598 L604 502 L580 404 Z" fill="none" stroke="${colors.b}" stroke-opacity=".78" stroke-width="4"/>
+    <path d="M548 154 L548 650 L614 732 M660 242 L690 220" fill="none" stroke="#FFF" stroke-opacity=".42" stroke-width="2"/>
+    <path d="M566 696 L612 744 L658 696" fill="none" stroke="url(#frame)" stroke-width="5"/>
+    <!-- restrained identity header -->
+    <path d="M38 38 H662 V126 L628 146 H38 Z" fill="#050810" fill-opacity=".78" stroke="url(#frame)" stroke-width="3"/>
+    <path d="M164 43 H554 L536 120 H148 Z" fill="#080B12" fill-opacity=".64" stroke="${colors.a}" stroke-opacity=".58" stroke-width="2"/>
+    <text x="354" y="96" text-anchor="middle" font-size="${nameSize}" font-family="DejaVu Sans,Arial,sans-serif" font-style="italic" font-weight="900" fill="#FFF" stroke="#080B12" stroke-width="3" paint-order="stroke">${name}</text>
+    <path d="M48 56 L102 34 L150 62 L142 132 L86 150 L38 112 Z" fill="#080B12" stroke="url(#frame)" stroke-width="4"/>
+    <text x="94" y="100" text-anchor="middle" font-size="42" font-weight="900" fill="${colors.a}">${esc(tier.symbol, 3)}</text>
+    <text x="94" y="124" text-anchor="middle" font-size="9" letter-spacing="1" font-weight="900" fill="#FFF">T${tier.tier} ${rarity}</text>
+    <path d="M574 44 H646 L658 58 V130 L614 150 L570 130 Z" fill="#080B12" stroke="url(#frame)" stroke-width="3"/>
+    <text x="614" y="78" text-anchor="middle" font-size="10" letter-spacing="1.2" font-weight="900" fill="#E9EDF4">RATING</text>
+    <text x="614" y="116" text-anchor="middle" font-size="29" font-weight="900" fill="${colors.b}">${rating}<tspan font-size="12" fill="#FFF">/100</tspan></text>
+    <!-- Star rail floats above the data plate, leaving the portrait visible. -->
+    <path d="M42 558 H392 L444 606 H42 Z" fill="#070A12" fill-opacity=".88" stroke="url(#frame)" stroke-width="3"/>
     ${starText}
-    <!-- Battle-data plate: broad, angled, and anchored to the lower-left. -->
-    <path d="M34 632 L448 632 L530 874 H34 Z" fill="#050810" fill-opacity=".94" stroke="url(#frame)" stroke-width="7" filter="url(#shadow)"/>
-    <path d="M34 632 L448 632 L530 874 H34 Z" fill="url(#panel)" stroke="${colors.a}" stroke-opacity=".82" stroke-width="3"/>
-    <path d="M58 654 H416 L432 692 H58 Z" fill="${colors.a}" fill-opacity=".22"/>
-    <text x="78" y="678" font-size="13" font-weight="900" letter-spacing="1.8" fill="${colors.b}">BASE DAMAGE</text>
-    <text x="78" y="720" font-size="39" font-weight="900" fill="#FFF">${damage}</text>
-    <text x="326" y="678" font-size="12" font-weight="900" letter-spacing="1.4" fill="${colors.b}">CARD TYPE</text>
-    <text x="326" y="710" font-size="19" font-weight="900" fill="#FFF">${type}</text>
-    <path d="M58 738 H432" stroke="url(#frame)" stroke-opacity=".75" stroke-width="2"/>
-    <text x="78" y="770" font-size="12" font-weight="900" letter-spacing="1.5" fill="${colors.b}">SPECIAL ABILITY</text>
-    <text x="78" y="805" font-size="${abilityFont}" font-weight="900" fill="#FFF">${ability}</text>
-    <path d="M336 778 L482 778 L500 840 L354 840 Z" fill="#070A12" stroke="${colors.b}" stroke-width="3"/>
-    <text x="418" y="802" text-anchor="middle" font-size="10" letter-spacing="1.1" font-weight="900" fill="${colors.b}">ABILITY DMG</text>
-    <text x="418" y="830" text-anchor="middle" font-size="26" font-weight="900" fill="#FFF">${abilityDamage}</text>
-    <text x="78" y="850" font-size="11" font-weight="900" letter-spacing="1.2" fill="${colors.b}">WEAPON</text>
-    <text x="150" y="850" font-size="14" font-weight="800" fill="#FFF">${weapon}</text>
-    <!-- Identity footer sits inside the left plate; right geometry remains open. -->
-    <text x="48" y="870" font-size="10" font-weight="900" fill="#FFF">#${id}</text>
-    <text x="280" y="870" text-anchor="middle" font-size="13" font-weight="900" letter-spacing="1.2" fill="#FFF">${series}</text>
-    <text x="566" y="824" font-size="11" font-weight="900" fill="${colors.b}">${type}</text>
-    <text x="566" y="846" font-size="10" font-weight="700" fill="#E9EDF4">${expiry}</text>
-    <text x="566" y="870" font-size="15" font-weight="900" letter-spacing="1.2" fill="#FFF">AXYON</text>
-    <!-- Printed gloss sheet: subtle, clipped reflections that retain legibility. -->
-    <path d="M-130 180 L48 10 L270 10 L-42 900 L-220 900 Z" fill="url(#shine)" opacity=".74"/>
-    <path d="M10 510 L205 20 M510 20 L688 390" stroke="#FFF" stroke-opacity=".13" stroke-width="5"/>
-    <path d="M48 48 H652 V844 L632 866 H68 L48 846 Z" fill="none" stroke="#FFF" stroke-opacity=".36" stroke-width="2"/>
+    <!-- Angled lower-left battle plate. -->
+    <path d="M32 630 H430 L514 876 H32 Z" fill="#050810" fill-opacity=".96" stroke="url(#frame)" stroke-width="6"/>
+    <path d="M32 630 H430 L514 876 H32 Z" fill="url(#panel)" stroke="${colors.a}" stroke-opacity=".76" stroke-width="2"/>
+    <path d="M54 650 H394 L410 684 H54 Z" fill="${colors.a}" fill-opacity=".20"/>
+    <text x="72" y="675" font-size="12" font-weight="900" letter-spacing="1.5" fill="${colors.b}">BASE DAMAGE</text>
+    <text x="72" y="718" font-size="38" font-weight="900" fill="#FFF">${damage}</text>
+    <text x="286" y="675" font-size="11" font-weight="900" letter-spacing="1.1" fill="${colors.b}">CARD TYPE</text>
+    <text x="286" y="708" font-size="17" font-weight="900" fill="#FFF">${type}</text>
+    <path d="M54 736 H414" stroke="url(#frame)" stroke-opacity=".72" stroke-width="2"/>
+    <text x="72" y="768" font-size="11" font-weight="900" letter-spacing="1.4" fill="${colors.b}">SPECIAL ABILITY</text>
+    <text x="72" y="803" font-size="${abilityFont}" font-weight="900" fill="#FFF">${ability}</text>
+    <path d="M300 812 H438 L456 856 H318 Z" fill="#070A12" stroke="${colors.b}" stroke-width="2.5"/>
+    <text x="378" y="832" text-anchor="middle" font-size="9" letter-spacing="1" font-weight="900" fill="${colors.b}">ABILITY DMG</text>
+    <text x="378" y="852" text-anchor="middle" font-size="21" font-weight="900" fill="#FFF">${abilityDamage}</text>
+    <text x="72" y="846" font-size="10" font-weight="900" letter-spacing="1" fill="${colors.b}">WEAPON</text>
+    <text x="132" y="846" font-size="13" font-weight="800" fill="#FFF">${weapon}</text>
+    <!-- Footer metadata sits in the open right rail. -->
+    <text x="554" y="782" font-size="10" font-weight="900" fill="${colors.b}">${type}</text>
+    <text x="554" y="804" font-size="9" font-weight="700" fill="#E9EDF4">${expiry}</text>
+    <text x="554" y="846" font-size="11" font-weight="900" fill="#FFF">${series}</text>
+    <text x="554" y="866" font-size="12" font-weight="900" letter-spacing="1" fill="#FFF">AXYON</text>
+    <text x="48" y="872" font-size="9" font-weight="900" fill="#FFF">#${id}</text>
+    <!-- Physical gloss is part of the exported PNG, not a browser-only effect. -->
+    <path d="M-130 180 L48 10 L270 10 L-42 900 L-220 900 Z" fill="url(#shine)" opacity=".72"/>
+    <path d="M10 510 L205 20 M510 20 L688 390" stroke="#FFF" stroke-opacity=".10" stroke-width="4"/>
+    <path d="M48 48 H652 V844 L632 866 H68 L48 846 Z" fill="none" stroke="#FFF" stroke-opacity=".32" stroke-width="2"/>
   </g>
-  <path d="M42 26 H658 L674 44 V852 L638 878 H62 L26 842 V62 Z" fill="none" stroke="#05060B" stroke-width="17"/>
-  <path d="M42 26 H658 L674 44 V852 L638 878 H62 L26 842 V62 Z" fill="none" stroke="url(#frame)" stroke-width="6" filter="url(#glow)"/>
-  <path d="M48 34 H652 V842" fill="none" stroke="#FFF" stroke-opacity=".52" stroke-width="2"/>
+  <path d="M38 24 H662 L676 42 V850 L640 878 H60 L24 842 V60 Z" fill="none" stroke="#05060B" stroke-width="15"/>
+  <path d="M38 24 H662 L676 42 V850 L640 878 H60 L24 842 V60 Z" fill="none" stroke="url(#frame)" stroke-width="5" filter="url(#glow)"/>
   </svg>`)
 }
 async function render (card, imageBuffer) {

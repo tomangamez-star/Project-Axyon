@@ -300,6 +300,14 @@ test('ai: Architect prompt allows normal conversation with a confident playful p
   assert.match(prompt, /Do not infer AXYON authority from WhatsApp group-admin status/i)
 })
 
+test('ai: Architect prioritizes normal chat and does not volunteer game help or canned greetings', () => {
+  const prompt = ai.buildSystemPrompt({ commands: [], authority: 'member' })
+  assert.match(prompt, /ordinary, natural conversation/i)
+  assert.match(prompt, /unless the person asks about them/i)
+  assert.match(prompt, /do not use canned customer-service greetings/i)
+  assert.match(prompt, /Do not append command disclaimers/i)
+})
+
 test('ai: AI_API alone configures the OpenAI-compatible fallback key and endpoint', () => {
   const old = {
     api: process.env.AI_API,

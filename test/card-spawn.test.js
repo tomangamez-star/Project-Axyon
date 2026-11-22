@@ -28,6 +28,12 @@ test('Old Gen remains the automatic drop renderer while AI Custom is available f
 })
 
 
+test('Card Studio renderer selection defaults to AI Custom without changing Old Gen drops', () => {
+  assert.equal(spawn.rendererFor(undefined, 'ai-custom').key, 'ai-custom')
+  assert.equal(spawn.rendererFor('old-gen').key, 'old-gen')
+  assert.equal(spawn.rendererFor('ai-custom').key, 'ai-custom')
+})
+
 test('AI Custom is an independent 700x900 battle-card renderer with a gloss layer', async () => {
   const source = await sharp({ create: { width: 480, height: 720, channels: 3, background: '#9B302A' } }).png().toBuffer()
   const card = { name: 'Makima', series: 'Chainsaw Man', card_type: 'character', damage: 35, ability: 'Control', ability_damage: 40, forced_tier: 5, percent_rating: 80, star_rating: 7 }

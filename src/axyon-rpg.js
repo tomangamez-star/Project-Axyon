@@ -532,11 +532,16 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (!c) return send(sock, ctx.jid, m, `No card #${collectionNo} exists in your collection.`)
     // Upgrade inherited card art lazily, using its original stored artwork URL.
     // If the old source is unavailable, preserve and show the existing image.
-    if (c.image_url && c.renderer !== 'old-gen') {
+    // Re-render only AI Custom cards from their original artwork URL. Old Gen
+    // is intentionally left untouched; both archive previews and manual card
+    // opens now use the exact same stored rendered image bytes.
+    if (c.image_url && c.renderer === 'ai-custom') {
       try {
         const upgraded = await cardSpawner.renderUpdatedArtwork(c, c.image_url)
-        c = await store.editCard(ctx.userId, Number(collectionNo), { imageData: upgraded.rendered.buffer, renderer: 'old-gen' }) || c
-      } catch (error) { console.warn('[AXYON cards] legacy card re-render skipped:', error?.message || error) }
+        if (upgraded?.rendered?.buffer) {
+          c = await store.editCard(ctx.userId, Number(collectionNo), { imageData: upgraded.rendered.buffer, renderer: 'ai-custom' }) || c
+        }
+      } catch (error) { console.warn('[AXYON cards] AI Custom re-render skipped:', error?.message || error) }
     }
     const todayUses = c.ability_day === new Date().toISOString().slice(0, 10) ? Number(c.ability_uses || 0) : 0
     const text = [WATERMARK, '', `⌬ *${c.name}*`, `Collection number: *#${c.slot}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Daily ability uses: *${todayUses}/3*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, `Equipment: *${c.equipped_slot ? `Slot ${c.equipped_slot}` : 'Not equipped'}*`, `Status: *${c.claimed ? 'Owned' : 'Waiting to be claimed'}*`].join('\n')
