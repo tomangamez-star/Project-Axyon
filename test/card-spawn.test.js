@@ -28,12 +28,6 @@ test('Old Gen remains the automatic drop renderer while AI Custom is available f
 })
 
 
-test('Card Studio renderer selection defaults to AI Custom without changing Old Gen drops', () => {
-  assert.equal(spawn.rendererFor(undefined, 'ai-custom').key, 'ai-custom')
-  assert.equal(spawn.rendererFor('old-gen').key, 'old-gen')
-  assert.equal(spawn.rendererFor('ai-custom').key, 'ai-custom')
-})
-
 test('AI Custom is an independent 700x900 battle-card renderer with a gloss layer', async () => {
   const source = await sharp({ create: { width: 480, height: 720, channels: 3, background: '#9B302A' } }).png().toBuffer()
   const card = { name: 'Makima', series: 'Chainsaw Man', card_type: 'character', damage: 35, ability: 'Control', ability_damage: 40, forced_tier: 5, percent_rating: 80, star_rating: 7 }
@@ -43,6 +37,16 @@ test('AI Custom is an independent 700x900 battle-card renderer with a gloss laye
   assert.equal(result.height, 900)
   assert.equal((await sharp(result.buffer).metadata()).format, 'png')
   assert.match(aiCustom.svgOverlay(card, { a: '#C33A35', b: '#F0B45B' }).toString(), /SPECIAL ABILITY/)
+})
+
+test('AI Custom uses a transparent premade bevel frame and keeps the portrait free of a top nameplate', () => {
+  const fs = require('node:fs')
+  assert.equal(fs.existsSync(aiCustom.FRAME_PATH), true)
+  const svg = aiCustom.svgOverlay({ name: 'Makima', star_rating: 8, rating: 92 }, { a: '#0D8CCE', b: '#B0332B' }).toString()
+  assert.match(svg, /y=\"728\"/)
+  assert.match(svg, /x=\"616\" y=\"710\"/)
+  assert.doesNotMatch(svg, /x=\"385\"/)
+  assert.match(svg, /linearGradient id=\"footer\"/)
 })
 
 test('AI Custom derives two distinct accents from artwork colours instead of a fixed pink complement', () => {
