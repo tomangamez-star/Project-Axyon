@@ -26,7 +26,7 @@ const collab = require('./axyon-collab')
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
 const { norm, isOwner } = require('./access')
-const { canonicalUserId, displayName, mentionedId } = require('./identity')
+const { canonicalUserId, displayName, mentionedId, resolveMentionedId } = require('./identity')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -42,7 +42,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype', 'mode', 'modes', 'collab'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype', 'mode', 'modes', 'collab', 'purge', 'resetall'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -65,9 +65,6 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* How many stories each player has read, so `!story` walks the anthology
    * instead of repeating. In memory on purpose: it is a reading position. */
   const storyReads = new Map()
-
-  // Short-lived conversational memory, scoped per chat and speaker.
-  const architectHistory = new Map()
 
   /* New commands adapt the existing engines; they do not replace old flows. */
   async function invokeLocal (name, sock, message, ctx, args = [], content = {}) {
@@ -877,7 +874,7 @@ ${ctx.prefix}party rejoin`)
 
     if (sub === 'chronicles' || sub === 'create') return adventureDirectory(s, m, ctx, ['enter', 'duel'])
     if (sub === 'invite') {
-      const target = mentionedId(content)
+      const target = await resolveMentionedId(s, content)
       if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}duel invite @player*`)
       if (!(await store.player(target))) return axyon.send(s, ctx.jid, m, 'That player must use !arise before joining Duel Chronicles.')
       let room = await duelRoom()
@@ -933,7 +930,7 @@ Accept with *${ctx.prefix}duel accept*.`)
     if (sub === 'resume' || sub === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
 
     // Legacy direct player-versus-player duels are deliberately unchanged.
-    const opponent = mentionedId(content) || norm(args[0] || '')
+    const opponent = (await resolveMentionedId(s, content)) || norm(args[0] || '')
     return axyon.beginDuel(s, m, ctx, opponent || null)
   })
 
@@ -1156,7 +1153,7 @@ Accept with *${ctx.prefix}duel accept*.`)
    * and nothing else — no handlers, no store, no socket. It can describe a
    * command but has no path to run one.
    */
-  async function answerAI (sock, m, ctx, question) {
+  async function answerAI (sock, m, ctx, question, history = []) {
     const q = String(question || '').trim()
     if (!q) return false
     if (!ai) return false
@@ -1173,14 +1170,8 @@ Accept with *${ctx.prefix}duel accept*.`)
      * more permissive than the command layer.
      */
     const authority = ctx.auth?.axyon ? 'owner' : ctx.auth?.rhm ? 'rhm' : 'member'
-    const threadKey = `${ctx.jid}:${ctx.userId}`
-    const history = architectHistory.get(threadKey) || []
+
     const text = await ai.ask({ question: q, history, commands: catalogue, prefix: ctx.prefix, authority })
-    if (text) {
-      history.push({ role: 'user', content: q }, { role: 'assistant', content: text })
-      architectHistory.set(threadKey, history.slice(-12))
-      if (architectHistory.size > 500) architectHistory.delete(architectHistory.keys().next().value)
-    }
 
     /*
      * NO ERRORS IN CHAT.
@@ -1188,27 +1179,12 @@ Accept with *${ctx.prefix}duel accept*.`)
      * a provider name, never a retry loop that spams the group.
      */
     if (!text) {
-      await axyon.send(sock, ctx.jid, m, [
-        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-        '',
-        `🤖 ${T.i('I could not reach my knowledge base just now.')}`,
-        '',
-        `Try ${T.b(`${ctx.prefix}help`)} for the full command list.`
-      ].join('\n'))
-      return true
+      await axyon.send(sock, ctx.jid, m, 'Connection is being difficult. Give me a moment.')
+      return null
     }
 
-    await axyon.send(sock, ctx.jid, m, [
-      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
-      '',
-      `🤖 ${T.font('ARCHITECT', 'bold')}`,
-      '',
-      text,
-      '',
-      T.rule('', 'hair'),
-      T.i('I can explain commands. I cannot run them.')
-    ].join('\n'))
-    return true
+    await axyon.send(sock, ctx.jid, m, text)
+    return text
   }
 
   cmd('ai', 'core', '{p}ai <question>', 'Ask the assistant about the bot. It explains, it cannot act.', async (s, m, ctx, args) => {
@@ -1219,7 +1195,17 @@ Accept with *${ctx.prefix}duel accept*.`)
 
   /* --------------------------------------------------------------- resets */
 
-  cmd('reset', 'management', '{p}reset [@player]', 'Reset your progression, or another player\u2019s (AXYON).', async (s, m, ctx, args, content) => {
+  cmd('reset', 'management', '{p}reset [@player|all [confirm]]', 'Reset your progression, another player, or all players (AXYON for others/all).', async (s, m, ctx, args, content) => {
+    if (String(args[0] || '').toLowerCase() === 'all') {
+      if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🔒 *AXYON ONLY*\n\nOnly AXYON can reset all player progression.')
+      if (String(args[1] || '').toLowerCase() !== 'confirm') {
+        const count = await store.playerCount()
+        return axyon.send(s, ctx.jid, m, `⚠️ *GLOBAL PLAYER RESET*\n\nThis will reset progression for *${count}* registered players.\n\nPlayer registrations and names, cards, guilds and saved adventure records will remain.\n\nTo proceed, send *${ctx.prefix}reset all confirm*.`)
+      }
+      const count = await store.resetAllPlayers()
+      await store.log(ctx.userId, 'purge_all_players', 'all', { players: count, via: 'reset all' })
+      return axyon.send(s, ctx.jid, m, `✅ *PLAYER PROGRESSION RESET*\n\nReset *${count}* registered player profiles. Registrations and collections were preserved.`)
+    }
     const target = mentionedId(content) || norm(args[0] || '') || null
     const self = !target || target === ctx.userId
     if (!self && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*\n\nOnly AXYON can reset another player.')
@@ -1236,6 +1222,17 @@ Accept with *${ctx.prefix}duel accept*.`)
     ].join('\n'))
   })
 
+  cmd('purge', 'management', '{p}purge [confirm]', "Reset all registered players' RPG stats. AXYON only; confirmation required.", async (s, m, ctx, args) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🔒 *AXYON ONLY*\n\nOnly AXYON can reset all player progression.')
+    if (String(args[0] || '').toLowerCase() !== 'confirm') {
+      const count = await store.playerCount()
+      return axyon.send(s, ctx.jid, m, `⚠️ *GLOBAL PLAYER RESET*\n\nThis will reset progression for *${count}* registered players: level, rank, grade, XP, currencies, combat stats, class mastery and active battles.\n\nPlayer registrations and names, cards, guilds and saved adventure records will remain.\n\nTo proceed, send *${ctx.prefix}purge confirm*.`)
+    }
+    const count = await store.resetAllPlayers()
+    await store.log(ctx.userId, 'purge_all_players', 'all', { players: count })
+    return axyon.send(s, ctx.jid, m, `✅ *PLAYER PROGRESSION RESET*\n\nReset *${count}* registered player profiles. Registrations and collections were preserved.`)
+  })
+
   /* --------------------------------------------------- group registration */
 
   const GROUP_FEATURES = new Set([
@@ -1248,6 +1245,7 @@ Accept with *${ctx.prefix}duel accept*.`)
   }
   function featureFor (command) {
     if (command.name === 'mode') return null // mode checks the selected adventure's registration feature itself
+    if (command.name === 'fight') return ['combat', 'dungeon', 'duel']
     if (command.name === 'collab') return 'collab'
     if (command.name === 'flooradmin') return 'dungeon'
     if (command.name === 'classadmin') return 'general'
@@ -1256,8 +1254,8 @@ Accept with *${ctx.prefix}duel accept*.`)
     if (['cardadmin', 'spawncard', 'grantcard'].includes(command.name)) return 'cards'
     if (command.name === 'carduse') return { all: ['cards'], any: ['combat', 'dungeon'] }
     if (['arise', 'help', 'ping', 'ai', 'profile'].includes(command.name)) return null
-    // The same battle actions resolve both Combat stages and Dungeon floors.
-    if (command.section === 'battle' && !['fight', 'stages'].includes(command.name)) return ['combat', 'dungeon']
+    // Shared battle actions also serve Duel-only groups.
+    if (command.section === 'battle' && command.name !== 'stages') return ['combat', 'dungeon', 'duel']
     return SECTION_FEATURE[command.section] || null
   }
   const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register group multiplayer\` — Multiplayer Expedition\n• \`!register group guild\` — Guild Campaigns\n• \`!register group collab\` — Cross-group collaboration\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel|multiplayer|guild|collab>\` — Change mode (AXYON)`
@@ -3180,7 +3178,7 @@ Start with *${ctx.prefix}guild squad start*.`)
   const ALIASES = {
     fs: 'stages', h: 'help', p: 'profile', me: 'profile',
     wallet: 'zen', money: 'zen', collection: 'cards', inv: 'cards',
-    leaderboard: 'top', lb: 'top'
+    leaderboard: 'top', lb: 'top', resetall: 'purge'
   }
   for (const [alias, target] of Object.entries(ALIASES)) {
     const c = BY_NAME.get(target)

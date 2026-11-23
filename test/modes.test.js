@@ -125,14 +125,28 @@ test('profile card uses no Unicode display fonts', () => {
     assert.ok(!hit, `profile card still contains a display font: ${hit && hit[0]}`)
   }
 
-  /* It must still be a real card: bold labels, monospace values, a frame. */
-  assert.match(card, /\*Level\*/, 'bold label missing')
-  assert.match(card, /`/, 'monospace value missing')
-  assert.match(card, /[\u256D\u2570\u2502\u250C\u2514]/, 'frame missing')
-  assert.match(card, /Montai/)
+  /* The profile must stay narrow and readable in WhatsApp's message column. */
+  assert.match(card, /Level \*12\*/, 'level missing')
+  assert.match(card, /Rank \*D\*/, 'rank missing')
   assert.match(card, /VITALS/)
   assert.match(card, /COMBAT/)
   assert.match(card, /HOLDINGS/)
+  assert.doesNotMatch(card, /└─ by /)
+  assert.ok(Math.max(...card.split('\n').map(line => line.length)) <= 42, 'profile contains an overly wide line')
+})
+
+
+test('profile card stays compact and avoids fixed-width framing', () => {
+  const h = harness({ player: basePlayer() })
+  const card = h.a.profileCard(basePlayer(), { settings: {} })
+  h.restore()
+  assert.match(card, /Level \*12\*/)
+  assert.match(card, /Rank \*D\*/)
+  assert.match(card, /HP/)
+  assert.match(card, /Energy/)
+  assert.doesNotMatch(card, /└─ by /)
+  assert.doesNotMatch(card, /[│┃]/)
+  assert.ok(Math.max(...card.split('\n').map(line => line.length)) <= 42)
 })
 
 test('!arise keeps its Unicode treatment — the change is scoped to profile', () => {

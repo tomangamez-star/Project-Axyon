@@ -776,6 +776,31 @@ async function resetPlayer (userId) {
   return norm(r.rows[0])
 }
 
+/** Reset every registered player's RPG progression without deleting identities. */
+async function resetAllPlayers () {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query(
+      `UPDATE axyon_players SET rank='E',level=1,grade=1,xp=0,zen=0,coins=0,
+         hp=$1,max_hp=$1,atk=$2,def=$3,spd=$4,power_energy=$5,max_power_energy=$5,
+         stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$6,
+         class='Fighter',class_moves_used=0,heal_uses=0,card_uses=0,active_battle=NULL,updated_at=NOW()`,
+      [BASE_HP, BASE_ATK, BASE_DEF, BASE_SPD, POWER_ENERGY_BASE, dayKey()]
+    )
+    await client.query('DELETE FROM axyon_class_mastery')
+    await client.query('DELETE FROM axyon_class_usage')
+    await client.query('COMMIT')
+    return Number(result.rowCount || 0)
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 async function leaderboard (limit = 10) {
   await ensureSchema()
   return (await db().query(
@@ -2087,6 +2112,7 @@ module.exports = {
   savePlayer,
   rollDay,
   resetPlayer,
+  resetAllPlayers,
   leaderboard,
   playerCount,
   setBattle,

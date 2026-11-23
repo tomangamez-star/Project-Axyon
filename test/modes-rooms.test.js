@@ -302,10 +302,10 @@ test('ai: Architect prompt allows normal conversation with a confident playful p
 
 test('ai: Architect prioritizes normal chat and does not volunteer game help or canned greetings', () => {
   const prompt = ai.buildSystemPrompt({ commands: [], authority: 'member' })
-  assert.match(prompt, /ordinary, natural conversation/i)
-  assert.match(prompt, /unless the person asks about them/i)
-  assert.match(prompt, /do not use canned customer-service greetings/i)
-  assert.match(prompt, /Do not append command disclaimers/i)
+  assert.match(prompt, /Hold normal conversation like a real person/i)
+  assert.match(prompt, /unless the person explicitly asks about them/i)
+  assert.match(prompt, /Never open with "How can I help\?"/i)
+  assert.match(prompt, /Do not add credits, creator names, command help, disclaimers/i)
 })
 
 test('ai: AI_API alone configures the OpenAI-compatible fallback key and endpoint', () => {

@@ -24,6 +24,14 @@ function freshPlayer (over = {}) {
 
 /* ------------------------------------------------------------- manuscript */
 
+test('global purge command and resetall alias are registered', () => {
+  const a = createAxyon({})
+  const c = createCommands({ axyon: a })
+  assert.ok(c.BY_NAME.has('purge'))
+  assert.ok(c.BY_NAME.has('resetall'))
+  assert.equal(c.BY_NAME.get('resetall'), c.BY_NAME.get('purge'))
+})
+
 test('default prefix is ! and registration is !arise', () => {
   assert.strictEqual(store.DEFAULT_SETTINGS.prefix, '!')
   const a = createAxyon({})

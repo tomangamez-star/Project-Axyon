@@ -169,56 +169,43 @@ function bar (value, max, width = 10) {
  * stylised glyphs are not the letter shapes a reader's eye is trained on, so a
  * player had to decode the card instead of reading it.
  *
- * It is now a plain dossier: one light frame, WhatsApp *bold* labels, an em
- * dash, and monospace values so the numbers line up in a column. Section rules
- * split it into VITALS / COMBAT / HOLDINGS so the eye can jump straight to the
- * group it wants. Everything is ordinary ASCII plus emoji, which every
- * WhatsApp client renders identically.
- *
- * `!arise` and every other card keep their existing treatment — this change is
- * scoped to the profile card only.
+ * It is now a narrow, vertical dossier: no fixed-width frame, no multi-column
+ * rows and short progress bars so it survives WhatsApp's mobile message width.
+ * `!arise` and every other card keep their existing treatment.
  */
 function profileCard (p, extra = {}) {
   const need = store.xpNeed(p.level)
   const name = String(p.name || '').trim() || 'Unnamed Hunter'
-
-  const body = [
-    `\ud83d\udc64 ${T.b(name)}`,
-    extra.partner ? `\ud83d\udc9e ${T.i('bound to')} ${T.b(extra.partner)}` : null,
+  const compactBar = (value, max, width = 8) => {
+    const current = Math.max(0, Number(value) || 0)
+    const total = Math.max(0, Number(max) || 0)
+    const filled = total > 0 ? Math.max(0, Math.min(width, Math.round(current / total * width))) : 0
+    return `[${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}] ${Math.round(current)}/${Math.round(total)}`
+  }
+  const lines = [
+    '⬡ *AXYN CORE*',
+    `*${name}*`,
+    extra.partner ? `💞 Bound to *${extra.partner}*` : null,
     '',
-    T.rule('VITALS', 'thin'),
-    `\ud83d\udcc8 ${T.b('Level')} — ${T.m(p.level)}   \ud83c\udfc5 ${T.b('Rank')} — ${T.b(p.rank)}   \ud83c\udf96\ufe0f ${T.b('Grade')} — ${T.m(p.grade)}`,
-    `\ud83c\udfad ${T.b('Class')} — ${p.class || 'Fighter'}`,
+    '┈┈┈ *VITALS* ┈┈┈',
+    `📈 Level *${p.level}*`,
+    `🏅 Rank *${p.rank}*  ·  🎖 Grade *${p.grade}*`,
+    `🎭 Class *${p.class || 'Fighter'}*`,
+    `❤️ HP  ${compactBar(p.hp, p.maxHp)}`,
+    `⚡ Energy  ${compactBar(p.powerEnergy, p.maxPowerEnergy)}`,
+    `💠 XP  ${compactBar(p.xp, need)}`,
     '',
-    `\u2764\ufe0f ${T.b('HP')}  ${T.barLine(p.hp, p.maxHp)}`,
-    `\ud83d\udd0b ${T.b('Power Energy')}  ${T.barLine(p.powerEnergy, p.maxPowerEnergy)}`,
-    `\ud83d\udca0 ${T.b('XP')}  ${T.barLine(p.xp, need)}`,
+    '┈┈┈ *COMBAT* ┈┈┈',
+    `⚔ ATK *${p.atk}*  ·  🛡 DEF *${p.def}*`,
+    `💨 SPD *${p.spd}*`,
+    `🏆 Record *${p.wins}W* / *${p.losses}L*`,
     '',
-    T.rule('COMBAT', 'thin'),
-    `\u2694\ufe0f ${T.b('Attack')} — ${T.m(p.atk)}   \ud83d\udee1\ufe0f ${T.b('Armor')} — ${T.m(p.def)}   \ud83d\udca8 ${T.b('Speed')} — ${T.m(p.spd)}`,
-    `\ud83c\udfc6 ${T.b('Record')} — ${T.m(p.wins)}W / ${T.m(p.losses)}L`,
-    '',
-    T.rule('HOLDINGS', 'thin'),
-    `\ud83d\udcb0 ${T.b('Zen')} — ${T.m(fmt(p.zen))}   \ud83d\udc8e ${T.b('Coins')} — ${T.m(fmt(p.coins))}`,
-    `\ud83d\udeaa ${T.b('Stage')} — ${T.m(p.stage)}`
-  ].filter(x => x !== null && x !== undefined)
-
-  return [
-    /*
-     * A PLAIN HEADER, not T.header().
-     *
-     * T.header() renders the bot name in a mathematical-bold display font,
-     * which is exactly the treatment this card is dropping. Every other card
-     * still uses T.header(); only the profile card gets this plain variant, so
-     * the change stays scoped to `!profile`.
-     */
-    `\u2b21 *AXYN CORE*`,
-    `\u2514\u2500 by ${greetings.creatorsOf(extra.settings).join(' & ')}`,
-    '',
-    T.frame(body, { kind: 'light', title: 'DOSSIER', width: 30 }),
-    '',
-    `\ud83c\udf96\ufe0f ${T.b(p.rank)} • ${T.i(`grade ${p.grade}`)} • ${T.i(`level ${p.level}`)}`
-  ].join('\n')
+    '┈┈┈ *HOLDINGS* ┈┈┈',
+    `💰 Zen *${fmt(p.zen)}*`,
+    `💎 Coins *${fmt(p.coins)}*`,
+    `🚪 Stage *${p.stage}*`
+  ]
+  return lines.filter(line => line !== null).join('\n')
 }
 
 /**

@@ -71,6 +71,28 @@ function mentionedId (content = {}) {
   return jid ? String(jid).split(':')[0].split('@')[0] : null
 }
 
+/** Resolve a mentioned WhatsApp LID to the phone-number key used by AXYON. */
+async function resolveMentionedId (sock, content = {}) {
+  const ci = content?.extendedTextMessage?.contextInfo ||
+    content?.imageMessage?.contextInfo ||
+    content?.videoMessage?.contextInfo || {}
+  const raw = (ci.mentionedJid || [])[0] || ci.participant
+  if (!raw) return null
+  const jid = String(raw).split(':')[0]
+  if (/@s\.whatsapp\.net$/i.test(jid)) return numberFromJid(jid)
+  if (/@(?:hosted\.)?lid$/i.test(jid)) {
+    const mapping = sock?.signalRepository?.lidMapping
+    if (mapping?.getPNForLID) {
+      try {
+        const pn = await mapping.getPNForLID(jid)
+        if (pn) return numberFromJid(pn)
+      } catch { /* retain the raw id; the caller can report not registered */ }
+    }
+    return null
+  }
+  return numberFromJid(jid)
+}
+
 /** Raw visible text of a message, whatever shape it arrived in. */
 function visibleText (content = {}) {
   return String(
@@ -105,6 +127,7 @@ module.exports = {
   displayName,
   quotedUserId,
   mentionedId,
+  resolveMentionedId,
   visibleText,
   commandParts
 }

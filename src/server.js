@@ -205,6 +205,7 @@ class WhatsAppConnection {
     this.messagesHandled = 0
     this.seen = new Map()
     this.ownMessageIds = new Set()
+    this.aiThreads = new Map()
     this.outputGuard = new GlobalOutputGuard(this.log)
     this.replyLimiter = new ReplyRateLimiter()
   }
@@ -518,12 +519,43 @@ class WhatsAppConnection {
       .replace(assistantName ? new RegExp(`\\b${escapedName}\\b`, 'gi') : /$^/, ' ')
       .replace(/^[\s,:-]+/, '')
       .replace(/\s+/g, ' ')
-      .trim() || 'You were addressed by name or mentioned. Respond naturally, greet the person, and ask what they need.'
+      .trim() || 'Someone called your name. Reply with a brief, casual acknowledgement, not an offer of assistance.'
+  }
+
+  quotedAIText (content) {
+    const contexts = [
+      content?.extendedTextMessage?.contextInfo,
+      content?.imageMessage?.contextInfo,
+      content?.videoMessage?.contextInfo,
+      content?.documentMessage?.contextInfo,
+      content?.audioMessage?.contextInfo
+    ].filter(Boolean)
+    for (const ci of contexts) {
+      const quoted = this.baileys?.normalizeMessageContent?.(ci.quotedMessage) || ci.quotedMessage || {}
+      const text = String(quoted.conversation || quoted.extendedTextMessage?.text || quoted.imageMessage?.caption || quoted.videoMessage?.caption || '').trim()
+      if (text) return text.slice(0, 900)
+    }
+    return ''
   }
 
   async answerWithAI (sock, m, question) {
     const ctx = await axyonCommands.buildContext(sock, m, {})
-    await axyonCommands.answerAI(sock, m, ctx, question)
+    const threadKey = `${ctx.jid}:${ctx.userId}`
+    const history = this.aiThreads.get(threadKey) || []
+    const content = this.baileys.normalizeMessageContent(m.message) || {}
+    const quoted = this.quotedAIText(content)
+    const contextualQuestion = quoted
+      ? `The user is replying to this earlier message: \"${quoted}\"\nTheir message: ${question}`
+      : question
+    const reply = await axyonCommands.answerAI(sock, m, ctx, contextualQuestion, history)
+    if (reply) {
+      const next = [...history,
+        { role: 'user', content: contextualQuestion.slice(0, 1200) },
+        { role: 'assistant', content: String(reply).slice(0, 1200) }
+      ].slice(-12)
+      this.aiThreads.set(threadKey, next)
+      if (this.aiThreads.size > 500) this.aiThreads.delete(this.aiThreads.keys().next().value)
+    }
   }
 
   /** Reads the active prefix without building a full command context. */
