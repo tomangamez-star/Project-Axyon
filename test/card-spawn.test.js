@@ -39,14 +39,15 @@ test('AI Custom is an independent 700x900 battle-card renderer with a gloss laye
   assert.match(aiCustom.svgOverlay(card, { a: '#C33A35', b: '#F0B45B' }).toString(), /SPECIAL ABILITY/)
 })
 
-test('AI Custom uses a transparent premade bevel frame and keeps the portrait free of a top nameplate', () => {
-  const fs = require('node:fs')
-  assert.equal(fs.existsSync(aiCustom.FRAME_PATH), true)
-  const svg = aiCustom.svgOverlay({ name: 'Makima', star_rating: 8, rating: 92 }, { a: '#0D8CCE', b: '#B0332B' }).toString()
-  assert.match(svg, /y=\"728\"/)
-  assert.match(svg, /x=\"616\" y=\"710\"/)
-  assert.doesNotMatch(svg, /x=\"385\"/)
-  assert.match(svg, /linearGradient id=\"footer\"/)
+test('AI Custom uses a dynamic rounded frame, keeps the portrait nameplate-free, restores gloss and spans stars across the full strip', () => {
+  const svg = aiCustom.svgOverlay({ name: 'Makima', star_rating: 8 }, { a: '#168DCE', b: '#B23A32' }).toString('utf8')
+  assert.match(svg, /id="frame"|id="edgeGlow"/)
+  assert.match(svg, /rx="30"/)
+  assert.match(svg, /id="gloss"/)
+  assert.match(svg, /x="72"/)
+  assert.match(svg, /x="621"/)
+  assert.doesNotMatch(svg, /M176 42 H622/)
+  assert.ok(require('fs').existsSync(require('path').join(__dirname, '../assets/card-particles.png')))
 })
 
 test('AI Custom derives two distinct accents from artwork colours instead of a fixed pink complement', () => {

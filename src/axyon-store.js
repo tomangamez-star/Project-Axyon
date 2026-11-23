@@ -173,6 +173,11 @@ async function ensureSchema () {
       zen INT NOT NULL DEFAULT 200,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
+    CREATE TABLE IF NOT EXISTS axyon_floor_story(
+      user_id TEXT PRIMARY KEY,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
     CREATE TABLE IF NOT EXISTS axyon_cards(
       id BIGSERIAL PRIMARY KEY,
       owner_id TEXT NOT NULL,
@@ -1466,6 +1471,24 @@ async function consumeItem (userId, key) {
   return r.rows.length ? Number(r.rows[0].qty) : null
 }
 
+/* ---------------------------------------------------------- floor story */
+
+async function floorStory (userId) {
+  await ensureSchema()
+  const row = (await db().query('SELECT state FROM axyon_floor_story WHERE user_id=$1', [String(userId)])).rows[0]
+  return row?.state || {}
+}
+
+async function saveFloorStory (userId, state) {
+  await ensureSchema()
+  const result = await db().query(
+    `INSERT INTO axyon_floor_story(user_id,state) VALUES($1,$2::jsonb)
+     ON CONFLICT(user_id) DO UPDATE SET state=EXCLUDED.state,updated_at=NOW() RETURNING state`,
+    [String(userId), JSON.stringify(state || {})]
+  )
+  return result.rows[0]?.state || state
+}
+
 /* --------------------------------------------------------------------- log */
 
 /* ------------------------------------------------------- class mastery */
@@ -2023,6 +2046,8 @@ module.exports = {
   playerCount,
   setBattle,
   getBattle,
+  floorStory,
+  saveFloorStory,
   stages,
   stage,
   addStage,

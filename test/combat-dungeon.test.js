@@ -17,6 +17,7 @@ const assert = require('node:assert')
 
 const { createAxyon } = require('../src/axyon-rpg')
 const { createCommands } = require('../src/axyon-commands')
+const floorStory = require('../src/floor-story')
 const store = require('../src/axyon-store')
 
 function fakeSock () {
@@ -41,7 +42,7 @@ function harness ({ player = null, battle = null, floors = [], sendButtons } = {
   for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
     'settings', 'axyonNumberMode', 'roleOf', 'partnerOf', 'floors', 'stage', 'stages',
     'classMastery', 'classMovesUsedToday', 'consumeClassMove', 'addClassMastery',
-    'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'modes']) {
+    'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'modes', 'floorStory', 'saveFloorStory']) {
     saved[k] = store[k]
   }
 
@@ -56,6 +57,9 @@ function harness ({ player = null, battle = null, floors = [], sendButtons } = {
   store.roleOf = async () => null
   store.partnerOf = async () => null
   store.floors = async () => state.floors
+  state.story = {}
+  store.floorStory = async () => state.story
+  store.saveFloorStory = async (_u, value) => { state.story = value; return value }
   store.stage = async (n) => ({ ordinal: n, name: 'Outer Gate', hp: 60, atk: 5, def: 2, xp: 40, zen: 60, locked: false })
   store.stages = async () => [{ ordinal: 1, name: 'Outer Gate', hp: 60, atk: 5, def: 2, xp: 40, zen: 60, locked: false }]
   store.classMastery = async () => 0
@@ -171,7 +175,8 @@ test('dungeon: a player can enter a floor and start a real battle', async () => 
   assert.ok(b, 'entering a floor must create a battle')
   assert.strictEqual(b.mode, 'floor')
   assert.ok(b.enemyHp > 0, 'the floor enemy must have HP')
-  assert.ok(/Sunken Vestibule/i.test(out), `expected the floor name, got: ${out.slice(0, 200)}`)
+  assert.ok(b.storyPending, 'floor must wait for the player story decision')
+  assert.ok(/THE CITY THAT FORGOT ITS NAME|VESPER DISTRICT/i.test(out), `expected the chapter scene, got: ${out.slice(0, 200)}`)
 })
 
 test('dungeon: !floor falls back to the full text card when native buttons fail', async () => {
@@ -182,7 +187,8 @@ test('dungeon: !floor falls back to the full text card when native buttons fail'
   assert.strictEqual(handled, true)
   assert.ok(battle, 'floor battle state must be created')
   assert.strictEqual(battle.mode, 'floor')
-  assert.ok(/Sunken Vestibule|BATTLE|HP/i.test(out), `expected text fallback, got: ${out.slice(0, 200)}`)
+  assert.ok(battle.storyPending, 'story choice should be pending before combat')
+  assert.ok(/YOUR DECISION|!choice/i.test(out), `expected story choice fallback, got: ${out.slice(0, 200)}`)
 })
 
 test('dungeon: winning a floor awards XP and can level the player up', async () => {
@@ -293,14 +299,18 @@ test('rooms: a guild mode is now real and can be opened', async () => {
   assert.ok(/Guild Raid/i.test(out), 'the room must name the guild mode')
 })
 
-test('dungeon: !floor includes an anthology story intro while !fight stays story-free', async () => {
+test('dungeon: floor opens a chapter decision while !fight stays story-free', async () => {
   const floorHarness = harness({ player: basePlayer(), floors: store.ORIGINAL_FLOORS })
   const floorResult = await floorHarness.send('!floor 1')
+  assert.match(floorResult.out, /THE CITY THAT FORGOT ITS NAME|YOUR DECISION/i)
+  const choiceResult = await floorHarness.send('!choice 1')
+  assert.match(choiceResult.out, /PROTECT MIRA|SIDE QUEST/i)
+  assert.equal(floorHarness.state.battle.storyPending, false)
+  assert.equal(floorHarness.state.story.quests.brass_delivery.status, 'active')
   floorHarness.restore()
-  assert.match(floorResult.out, /STORY|📖/i, 'floor entry must deliver actual anthology story content')
 
   const fightHarness = harness({ player: basePlayer() })
-  const fightResult = await fightHarness.send('!fight 1')
+  const fightResult = await fightHarness.send('!fight')
   fightHarness.restore()
-  assert.doesNotMatch(fightResult.out, /STORY|📖/i, '!fight must enter combat without floor narration')
+  assert.doesNotMatch(fightResult.out, /STORY|YOUR DECISION/i)
 })

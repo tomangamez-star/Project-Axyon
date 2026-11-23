@@ -12,6 +12,7 @@
 const store = require('./axyon-store')
 const greetings = require('./greetings')
 const lore = require('./lore')
+const floorStory = require('./floor-story')
 const T = require('./theme')
 const items = require('./axyon-items')
 const cardSpawner = require('./card-spawn')
@@ -137,6 +138,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     const p = await store.player(ctx.userId)
     if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
     b.equippedCards = await store.equippedCards(ctx.userId)
+    if (b.storyPending) return axyon.send(s, ctx.jid, m, floorStory.begin(b.ordinal, await store.floorStory(ctx.userId)).text)
     return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), [], true)
   }, { hidden: true })
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
@@ -195,14 +197,49 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
     if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
     const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
-    const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0 }
+    const scene = floorStory.begin(ordinal, await store.floorStory(ctx.userId))
+    const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, storyPending: true }
     await store.setBattle(ctx.userId, b)
-    await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name })
-    // The existing anthology is now part of floor entry. The seed keeps a
-    // player's intro stable for the same floor, while !fight remains story-free.
-    const floorStory = lore.story(`${ctx.userId}:floor:${ordinal}`)
-    await axyon.send(s, ctx.jid, m, lore.storyCard(floorStory, ctx.prefix))
-    return axyon.withVisual(s, ctx.jid, m, f.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p), [], true)
+    await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name, chapter: scene.chapter.title })
+    return axyon.send(s, ctx.jid, m, scene.text)
+  })
+
+  cmd('choice', 'dungeon', '{p}choice <1-4>', 'Make a decision during a floor story event.', async (s, m, ctx, args) => {
+    const b = await store.getBattle(ctx.userId)
+    if (!b || b.mode !== 'floor' || !b.storyPending) return axyon.send(s, ctx.jid, m, `No pending story decision. Enter a floor with *${ctx.prefix}floor* first.`)
+    const result = floorStory.choose(b.ordinal, parseNum(args[0]), await store.floorStory(ctx.userId))
+    if (!result.ok) return axyon.send(s, ctx.jid, m, result.message)
+    await store.saveFloorStory(ctx.userId, result.state)
+    const hpDelta = Number(result.choice.enemy?.hp || 0)
+    const atkDelta = Number(result.choice.enemy?.atk || 0)
+    b.enemy.hp = Math.max(20, Number(b.enemy.hp || 1) + hpDelta)
+    b.enemy.atk = Math.max(1, Number(b.enemy.atk || 1) + atkDelta)
+    b.enemyHp = b.enemy.hp
+    b.storyPending = false
+    b.storyChoice = result.choice.label
+    b.storyQuestId = result.choice.quest || null
+    b.storyFlags = result.state.flags
+    await store.setBattle(ctx.userId, b)
+    const p = await store.player(ctx.userId)
+    await axyon.send(s, ctx.jid, m, result.message)
+    return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'dungeon', axyon.battleCard(b, p), [], true)
+  })
+
+  cmd('quest', 'dungeon', '{p}quest [claim <id>]', 'View NPC side quests or claim a completed reward.', async (s, m, ctx, args) => {
+    const state = await store.floorStory(ctx.userId)
+    if (String(args[0] || '').toLowerCase() !== 'claim') return axyon.send(s, ctx.jid, m, floorStory.questList(state))
+    const claimed = floorStory.claim(state, args[1])
+    if (!claimed.ok) return axyon.send(s, ctx.jid, m, claimed.message)
+    await store.saveFloorStory(ctx.userId, claimed.state)
+    const p = await store.player(ctx.userId)
+    const xp = Math.min(claimed.reward.xp, Math.max(0, Number(ctx.settings.xpDailyLimit || 5000) - Number(p.xpToday || 0)))
+    const zen = Math.min(claimed.reward.zen, Math.max(0, Number(ctx.settings.zenDailyLimit || 5000) - Number(p.zenToday || 0)))
+    p.xpToday = Number(p.xpToday || 0) + xp
+    p.zenToday = Number(p.zenToday || 0) + zen
+    const progressed = axyon.applyProgress(p, { xp, zen })
+    await store.savePlayer(progressed.player)
+    await store.log(ctx.userId, 'floor_quest_claim', claimed.name, { xp, zen })
+    return axyon.send(s, ctx.jid, m, `⌬ AXYN CORE\n\n🏅 *QUEST COMPLETE*\n${claimed.name}\n\n✨ +${xp} XP\n🪙 +${zen} Zen`)
   })
 
   /* ----------------------------------------------------------------- party */

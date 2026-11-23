@@ -15,6 +15,7 @@ const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
 const classes = require('./axyon-classes')
+const floorStory = require('./floor-story')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
 const fs = require('fs/promises')
@@ -918,6 +919,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (b.mode === 'stage' && b.ordinal >= p.stage) p.stage = b.ordinal + 1
       const { player: after, events } = applyProgress(p, { xp, zen })
       await store.savePlayer(after)
+      if (b.mode === 'floor' && b.storyQuestId) {
+        const storyState = await store.floorStory(ctx.userId)
+        await store.saveFloorStory(ctx.userId, floorStory.completeQuest(storyState, b.storyQuestId))
+      }
       await store.log(ctx.userId, 'battle_win', b.enemy.name, { xp, zen, ordinal: b.ordinal })
 
       const notes = events.map(e => e.type === 'level' ? `\u2b06\ufe0f Level *${e.level}*`

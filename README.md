@@ -171,3 +171,9 @@ tools/
 ## Guild organisations
 
 AXYON now includes a persistent guild registry for creating guilds, suggesting guilds for owner review, joining/leaving, viewing rosters, transferring leadership and linking a guild to one registered WhatsApp group. See [GUILD-SYSTEM.md](GUILD-SYSTEM.md) for the complete command reference. The existing guild raid/duel/gauntlet combat engine remains separate and unchanged.
+
+## Floor story campaign
+
+`!floor [number]` now begins a chapter-based story encounter. Choose one of four decisions with `!choice 1` through `!choice 4`; choices alter the encounter and can unlock persistent NPC side quests. Use `!quest` to view the journal and `!quest claim <id>` to collect a completed reward after winning the linked floor battle. Story flags and quest state persist in PostgreSQL (`axyon_floor_story`). `!battle` resumes a pending story decision or the active fight without replaying the chapter introduction.
+
+AI Custom cards use a rounded, dynamically palette-coloured code-drawn frame, a full-width star strip, a dark gradient data panel, baked-in gloss, and a tinted transparent particle PNG. Old Gen remains the automatic drop renderer.
