@@ -107,7 +107,7 @@ const CHAPTERS = [
 
 function chapterFor (ordinal) { return CHAPTERS[(Math.max(1, Number(ordinal) || 1) - 1) % CHAPTERS.length] }
 function cleanState (state = {}) {
-  return { chapter: Number(state.chapter) || 1, flags: Array.isArray(state.flags) ? state.flags : [], quests: state.quests && typeof state.quests === 'object' ? state.quests : {}, history: Array.isArray(state.history) ? state.history.slice(-20) : [] }
+  return { chapter: Number(state.chapter) || 1, flags: Array.isArray(state.flags) ? state.flags : [], quests: state.quests && typeof state.quests === 'object' ? state.quests : {}, history: Array.isArray(state.history) ? state.history.slice(-20) : [], discoveries: Array.isArray(state.discoveries) ? state.discoveries.slice(-80) : [], investigations: Array.isArray(state.investigations) ? state.investigations.slice(-80) : [], npcContacts: Array.isArray(state.npcContacts) ? state.npcContacts.slice(-50) : [] }
 }
 function begin (ordinal, state) {
   const chapter = chapterFor(ordinal)
@@ -162,4 +162,76 @@ function completeQuest (state, questId) {
   if (q && q.status === 'active') q.status = 'complete'
   return saved
 }
-module.exports = { CHAPTERS, chapterFor, cleanState, begin, choose, questList, claim, completeQuest }
+function explore (ordinal, state) {
+  const chapter = chapterFor(ordinal)
+  const saved = cleanState(state)
+  const key = `floor_${Math.max(1, Number(ordinal) || 1)}_zone`
+  const found = saved.discoveries.includes(key)
+  if (!found) saved.discoveries.push(key)
+  const details = [
+    'Rainwater runs uphill toward the gate.',
+    'Dust falls from the ceiling in patterns that resemble written names.',
+    'The air vibrates whenever the unseen bell rings.',
+    'The glass branches repeat a footprint that has not been made yet.',
+    'The refuge walls contain a second set of evacuation marks.'
+  ]
+  return { ok: true, state: saved, repeated: found, chapter,
+    message: found
+      ? `You retrace the area around *${chapter.place}*. Nothing new has changed, but the route is familiar now.`
+      : `⌖ *${chapter.place.toUpperCase()} — AREA DISCOVERED*\n\n${details[(Math.max(1, Number(ordinal) || 1) - 1) % details.length]}\n\nThe discovery has been added to your journal.` }
+}
+function investigate (ordinal, target, state) {
+  const chapter = chapterFor(ordinal)
+  const saved = cleanState(state)
+  const subject = String(target || '').trim().slice(0, 60) || chapter.place
+  const key = `floor_${Math.max(1, Number(ordinal) || 1)}:${subject.toLowerCase()}`
+  const found = saved.investigations.includes(key)
+  if (!found) saved.investigations.push(key)
+  const hints = [
+    'The radio signal repeats a warning about the lights and points toward a service tunnel.',
+    'The ledger ink is newer than the paper. Someone has been editing the Archive in real time.',
+    'The bell-metal carries a second vibration beneath the audible ring.',
+    'The badge coordinates shift when viewed through the glass branches.',
+    'The evacuation list includes names that are not present in the refuge.'
+  ]
+  return { ok: true, state: saved, repeated: found,
+    message: found ? `You have already examined *${subject}*. No new clue appears.`
+      : `🔎 *INVESTIGATION — ${subject.toUpperCase()}*\n\n${hints[(Math.max(1, Number(ordinal) || 1) - 1) % hints.length]}` }
+}
+function talk (ordinal, target, state) {
+  const chapter = chapterFor(ordinal)
+  const saved = cleanState(state)
+  const who = String(target || '').trim().toLowerCase()
+  const npc = chapter.npc
+  if (who && !npc.toLowerCase().includes(who) && !who.includes(npc.toLowerCase().split(',')[0])) {
+    return { ok: false, message: `No one named *${target}* is available here. The current contact is *${npc}*.` }
+  }
+  const id = `floor_${Math.max(1, Number(ordinal) || 1)}:${npc.toLowerCase()}`
+  const first = !saved.npcContacts.includes(id)
+  if (first) saved.npcContacts.push(id)
+  const dialogue = [
+    '“Keep the case sealed. Whatever is calling from inside the gate already knows what is in it.”',
+    '“The Archive does not predict the future. It files memories before they happen.”',
+    '“If the bell rings a fourth time, do not answer it.”',
+    '“The forest is not changing its paths. It is changing which version of you walks them.”',
+    '“The refuge can be rebuilt. The records cannot.”'
+  ]
+  return { ok: true, state: saved, first, npc,
+    message: first ? `👤 *${npc.toUpperCase()}*\n\n${dialogue[(Math.max(1, Number(ordinal) || 1) - 1) % dialogue.length]}`
+      : `${npc} has nothing new to add right now. Your earlier conversation is recorded.` }
+}
+function abandonQuest (state, id) {
+  const saved = cleanState(state)
+  const q = saved.quests[String(id || '').toLowerCase()]
+  if (!q) return { ok: false, message: 'That quest is not in your journal.' }
+  if (q.status === 'claimed') return { ok: false, message: 'A completed and claimed quest cannot be abandoned.' }
+  if (q.status === 'complete') return { ok: false, message: 'That quest is complete. Claim its reward instead.' }
+  q.status = 'abandoned'
+  return { ok: true, state: saved, name: q.name }
+}
+function objectives (state) {
+  const saved = cleanState(state)
+  const quests = Object.values(saved.quests)
+  return quests.map(q => ({ id: q.id, name: q.name, status: q.status, objective: q.objective }))
+}
+module.exports = { CHAPTERS, chapterFor, cleanState, begin, choose, questList, claim, completeQuest, explore, investigate, talk, abandonQuest, objectives }

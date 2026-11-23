@@ -292,7 +292,13 @@ async function ensureSchema () {
       leader TEXT NOT NULL,
       members JSONB NOT NULL DEFAULT '[]'::jsonb,
       status TEXT NOT NULL DEFAULT 'open',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      invited JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ready JSONB NOT NULL DEFAULT '[]'::jsonb,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb);
+    ALTER TABLE axyon_parties ADD COLUMN IF NOT EXISTS invited JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE axyon_parties ADD COLUMN IF NOT EXISTS ready JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE axyon_parties ADD COLUMN IF NOT EXISTS state JSONB NOT NULL DEFAULT '{}'::jsonb;
 
     /*
      * ROOMS — the session space a mode runs in.
@@ -567,7 +573,10 @@ async function setSettings (patch = {}) {
 const GROUP_MODES = Object.freeze({
   normal: ['general', 'combat', 'dungeon', 'cards', 'social', 'economy', 'casino'],
   modes: [],
-  duel: ['duel']
+  duel: ['duel'],
+  multiplayer: ['combat', 'dungeon', 'social'],
+  guild: ['dungeon', 'social', 'guild_slot_1'],
+  collab: ['collab', 'social']
 })
 
 function groupRegistrationId () {
@@ -1333,11 +1342,15 @@ async function openParty (jid) {
   return (await db().query("SELECT * FROM axyon_parties WHERE group_jid=$1 AND status='open' ORDER BY id DESC LIMIT 1", [jid])).rows[0] || null
 }
 
-async function updateParty (id, members, status) {
+async function updateParty (id, members, status, invited = null, ready = null, state = null) {
   await ensureSchema()
   const r = await db().query(
-    'UPDATE axyon_parties SET members=$2::jsonb,status=COALESCE($3,status) WHERE id=$1 RETURNING *',
-    [id, JSON.stringify(members), status || null]
+    `UPDATE axyon_parties SET members=$2::jsonb,status=COALESCE($3,status),
+       invited=COALESCE($4::jsonb,invited),ready=COALESCE($5::jsonb,ready),state=COALESCE($6::jsonb,state)
+     WHERE id=$1 RETURNING *`,
+    [id, JSON.stringify(members), status || null,
+      invited ? JSON.stringify(invited) : null, ready ? JSON.stringify(ready) : null,
+      state ? JSON.stringify(state) : null]
   )
   return r.rows[0] || null
 }
@@ -1379,14 +1392,46 @@ async function updateRoom (roomKey, patch) {
        participants=COALESCE($5::jsonb,participants),
        state=COALESCE($6::jsonb,state),
        result=COALESCE($7,result),
+       entry_requirements=COALESCE($8::jsonb,entry_requirements),
        last_activity=NOW()
      WHERE room_key=$1 RETURNING *`,
     [roomKey, patch.status ?? null, patch.privacy ?? null, patch.capacity ?? null,
       patch.participants ? JSON.stringify(patch.participants) : null,
       patch.state ? JSON.stringify(patch.state) : null,
-      patch.result ?? null]
+      patch.result ?? null,
+      patch.entryRequirements ? JSON.stringify(patch.entryRequirements) : null]
   )
   return r.rows[0] || null
+}
+
+/**
+ * Atomically mutate the JSONB state attached to a shared room. This is used by
+ * the additive campaign-story layer so two players cannot overwrite each
+ * other's choices or discoveries with stale room snapshots. The mutator must
+ * be synchronous and return the complete next state object.
+ */
+async function mutateRoomState (roomKey, mutate) {
+  if (typeof mutate !== 'function') throw new TypeError('A room-state mutator is required.')
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const current = await client.query('SELECT state FROM axyon_rooms WHERE room_key=$1 FOR UPDATE', [String(roomKey)])
+    if (!current.rowCount) { await client.query('ROLLBACK'); return null }
+    const raw = current.rows[0].state
+    const state = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+    const next = mutate(state)
+    if (!next || typeof next !== 'object' || Array.isArray(next)) throw new TypeError('Room state must remain an object.')
+    const updated = await client.query(
+      'UPDATE axyon_rooms SET state=$2::jsonb,last_activity=NOW() WHERE room_key=$1 RETURNING *',
+      [String(roomKey), JSON.stringify(next)]
+    )
+    await client.query('COMMIT')
+    return updated.rows[0] || null
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
 }
 
 /* ------------------------------------------------------------------- duels */
@@ -2105,6 +2150,7 @@ module.exports = {
   room,
   roomsFor,
   updateRoom,
+  mutateRoomState,
   createDuel,
   duel,
   updateDuel,

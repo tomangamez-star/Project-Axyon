@@ -184,13 +184,13 @@ test('!play never presents a preview as the full song', () => {
 
 /* ------------------------------------------------------ 3. group feature gate */
 
-test('!mode has been removed from the command registry and help', async () => {
+test('the additive adventure !mode directory is registered separately from legacy !modes settings', async () => {
   const h = harness({ player: basePlayer(), group: { group_jid: '123@g.us', enabled: true, status: 'ACTIVE', features: ['general'] } })
-  const result = await h.send('!mode combat')
   const help = await h.send('!help')
   h.restore()
-  assert.strictEqual(result.handled, false)
-  assert.doesNotMatch(help.out, /!mode\b/)
+  assert.strictEqual(h.c.BY_NAME.has('mode'), true)
+  assert.strictEqual(h.c.BY_NAME.has('modes'), true)
+  assert.match(help.out, /!mode\b/)
 })
 
 test('dungeon commands are routed by group feature, not player mode', async () => {
@@ -294,7 +294,7 @@ test('Modes registration starts empty and AXYON can enable individual features',
 test('shop and inventory commands remain registered without player-mode gates', () => {
   const h = harness({ player: basePlayer() })
   for (const name of ['shop', 'buy', 'inventory', 'use']) assert.ok(h.c.BY_NAME.has(name), `${name} is missing`)
-  assert.ok(!h.c.BY_NAME.has('mode'), '!mode should not be registered')
+  assert.ok(h.c.BY_NAME.has('mode'), 'the additive adventure directory should be registered')
   h.restore()
 })
 

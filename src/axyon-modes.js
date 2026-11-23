@@ -227,14 +227,15 @@ const OTHER_MODES = [
   { id: 'duel', name: 'Duel', category: 'duel', protected: false, enabled: true, participation: ['multiplayer'], blurb: 'Direct player-versus-player combat.', usesRoom: true },
   { id: 'card', name: 'Card', category: 'card', protected: false, enabled: true, participation: ['solo', 'multiplayer'], blurb: 'Card features, inventory and abilities.', usesRoom: false },
   { id: 'collab', name: 'Co-op Trial', category: 'collab', protected: false, enabled: true, participation: ['party'], blurb: 'The party shares one HP pool and one damage target. One member taking hits hurts everyone.', usesRoom: true, rules: 'collab_trial' },
-  { id: 'dungeon', name: 'Dungeon', category: 'dungeon', protected: false, enabled: true, participation: ['solo', 'multiplayer', 'party'], blurb: 'Expandable floors and protected gates.', usesRoom: true }
+  { id: 'dungeon', name: 'Dungeon', category: 'dungeon', protected: false, enabled: true, participation: ['solo', 'multiplayer', 'party'], blurb: 'Expandable floors and protected gates.', usesRoom: true },
+  { id: 'abyss', name: 'Abyssal Frontier', category: 'exploration', protected: false, enabled: true, participation: ['solo', 'multiplayer', 'party'], blurb: 'Advanced exploration sessions using the shared room and save systems.', usesRoom: true }
 ]
 
 /** Menu order, exactly as the spec lists it. */
 const MENU_ORDER = [
   'normal_battle', 'challenge_battle', 'boss_battle',
   'guild_1', 'guild_2', 'guild_3',
-  'duel', 'card', 'collab', 'dungeon'
+  'duel', 'card', 'collab', 'dungeon', 'abyss'
 ]
 
 const CORE_MODE_IDS = CORE_MODES.map(m => m.id)

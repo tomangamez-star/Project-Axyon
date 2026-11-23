@@ -20,6 +20,8 @@ const classes = require('./axyon-classes')
 const modesLib = require('./axyon-modes')
 const guild = require('./axyon-guild')
 const lyrics = require('./lyrics')
+const adventure = require('./axyon-adventure')
+const collab = require('./axyon-collab')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
@@ -40,7 +42,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype', 'mode', 'modes', 'collab'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -63,8 +65,90 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* How many stories each player has read, so `!story` walks the anthology
    * instead of repeating. In memory on purpose: it is a reading position. */
   const storyReads = new Map()
+
   // Short-lived conversational memory, scoped per chat and speaker.
   const architectHistory = new Map()
+
+  /* New commands adapt the existing engines; they do not replace old flows. */
+  async function invokeLocal (name, sock, message, ctx, args = [], content = {}) {
+    const command = BY_NAME.get(name)
+    if (!command) return axyon.send(sock, ctx.jid, message, `Command *${name}* is not available in this build.`)
+    return command.handler(sock, message, ctx, args, content)
+  }
+
+  async function activeRoomFor (ctx) {
+    const rows = await store.roomsFor(ctx.jid).catch(() => [])
+    return rows.find(room => !['completed', 'cancelled', 'expired'].includes(String(room.status)) &&
+      Array.isArray(room.participants) && room.participants.some(part => String(part.userId) === String(ctx.userId))) || null
+  }
+
+  function adventureModeForRoom (room) {
+    if (!room) return null
+    if (String(room.mode_id).startsWith('guild_')) return 'guild'
+    if (room.mode_id === 'duel') return 'duel'
+    if (room.mode_id === 'abyss') return 'abyss'
+    return room.participation === 'solo' ? 'solo' : 'multiplayer'
+  }
+
+  async function createAdventureSave (ctx, requestedMode = null) {
+    const player = await store.player(ctx.userId)
+    if (!player) throw new Error(`Use *${ctx.prefix}arise* first.`)
+    const battle = await store.getBattle(ctx.userId)
+    const storyState = await store.floorStory(ctx.userId)
+    const room = await activeRoomFor(ctx)
+    const inferred = room ? adventureModeForRoom(room) : 'solo'
+    const mode = adventure.cleanMode(requestedMode || inferred)
+    if (!mode) throw new Error('Choose solo, multiplayer, guild, duel or abyss.')
+    if (mode !== 'solo' && !room) throw new Error(`No active *${mode}* session was found in this chat.`)
+    if (room && mode !== inferred && !(mode === 'abyss' && room.mode_id === 'abyss')) {
+      throw new Error(`The active session is *${inferred}*, not *${mode}*.`)
+    }
+    if (mode === 'solo' && !battle && !storyState?.chapter) throw new Error('Start a Solo floor before creating a save.')
+    const participants = room ? (room.participants || []).map(part => part.userId) : [ctx.userId]
+    return adventure.createSave({
+      mode,
+      ownerId: ctx.userId,
+      groupJid: ctx.jid,
+      roomKey: room?.room_key || null,
+      participants,
+      snapshot: { version: 1, battle: battle || null, floorStory: storyState || {}, roomState: room?.state || null, savedAt: new Date().toISOString() }
+    })
+  }
+
+  async function restoreAdventureSave (ctx, code) {
+    const saved = await adventure.getSave(code)
+    if (!saved) throw new Error('Save code not found or no longer active.')
+    const participants = Array.isArray(saved.participants) ? saved.participants.map(String) : []
+    if (!participants.includes(String(ctx.userId))) throw new Error('Your player identity is not listed in this save.')
+    const lock = await adventure.modeLock(saved.mode)
+    if (lock.locked) throw new Error(`*${saved.mode.toUpperCase()}* is locked and cannot accept login requests.${lock.reason ? `
+Reason: ${lock.reason}` : ''}`)
+    if (saved.mode === 'solo') {
+      if (String(saved.owner_id) !== String(ctx.userId)) throw new Error('Only the save owner can restore Solo Chronicles.')
+      if (String(saved.group_jid || '') !== String(ctx.jid)) throw new Error('Restore this Solo save from the same chat where it was created.')
+      const snapshot = saved.snapshot || {}
+      // The live player profile is never overwritten by a reusable save code.
+      // HP, energy, inventory and progression remain in their authoritative rows.
+      await store.setBattle(ctx.userId, snapshot.battle || null)
+      await store.saveFloorStory(ctx.userId, snapshot.floorStory || {})
+      return { mode: saved.mode, code: saved.code, restored: true, room: null }
+    }
+    if (String(saved.group_jid || '') !== String(ctx.jid)) throw new Error('Return to the registered group where this team session was saved.')
+    const room = saved.room_key ? await store.room(saved.room_key) : null
+    if (!room) throw new Error('The saved team room no longer exists.')
+    if (String(room.group_jid) !== String(ctx.jid)) throw new Error('This session belongs to another registered group.')
+    if (saved.mode === 'guild') {
+      const membership = await store.guildForUser(ctx.userId)
+      const expectedGuild = Number(room.entry_requirements?.guildId)
+      if (!membership || Number(membership.id) !== expectedGuild) throw new Error('Guild Campaign login requires current membership in the same registered guild.')
+      if (String(membership.group_jid || '') !== String(ctx.jid)) throw new Error('Return to the registered WhatsApp group linked to your guild.')
+    }
+    const roomParticipants = Array.isArray(room.participants) ? room.participants : []
+    if (!roomParticipants.some(part => String(part.userId) === String(ctx.userId))) throw new Error('You are not a participant in this saved session.')
+    return { mode: saved.mode, code: saved.code, restored: false, room }
+  }
+
+  function storyBattle (battle) { return battle && battle.mode === 'floor' ? battle : null }
 
   /* ------------------------------------------------------------ authority */
 
@@ -128,7 +212,20 @@ function createCommands ({ axyon, economy, logger, ai }) {
   /* ---------------------------------------------------------------- stages */
 
   cmd('stages', 'battle', '{p}stages', 'List battle stages and your position.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
-  cmd('fight', 'battle', '{p}fight', 'Enter your next stage and fight.', async (s, m, ctx, args) => {
+  cmd('fight', 'battle', '{p}fight [start|status|info|enemies|scene|continue|history|surrender|exit]', 'Enter a stage or inspect/manage the current encounter.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || '').toLowerCase()
+    const active = await store.getBattle(ctx.userId)
+    if (['status', 'info', 'enemies', 'scene', 'history'].includes(sub) && !active) {
+      return axyon.send(s, ctx.jid, m, `⚔️ No active encounter. Use *${ctx.prefix}fight start* when you are ready.`)
+    }
+    if (active && ['status', 'info', 'enemies', 'scene', 'continue', 'history'].includes(sub)) {
+      if (sub === 'continue') return invokeLocal('battle', s, m, ctx, [], {})
+      const enemy = active.enemy || {}
+      const info = `${W}\n\n⚔️ *CURRENT ENCOUNTER*\n\nEnemy: *${enemy.name || 'Unknown'}*\nHP: *${active.enemyHp ?? enemy.hp ?? '?'}*\nLocation: *${active.location || 'Unknown'}*\nTurn: *${active.turn || 1}*\nStage: *${active.mode || 'battle'}*`
+      return axyon.send(s, ctx.jid, m, info)
+    }
+    if (active && ['surrender', 'exit'].includes(sub)) return axyon.battleAct(s, m, ctx, 'retreat')
+    if (sub === 'start') args = args.slice(1)
     const p = await store.player(ctx.userId)
     const ordinal = parseNum(args[0]) ?? p?.stage ?? 1
     return axyon.beginBattle(s, m, ctx, ordinal)
@@ -244,52 +341,168 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ----------------------------------------------------------------- party */
 
-  cmd('party', 'dungeon', '{p}party <create|join|leave|view>', 'Organise a party. Minimum 2, default max 5.', async (s, m, ctx, args) => {
+  cmd('party', 'dungeon', '{p}party <create|invite|join|decline|members|leader|status|ready|start|leave|kick|disband|save|logout|resume|view>', 'Organise an existing party or launch a three-player Multiplayer Expedition.', async (s, m, ctx, args, content) => {
     const sub = String(args[0] || 'view').toLowerCase()
     const settings = ctx.settings
+    const open = await store.openParty(ctx.jid)
+    const isLeader = party => party && String(party.leader) === String(ctx.userId)
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, ['multiplayer', String(args[1] || '')], {})
+    const namesFor = async ids => Promise.all((ids || []).map(async id => {
+      const p = await store.player(id)
+      return `• *${p?.name || id}*${String(id) === String(ctx.userId) ? ' (you)' : ''}${String(id) === String(open?.leader) ? ' 👑' : ''}`
+    }))
+
     if (sub === 'create') {
       const p = await store.player(ctx.userId)
-      if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
+      if (!p) return axyon.send(s, ctx.jid, m, `🌀 Use *${ctx.prefix}arise* first.`)
       const party = await store.createParty(ctx.jid, ctx.userId, [ctx.userId])
+      await store.updateParty(party.id, [ctx.userId], 'open', [], [ctx.userId], { expedition: true })
       await store.log(ctx.userId, 'party_create', String(party.id))
-      return axyon.send(s, ctx.jid, m, [
-        `${W}`, '', '\ud83d\udd25 *PARTY FORMED*', '',
-        `Leader: *${p.name || ctx.userId}*`,
-        `Members: *1/${settings.partyMax}*`, '',
-        `Minimum *${settings.partyMin}* players to enter a gate.`,
-        `Others join with *${ctx.prefix}party join*.`
-      ].join('\n'))
+      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *EXPEDITION PARTY FORMED*', '', `Leader: *${p.name || ctx.userId}*`, 'Members: *1/3*', 'Status: *Recruiting*', '', `Invite: *${ctx.prefix}party invite @player*`, `Ready: *${ctx.prefix}party ready*`, `Launch: *${ctx.prefix}party start*`].join('\n'))
     }
+
+    if (sub === 'invite' || sub === 'add') {
+      if (!open) return axyon.send(s, ctx.jid, m, `No open party. Use *${ctx.prefix}party create* first.`)
+      if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can invite players.')
+      const target = mentionedId(content)
+      if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party invite @player*`)
+      if ((open.members || []).includes(target)) return axyon.send(s, ctx.jid, m, 'That player is already in the party.')
+      if ((open.members || []).length + (open.invited || []).length >= 3) return axyon.send(s, ctx.jid, m, 'This expedition supports a maximum of three participants, including pending invitations.')
+      if (!(await store.player(target))) return axyon.send(s, ctx.jid, m, 'That player must use !arise before joining an expedition.')
+      const invited = [...new Set([...(open.invited || []), target])]
+      await store.updateParty(open.id, open.members || [], null, invited)
+      return axyon.send(s, ctx.jid, m, `📨 Invitation added for @${target.split('@')[0]}. They can join with *${ctx.prefix}party join*.`)
+    }
+
+    if (sub === 'decline') {
+      if (!open || !(open.invited || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'You do not have a pending party invitation here.')
+      const invited = open.invited.filter(id => id !== ctx.userId)
+      await store.updateParty(open.id, open.members || [], null, invited)
+      return axyon.send(s, ctx.jid, m, 'Party invitation declined.')
+    }
+
     if (sub === 'join') {
-      const open = await store.openParty(ctx.jid)
-      if (!open) return axyon.send(s, ctx.jid, m, `\ud83d\udd25 No open party. Start one with *${ctx.prefix}party create*.`)
+      if (!open) return axyon.send(s, ctx.jid, m, `🔥 No open party here. Start one with *${ctx.prefix}party create*.`)
+      if ((open.members || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'You are already in this party.')
+      const invited = Array.isArray(open.invited) ? open.invited : []
+      if (invited.length && !invited.includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'This party is invitation-only. Ask its leader to invite you.')
       const members = [...new Set([...(open.members || []), ctx.userId])]
-      if (members.length > settings.partyMax) return axyon.send(s, ctx.jid, m, `\u274c That party is full (max *${settings.partyMax}*).`)
-      await store.updateParty(open.id, members)
-      const p = await store.player(ctx.userId)
+      if (members.length > settings.partyMax) return axyon.send(s, ctx.jid, m, `❌ That party is full (max *${settings.partyMax}*).`)
+      const nextInvited = invited.filter(id => id !== ctx.userId)
+      const ready = (open.ready || []).filter(id => members.includes(id))
+      await store.updateParty(open.id, members, null, nextInvited, ready)
+      const player = await store.player(ctx.userId)
       await store.log(ctx.userId, 'party_join', String(open.id))
-      return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *JOINED PARTY*\n\n*${p?.name || ctx.userId}* joined.\nMembers: *${members.length}/${settings.partyMax}*`)
+      return axyon.send(s, ctx.jid, m, `${W}
+
+✅ *JOINED PARTY*
+
+*${player?.name || ctx.userId}* joined.
+Members: *${members.length}/3*`)
     }
+
+    if (!open) {
+      const active = await activeRoomFor(ctx)
+      if (active && ['story', 'continue', 'choose', 'explore', 'investigate', 'talk', 'recap', 'history', 'mission', 'objectives', 'map', 'chapter', 'floor', 'progress', 'discoveries', 'characters', 'save', 'logout', 'resume', 'rejoin', 'members', 'status', 'leader', 'waiting', 'leave', 'kick', 'disband'].includes(sub)) {
+        if (['story', 'continue', 'choose', 'explore', 'investigate', 'talk', 'recap', 'history', 'mission', 'objectives', 'map', 'chapter', 'floor', 'progress', 'discoveries', 'characters'].includes(sub)) return invokeLocal('session', s, m, ctx, [sub, ...args.slice(1)], {})
+        if (sub === 'save') {
+          const saveAction = String(args[1] || 'progress').toLowerCase()
+          return saveAction === 'status' ? invokeLocal('save', s, m, ctx, ['status'], {})
+            : invokeLocal('save', s, m, ctx, ['progress', 'multiplayer'], {})
+        }
+        if (sub === 'login') return invokeLocal('login', s, m, ctx, ['multiplayer', String(args[1] || '')], {})
+        if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['multiplayer'], {})
+        if (sub === 'resume' || sub === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
+        if (sub === 'leave') return invokeLocal('room', s, m, ctx, ['leave', active.room_key], {})
+        if (sub === 'kick') return invokeLocal('room', s, m, ctx, ['kick', active.room_key], content)
+        if (sub === 'disband') return invokeLocal('room', s, m, ctx, ['close', active.room_key], {})
+        if (sub === 'members' || sub === 'waiting' || sub === 'status' || sub === 'leader') return invokeLocal('session', s, m, ctx, ['members'], {})
+      }
+      return axyon.send(s, ctx.jid, m, `🔥 No open party here. Start one with *${ctx.prefix}party create*.`)
+    }
+
+    if (sub === 'leader') return axyon.send(s, ctx.jid, m, `👑 Party Leader: *${(await store.player(open.leader))?.name || open.leader}*`)
+    if (sub === 'members' || sub === 'view' || sub === 'status' || sub === 'waiting') {
+      const lines = await namesFor(open.members)
+      const waiting = (open.invited || []).map(id => `◌ @${id.split('@')[0]} — invited`)
+      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *MULTIPLAYER EXPEDITION*', '', ...lines, ...waiting, '', `Ready: *${(open.ready || []).length}/${(open.members || []).length}*`, `Capacity: *${(open.members || []).length}/3*`, `Status: *${open.status}*`, '', `Use *${ctx.prefix}party ready* when prepared.`].join('\n'))
+    }
+    if (sub === 'ready') {
+      if (!(open.members || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'Join the party before marking yourself ready.')
+      const ready = [...new Set([...(open.ready || []), ctx.userId])]
+      await store.updateParty(open.id, open.members || [], null, open.invited || [], ready)
+      return axyon.send(s, ctx.jid, m, `✅ You are ready. *${ready.length}/${(open.members || []).length}* party members ready.`)
+    }
+    if (sub === 'start') {
+      if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can start the expedition.')
+      if ((open.members || []).length < 2) return axyon.send(s, ctx.jid, m, 'An expedition needs at least two players.')
+      if ((open.members || []).length > 3) return axyon.send(s, ctx.jid, m, 'Multiplayer Expeditions are limited to three players. Your legacy party remains unchanged.')
+      const notReady = (open.members || []).filter(id => !(open.ready || []).includes(id))
+      if (notReady.length) return axyon.send(s, ctx.jid, m, `Waiting for ${notReady.length} member(s) to use *${ctx.prefix}party ready*.`)
+      const existingSession = await activeRoomFor(ctx)
+      if (existingSession) return axyon.send(s, ctx.jid, m, `You already have a live session here: *${existingSession.name}* (\`${existingSession.room_key}\`). Use *${ctx.prefix}session* to continue it.`)
+      const group = await registeredGroupFor(ctx, null)
+      if (!groupFeatureEnabled(group, 'combat') && !groupFeatureEnabled(group, 'dungeon')) throw new Error('This registered group needs its combat or dungeon feature enabled.')
+      const participants = []
+      for (const id of open.members) {
+        if (!(await store.player(id))) return axyon.send(s, ctx.jid, m, `Player ${id} must use *${ctx.prefix}arise* before the expedition starts.`)
+        participants.push({ userId: id, role: id === open.leader ? 'leader' : 'member' })
+      }
+      const room = await store.createRoom({ name: `MULTIPLAYER EXPEDITION — ${String(Date.now()).slice(-4)}`, groupJid: ctx.jid, ownerId: open.leader, modeId: 'dungeon', participation: 'multiplayer', privacy: 'public', capacity: 3, entryRequirements: { adventureMode: 'multiplayer', partyId: Number(open.id) } })
+      await store.updateRoom(room.room_key, { participants, status: 'ready' })
+      await store.updateParty(open.id, open.members || [], 'started', open.invited || [], open.ready || [], { ...(open.state || {}), roomKey: room.room_key })
+      await store.log(ctx.userId, 'party_expedition_start', room.room_key, { partyId: open.id })
+      return axyon.send(s, ctx.jid, m, `${W}
+
+🟢 *EXPEDITION PARTY READY*
+
+${room.name}
+Players: *${participants.length}/3*
+Room: \`${room.room_key}\`
+
+The shared session is open. Use *${ctx.prefix}session* to inspect it.`)
+    }
+    if (sub === 'kick') {
+      if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can remove a member.')
+      const target = mentionedId(content)
+      if (!target || target === open.leader || !(open.members || []).includes(target)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party kick @member*`)
+      const members = open.members.filter(id => id !== target)
+      const ready = (open.ready || []).filter(id => id !== target)
+      await store.updateParty(open.id, members, null, open.invited || [], ready)
+      return axyon.send(s, ctx.jid, m, `Removed @${target.split('@')[0]} from the party.`)
+    }
+    if (sub === 'disband') {
+      if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can disband this party.')
+      await store.updateParty(open.id, [], 'closed', [], [])
+      return axyon.send(s, ctx.jid, m, '🛑 Party disbanded. Existing character and story progress is untouched.')
+    }
+    if (sub === 'save') {
+      const saveAction = String(args[1] || 'progress').toLowerCase()
+      return saveAction === 'status' ? invokeLocal('save', s, m, ctx, ['status'], {})
+        : invokeLocal('save', s, m, ctx, ['progress', 'multiplayer'], {})
+    }
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, ['multiplayer', String(args[1] || '')], {})
+    if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['multiplayer'], {})
+    if (sub === 'resume' || sub === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
     if (sub === 'leave') {
-      const open = await store.openParty(ctx.jid)
-      if (!open) return axyon.send(s, ctx.jid, m, '\ud83d\udd25 You are not in a party.')
       const members = (open.members || []).filter(x => x !== ctx.userId)
-      await store.updateParty(open.id, members, members.length ? null : 'closed')
-      return axyon.send(s, ctx.jid, m, `${W}\n\n\ud83d\udc4b You left the party. *${members.length}* remain.`)
+      if (members.length === (open.members || []).length) return axyon.send(s, ctx.jid, m, 'You are not in this party.')
+      const ready = (open.ready || []).filter(id => members.includes(id))
+      await store.updateParty(open.id, members, members.length ? null : 'closed', open.invited || [], ready)
+      return axyon.send(s, ctx.jid, m, `👋 You left the party. *${members.length}* remain.`)
     }
-    const open = await store.openParty(ctx.jid)
-    if (!open) return axyon.send(s, ctx.jid, m, `\ud83d\udd25 No open party here.\nStart one with *${ctx.prefix}party create*.`)
-    const names = []
-    for (const id of open.members || []) {
-      const p = await store.player(id)
-      names.push(`\u2022 *${p?.name || `+${id}`}*${id === open.leader ? ' \ud83d\udc51' : ''}`)
-    }
-    return axyon.send(s, ctx.jid, m, [
-      `${W}`, '', '\ud83d\udd25 *PARTY*', '',
-      names.join('\n'), '',
-      `Members: *${(open.members || []).length}/${settings.partyMax}* \u2022 minimum *${settings.partyMin}*`, '',
-      `*${ctx.prefix}party join* \u2022 *${ctx.prefix}party leave*`
-    ].join('\n'))
+    return axyon.send(s, ctx.jid, m, `⌘ *PARTY COMMANDS*
+
+${ctx.prefix}party create
+${ctx.prefix}party invite @player
+${ctx.prefix}party join
+${ctx.prefix}party members
+${ctx.prefix}party ready
+${ctx.prefix}party start
+${ctx.prefix}party save [code|status]
+${ctx.prefix}party logout
+${ctx.prefix}party login <save-code>
+${ctx.prefix}party rejoin`)
   })
 
   /* ----------------------------------------------------------------- rooms */
@@ -377,6 +590,22 @@ function createCommands ({ axyon, economy, logger, ai }) {
       ].join('\n'))
     }
 
+    if (sub === 'invite') {
+      const room = await activeRoomFor(ctx)
+      const target = mentionedId(ctx.content || {})
+      if (!room) return axyon.send(s, ctx.jid, m, 'You are not leading an active room in this group.')
+      if (String(room.owner_id) !== String(ctx.userId) && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the session leader can invite players.')
+      if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room invite @player*`)
+      const req = room.entry_requirements || {}
+      if (req.guildId) {
+        const member = await store.guildForUser(target)
+        if (!member || Number(member.id) !== Number(req.guildId) || String(member.group_jid || '') !== String(ctx.jid)) return axyon.send(s, ctx.jid, m, 'Only a member of this linked guild can be invited to its campaign.')
+      }
+      const invited = [...new Set([...(req.invited || []), target])]
+      await store.updateRoom(room.room_key, { entryRequirements: { ...req, invited } })
+      return axyon.send(s, ctx.jid, m, `📨 Invitation recorded for @${target.split('@')[0]}. They can join with *${ctx.prefix}room join ${room.room_key}*.`)
+    }
+
     const key = String(args[1] || '').trim()
     if (!key) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room ${sub} <key>*`)
     const room = await store.room(key)
@@ -401,11 +630,23 @@ function createCommands ({ axyon, economy, logger, ai }) {
     }
 
     if (sub === 'join') {
+      const req = room.entry_requirements || {}
+      const alreadyJoined = (room.participants || []).some(part => String(part.userId) === String(ctx.userId))
+      if (!alreadyJoined && req.guildId) {
+        const member = await store.guildForUser(ctx.userId)
+        if (!member || Number(member.id) !== Number(req.guildId) || String(member.group_jid || '') !== String(ctx.jid)) {
+          return axyon.send(s, ctx.jid, m, '❌ This campaign is restricted to members of its linked guild.')
+        }
+      }
+      if (!alreadyJoined && Array.isArray(req.invited) && req.invited.length && !req.invited.includes(ctx.userId) && String(room.owner_id) !== String(ctx.userId)) {
+        return axyon.send(s, ctx.jid, m, '❌ This session is invitation-only. Ask its leader to invite you.')
+      }
       const check = modesLib.canJoin(room, ctx.userId)
-      if (!check.ok) return axyon.send(s, ctx.jid, m, `\u274c ${check.message}`)
+      if (!check.ok) return axyon.send(s, ctx.jid, m, `❌ ${check.message}`)
       const participants = modesLib.addParticipant(room, ctx.userId)
       const next = modesLib.isReady({ ...room, participants }) && room.status === 'waiting' ? 'ready' : room.status
-      await store.updateRoom(room.room_key, { participants, status: next })
+      const remainingInvites = Array.isArray(req.invited) ? req.invited.filter(id => id !== ctx.userId) : []
+      await store.updateRoom(room.room_key, { participants, status: next, entryRequirements: { ...req, invited: remainingInvites } })
       await store.log(ctx.userId, 'room_join', room.room_key)
       return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *JOINED*\n\n*${room.name}*\nPlayers: *${participants.length}/${room.capacity}*${next === 'ready' ? '\n\n\ud83d\udfe2 Room is *READY*.' : ''}`)
     }
@@ -517,6 +758,20 @@ function createCommands ({ axyon, economy, logger, ai }) {
       return axyon.send(s, ctx.jid, m, lines.join('\n'))
     }
 
+    if (sub === 'kick') {
+      if (!modesLib.canManage(room, ctx.userId, ctx.auth)) return axyon.send(s, ctx.jid, m, '🛡️ Only the room leader or AXYON can remove a participant.')
+      if (String(room.status) === 'active') return axyon.send(s, ctx.jid, m, 'A participant cannot be removed after the encounter has started. Close or finish the session first.')
+      const target = mentionedId(ctx.content || {})
+      if (!target || String(target) === String(room.owner_id)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}room kick ${room.room_key} @member*`)
+      const participants = (room.participants || []).filter(part => String(part.userId) !== String(target))
+      if (participants.length === (room.participants || []).length) return axyon.send(s, ctx.jid, m, 'That player is not in this room.')
+      const requirements = room.entry_requirements || {}
+      const invited = (requirements.invited || []).filter(id => String(id) !== String(target))
+      await store.updateRoom(room.room_key, { participants, entryRequirements: { ...requirements, invited } })
+      await store.log(ctx.userId, 'room_kick', room.room_key, { target })
+      return axyon.send(s, ctx.jid, m, `Removed @${String(target).split('@')[0]} from *${room.name}*.`)
+    }
+
     if (sub === 'close') {
       if (!modesLib.canManage(room, ctx.userId, ctx.auth)) {
         return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f Only the room leader or AXYON can close this room.')
@@ -609,13 +864,75 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ----------------------------------------------------------------- duels */
 
-  cmd('duel', 'duel', '{p}duel @player | {p}duel accept <id>', 'Challenge a player, or answer a challenge.', async (s, m, ctx, args, content) => {
+  cmd('duel', 'duel', '{p}duel @player | {p}duel <chronicles|invite|accept|decline|start|status|members|leave|resume>', 'Direct duels remain available; Chronicles uses a separate two-player registered-group session.', async (s, m, ctx, args, content) => {
     const sub = String(args[0] || '').toLowerCase()
-    if (['accept', 'decline'].includes(sub)) {
+    const rows = async () => store.roomsFor(ctx.jid)
+    const duelRoom = async () => {
+      const current = await activeRoomFor(ctx)
+      return current && current.mode_id === 'duel' ? current : null
+    }
+    const invitedRoom = async () => (await rows()).find(r => r.mode_id === 'duel' &&
+      ['waiting', 'ready', 'paused'].includes(String(r.status)) &&
+      Array.isArray(r.entry_requirements?.invited) && r.entry_requirements.invited.map(String).includes(String(ctx.userId))) || null
+
+    if (sub === 'chronicles' || sub === 'create') return adventureDirectory(s, m, ctx, ['enter', 'duel'])
+    if (sub === 'invite') {
+      const target = mentionedId(content)
+      if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}duel invite @player*`)
+      if (!(await store.player(target))) return axyon.send(s, ctx.jid, m, 'That player must use !arise before joining Duel Chronicles.')
+      let room = await duelRoom()
+      if (!room) {
+        try { const made = await createModeRoom(s, m, ctx, 'duel'); room = made.room }
+        catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+      }
+      if (String(room.owner_id) !== String(ctx.userId) && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the Duel Leader can invite participants.')
+      if ((room.participants || []).some(part => String(part.userId) === String(target))) return axyon.send(s, ctx.jid, m, 'That player is already in this duel.')
+      const invited = [...new Set([...(room.entry_requirements?.invited || []), String(target)])]
+      await store.updateRoom(room.room_key, { entryRequirements: { ...(room.entry_requirements || {}), invited } })
+      return axyon.send(s, ctx.jid, m, `⚔️ *DUEL INVITATION SENT*
+
+@${target.split('@')[0]} has been invited to Duel Chronicles.
+Accept with *${ctx.prefix}duel accept*.`)
+    }
+    if (sub === 'accept' && !parseNum(args[1])) {
+      const pending = await invitedRoom()
+      if (pending) return invokeLocal('room', s, m, ctx, ['join', pending.room_key], {})
+      return axyon.send(s, ctx.jid, m, 'There is no pending Duel Chronicles invitation in this group. For a direct duel, use *!duel accept <id>*.')
+    }
+    if (sub === 'decline' && !parseNum(args[1])) {
+      const pending = await invitedRoom()
+      if (!pending) return axyon.send(s, ctx.jid, m, 'There is no pending Duel Chronicles invitation in this group.')
+      const req = pending.entry_requirements || {}
+      const invited = (req.invited || []).filter(id => String(id) !== String(ctx.userId))
+      await store.updateRoom(pending.room_key, { entryRequirements: { ...req, invited } })
+      return axyon.send(s, ctx.jid, m, 'Duel Chronicles invitation declined.')
+    }
+    if (['accept', 'decline'].includes(sub) && parseNum(args[1])) {
       const id = parseNum(args[1])
-      if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}duel ${sub} <id>*`)
       return axyon.answerDuel(s, m, ctx, id, sub === 'accept')
     }
+    if (['story', 'continue', 'choose', 'explore', 'investigate', 'talk', 'recap', 'history', 'mission', 'objectives', 'map', 'chapter', 'floor', 'progress', 'discoveries', 'characters'].includes(sub)) return invokeLocal('session', s, m, ctx, [sub, ...args.slice(1)], {})
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, ['duel', String(args[1] || '')], {})
+    if (sub === 'save') return invokeLocal('save', s, m, ctx, ['progress', 'duel'], {})
+    if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['duel'], {})
+    if (sub === 'start') {
+      const room = await duelRoom()
+      if (!room) return axyon.send(s, ctx.jid, m, `No Duel Chronicles room found. Use *${ctx.prefix}duel chronicles* first.`)
+      return invokeLocal('room', s, m, ctx, ['start', room.room_key], {})
+    }
+    if (sub === 'status' || sub === 'members') {
+      const room = await duelRoom()
+      if (!room) return axyon.send(s, ctx.jid, m, `No active Duel Chronicles session. Use *${ctx.prefix}duel chronicles* to open one.`)
+      return invokeLocal('room', s, m, ctx, ['view', room.room_key], {})
+    }
+    if (sub === 'leave') {
+      const room = await duelRoom()
+      if (!room) return axyon.send(s, ctx.jid, m, 'You are not in an active Duel Chronicles session.')
+      return invokeLocal('room', s, m, ctx, ['leave', room.room_key], {})
+    }
+    if (sub === 'resume' || sub === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
+
+    // Legacy direct player-versus-player duels are deliberately unchanged.
     const opponent = mentionedId(content) || norm(args[0] || '')
     return axyon.beginDuel(s, m, ctx, opponent || null)
   })
@@ -755,11 +1072,42 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* ------------------------------------------------------------------ lore */
 
-  cmd('story', 'media', '{p}story', 'A short piece of the tower\u2019s history.', async (s, m, ctx) => {
-    /* Deterministic per player, so the anthology is walked rather than
-     * sampled — the same hunter gets a new story each time until it wraps.
-     * The counter is in memory: it is a reading position, not progress, and
-     * it must not appear in anyone's inventory. */
+  cmd('story', 'media', '{p}story [continue|recap|history|choices|choose <1-4>|objectives|characters|location|skip]', 'Continue and inspect the active floor storyline. No-argument anthology remains available.', async (s, m, ctx, args = []) => {
+    const sub = String(args[0] || '').toLowerCase()
+    if (sub) {
+      const battle = await store.getBattle(ctx.userId)
+      const storyState = await store.floorStory(ctx.userId)
+      if (sub === 'choose') return invokeLocal('choice', s, m, ctx, [String(args[1] || '')], {})
+      if (sub === 'continue') return invokeLocal('battle', s, m, ctx, [], {})
+      if (sub === 'skip') return axyon.send(s, ctx.jid, m, battle?.mode === 'floor' && battle.storyPending
+        ? 'This is a required floor decision. Choose one of the four options with *!choice 1-4*; the story cannot be skipped.'
+        : 'There is no required story scene waiting to be skipped.')
+      if (sub === 'choices') return axyon.send(s, ctx.jid, m, battle?.mode === 'floor' && battle.storyPending
+        ? floorStory.begin(battle.ordinal, storyState).text
+        : 'There is no pending story decision. Use *!floor* to enter the next floor.')
+      if (sub === 'history' || sub === 'recap') {
+        const rows = Array.isArray(storyState.history) ? storyState.history.slice(-8) : []
+        return axyon.send(s, ctx.jid, m, rows.length
+          ? [W, '', '📖 *STORY RECAP*', '', ...rows.map((r, i) => `${i + 1}. Floor ${r.floor} — *${r.chapter}*\n   Decision: ${r.choice}`)].join('\n\n')
+          : 'Your story journal is empty. Enter a floor with *!floor* to begin.')
+      }
+      if (sub === 'objectives') {
+        const rows = floorStory.objectives(storyState)
+        return axyon.send(s, ctx.jid, m, rows.length
+          ? [W, '', '🎯 *STORY OBJECTIVES*', '', ...rows.map(q => `${q.status === 'complete' ? '✅' : q.status === 'claimed' ? '🏅' : '▫️'} *${q.name}*\n   ${q.objective}`)].join('\n\n')
+          : 'No story objectives yet. Talk to the current NPC or make a floor decision to unlock a side quest.')
+      }
+      if (sub === 'characters') {
+        const current = battle?.mode === 'floor' ? floorStory.chapterFor(battle.ordinal) : null
+        const contacts = Array.isArray(storyState.npcContacts) ? storyState.npcContacts : []
+        return axyon.send(s, ctx.jid, m, current
+          ? `👥 *CHAPTER CHARACTERS*\n\n• ${current.npc}${contacts.length ? `\n\nRecorded conversations: ${contacts.length}` : ''}`
+          : 'No active floor chapter. Enter a floor to meet its characters.')
+      }
+      if (sub === 'location') return axyon.send(s, ctx.jid, m, battle?.mode === 'floor' ? `⌖ *CURRENT LOCATION*\n\n${battle.location || floorStory.chapterFor(battle.ordinal).place}` : 'You are not inside a floor location.')
+      return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}story continue|recap|history|choices|choose <1-4>|objectives|characters|location|skip*`)
+    }
+    /* Original deterministic anthology; no-argument behaviour is unchanged. */
     const n = storyReads.get(ctx.userId) || 0
     storyReads.set(ctx.userId, n + 1)
     if (storyReads.size > 5000) storyReads.clear()
@@ -840,11 +1188,26 @@ function createCommands ({ axyon, economy, logger, ai }) {
      * a provider name, never a retry loop that spams the group.
      */
     if (!text) {
-      await axyon.send(sock, ctx.jid, m, 'I’m having a little trouble responding right now. Try again in a moment.')
+      await axyon.send(sock, ctx.jid, m, [
+        T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+        '',
+        `🤖 ${T.i('I could not reach my knowledge base just now.')}`,
+        '',
+        `Try ${T.b(`${ctx.prefix}help`)} for the full command list.`
+      ].join('\n'))
       return true
     }
 
-    await axyon.send(sock, ctx.jid, m, text)
+    await axyon.send(sock, ctx.jid, m, [
+      T.header({ creators: greetings.creatorsOf(ctx.settings) }),
+      '',
+      `🤖 ${T.font('ARCHITECT', 'bold')}`,
+      '',
+      text,
+      '',
+      T.rule('', 'hair'),
+      T.i('I can explain commands. I cannot run them.')
+    ].join('\n'))
     return true
   }
 
@@ -884,6 +1247,8 @@ function createCommands ({ axyon, economy, logger, ai }) {
     battle: 'combat', dungeon: 'dungeon', duel: 'duel', cards: 'cards'
   }
   function featureFor (command) {
+    if (command.name === 'mode') return null // mode checks the selected adventure's registration feature itself
+    if (command.name === 'collab') return 'collab'
     if (command.name === 'flooradmin') return 'dungeon'
     if (command.name === 'classadmin') return 'general'
     if (command.name === 'stage') return 'combat'
@@ -895,7 +1260,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (command.section === 'battle' && !['fight', 'stages'].includes(command.name)) return ['combat', 'dungeon']
     return SECTION_FEATURE[command.section] || null
   }
-  const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel>\` — Change mode (AXYON)`
+  const registrationHelp = `${W}\n\n*GROUP REGISTRATION*\n\n• \`!register group normal\` — Original gaming\n• \`!register group modes\` — Select features individually\n• \`!register group duel\` — Duel system only\n• \`!register group multiplayer\` — Multiplayer Expedition\n• \`!register group guild\` — Guild Campaigns\n• \`!register group collab\` — Cross-group collaboration\n• \`!register view\` — Current group record\n• \`!register list\` — All registered groups (AXYON)\n• \`!register mode <normal|modes|duel|multiplayer|guild|collab>\` — Change mode (AXYON)`
 
   cmd('register', 'management', '{p}register <group normal|modes|duel|view|list|mode>', 'Register and inspect group access (AXYON only).', async (s, m, ctx, args) => {
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON ONLY*\n\nOnly verified AXYON identities can manage group registration.`)
@@ -909,7 +1274,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     if (['view', 'status'].includes(sub)) return axyon.send(s, ctx.jid, m, groupRecordText(current, ctx.prefix))
     if (sub === 'mode') {
       const mode = String(args[1] || '').toLowerCase()
-      if (!['normal', 'modes', 'duel'].includes(mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register mode normal|modes|duel*`)
+      if (!Object.hasOwn(store.GROUP_MODES, mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register mode normal|modes|duel|multiplayer|guild|collab*`)
       if (!current || current.status === 'REMOVED') return axyon.send(s, ctx.jid, m, `This group is not registered. Use *${ctx.prefix}register group ${mode}*.`)
       const updated = await store.updateGroupMode(ctx.jid, mode)
       await store.log(ctx.userId, 'group_registration_mode', ctx.jid, { mode })
@@ -917,7 +1282,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
     }
     if (sub !== 'group') return axyon.send(s, ctx.jid, m, registrationHelp)
     const mode = String(args[1] || '').toLowerCase()
-    if (!['normal', 'modes', 'duel'].includes(mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register group normal|modes|duel*`)
+    if (!Object.hasOwn(store.GROUP_MODES, mode)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}register group normal|modes|duel|multiplayer|guild|collab*`)
     let name = ''
     try { name = (await withTimeout(s.groupMetadata(ctx.jid), GROUP_META_TIMEOUT_MS))?.subject || '' } catch {}
     const g = await store.registerGroup(ctx.jid, name, ctx.userId, mode)
@@ -930,15 +1295,31 @@ function createCommands ({ axyon, economy, logger, ai }) {
     return [W, '', '⌬ *GROUP REGISTRATION*', '', `Name: *${g.name || 'Unnamed'}*`, `JID: \`${g.group_jid}\``, `ID: \`${g.registration_id || 'legacy'}\``, `Mode: *${String(g.registration_mode || 'normal').toUpperCase()}*`, `Status: *${g.status || (g.enabled ? 'ACTIVE' : 'DISABLED')}*`, `Features: ${(g.features || []).join(', ') || 'none'}`, `Registered by: ${g.registered_by || 'unknown'}`, `Registered: ${g.registered_at || g.created_at || 'unknown'}`, g.suspension_reason ? `Reason: ${g.suspension_reason}` : null].filter(Boolean).join('\n')
   }
 
-  cmd('group', 'management', '{p}group <info|enable|disable|suspend|reactivate|remove|features>', 'Manage this group registration (AXYON only).', async (s, m, ctx, args) => {
+  cmd('group', 'management', '{p}group <register|status|info|verify|list|change|unregister|enable|disable|suspend|reactivate|remove|features>', 'Manage registered group types and access (AXYON only).', async (s, m, ctx, args) => {
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON ONLY*`)
-    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, '📍 Run group management inside the target WhatsApp group.')
     const sub = String(args[0] || 'info').toLowerCase()
+    if (sub === 'list') return invokeLocal('groups', s, m, ctx, [], {})
+    if (!ctx.jid.endsWith('@g.us')) return axyon.send(s, ctx.jid, m, '📍 Run group management inside the target WhatsApp group.')
+    if (sub === 'register') return invokeLocal('register', s, m, ctx, ['group', String(args[1] || 'normal')], {})
+    if (sub === 'change') return invokeLocal('register', s, m, ctx, ['mode', String(args[1] || '')], {})
+    if (sub === 'unregister' || sub === 'remove') {
+      const current = await store.group(ctx.jid)
+      if (!current || current.status === 'REMOVED') return axyon.send(s, ctx.jid, m, 'This group is not registered.')
+      const requested = String(args[1] || '').toLowerCase()
+      if (requested && requested !== String(current.registration_mode || 'normal').toLowerCase()) return axyon.send(s, ctx.jid, m, `This group is registered as *${current.registration_mode}*, not *${requested}*.`)
+      const removed = await store.unregisterGroup(ctx.jid)
+      await store.log(ctx.userId, 'group_unregister', ctx.jid, { mode: current.registration_mode })
+      return axyon.send(s, ctx.jid, m, removed ? '⛔ Group registration removed. Existing player and adventure data was preserved.' : 'Group registration could not be removed.')
+    }
     const g = await store.group(ctx.jid)
-    if (sub === 'info' || sub === 'view') return axyon.send(s, ctx.jid, m, groupRecordText(g, ctx.prefix))
+    if (sub === 'verify') {
+      const verified = !!g && String(g.status || '').toUpperCase() === 'ACTIVE' && g.enabled !== false
+      return axyon.send(s, ctx.jid, m, `${verified ? '✅' : '⛔'} *GROUP VERIFICATION*\n\n${verified ? 'This group is actively registered.' : 'This group does not have an active registration.'}\nRegistration type: *${g?.registration_mode || 'none'}*\nFeatures: ${(g?.features || []).join(', ') || 'none'}`)
+    }
+    if (sub === 'info' || sub === 'view' || sub === 'status') return axyon.send(s, ctx.jid, m, groupRecordText(g, ctx.prefix))
     if (!g || g.status === 'REMOVED') return axyon.send(s, ctx.jid, m, 'This group has no active registration.')
     if (sub === 'features') {
-      const available = g.registration_mode === 'duel' ? ['duel'] : g.registration_mode === 'modes' ? [...GROUP_FEATURES] : [...store.GROUP_MODES.normal]
+      const available = g.registration_mode === 'modes' ? [...GROUP_FEATURES] : [...(store.GROUP_MODES[g.registration_mode] || store.GROUP_MODES.normal)]
       return axyon.send(s, ctx.jid, m, [W, '', '*GROUP FEATURES*', '', `Enabled: ${(g.features || []).join(', ') || 'none'}`, `Available: ${available.join(', ')}`, '', `Enable: *${ctx.prefix}group enable <feature>*`, `Disable: *${ctx.prefix}group disable <feature>*`].join('\n'))
     }
     if (sub === 'enable' || sub === 'disable') {
@@ -954,7 +1335,7 @@ function createCommands ({ axyon, economy, logger, ai }) {
         return axyon.send(s, ctx.jid, m, `⏸️ Group disabled. Status: *${updated.status}*`)
       }
       if (!GROUP_FEATURES.has(feature)) return axyon.send(s, ctx.jid, m, `Unknown feature. Available: ${[...GROUP_FEATURES].join(', ')}`)
-      const allowedForMode = g.registration_mode === 'duel' ? new Set(['duel']) : g.registration_mode === 'modes' ? GROUP_FEATURES : new Set(store.GROUP_MODES.normal)
+      const allowedForMode = g.registration_mode === 'modes' ? GROUP_FEATURES : new Set(store.GROUP_MODES[g.registration_mode] || store.GROUP_MODES.normal)
       if (!allowedForMode.has(feature)) return axyon.send(s, ctx.jid, m, `The *${feature}* feature is not available under ${String(g.registration_mode).toUpperCase()} registration.`)
       const features = new Set(g.features || [])
       if (sub === 'enable') features.add(feature); else features.delete(feature)
@@ -1358,8 +1739,131 @@ function createCommands ({ axyon, economy, logger, ai }) {
 
   /* --------------------------------------------------------- guild registry */
 
-  cmd('guild', 'social', '{p}guild <list|info|suggest|create|join|leave|members|group|ungroup|leader|disband|suggestions|approve|reject>', 'Create and join guilds, submit guild proposals, and link guilds to registered group chats.', async (s, m, ctx, args, content) => {
+  cmd('guild', 'social', '{p}guild <list|info|suggest|create|join|leave|members|group|ungroup|leader|disband|suggestions|approve|reject|squad>', 'Create and join guilds, submit guild proposals, link guilds, and run five-player guild campaigns.', async (s, m, ctx, args, content) => {
     const sub = String(args[0] || 'help').toLowerCase()
+
+    /* Guild squad campaigns are a separate layer over the existing guild
+     * registry. They reuse guild_1 room combat and never change membership. */
+    if (sub === 'squad') {
+      const action = String(args[1] || 'status').toLowerCase()
+      const membership = await store.guildForUser(ctx.userId)
+      if (!membership) return axyon.send(s, ctx.jid, m, `Join a guild before using campaign squads: *${ctx.prefix}guild join <id|tag>*.`)
+      if (!membership.group_jid || String(membership.group_jid) !== String(ctx.jid)) return axyon.send(s, ctx.jid, m, 'Guild campaigns must run inside your guild’s linked WhatsApp group.')
+      const linked = await store.group(ctx.jid)
+      if (!linked || String(linked.status || '').toUpperCase() !== 'ACTIVE' || linked.enabled === false || !(linked.features || []).includes('dungeon')) {
+        return axyon.send(s, ctx.jid, m, 'This guild group must be registered and have the dungeon feature enabled.')
+      }
+      const rooms = await store.roomsFor(ctx.jid)
+      const live = rooms.filter(r => String(r.mode_id).startsWith('guild_') && Number(r.entry_requirements?.guildId) === Number(membership.id) && !['completed', 'cancelled', 'expired'].includes(String(r.status)))
+      const room = live[0] || null
+      const leader = r => r && String(r.owner_id) === String(ctx.userId)
+      if (action === 'login') return invokeLocal('login', s, m, ctx, ['guild', String(args[2] || '')], {})
+      if (action === 'create') {
+        if (room) return axyon.send(s, ctx.jid, m, `A guild squad is already open: *${room.name}* (\`${room.room_key}\`).`)
+        const created = await store.createRoom({
+          name: `GUILD CAMPAIGN — ${String(Date.now()).slice(-4)}`,
+          groupJid: ctx.jid, ownerId: ctx.userId, modeId: 'guild_1', participation: 'party',
+          privacy: 'public', capacity: 5,
+          entryRequirements: { adventureMode: 'guild', guildId: Number(membership.id), invited: [ctx.userId], guildTag: membership.tag }
+        })
+        await store.log(ctx.userId, 'guild_squad_create', created.room_key, { guildId: membership.id })
+        return axyon.send(s, ctx.jid, m, `${W}
+
+⚔️ *GUILD CAMPAIGN SQUAD OPENED*
+
+Guild: *${membership.name}* [${membership.tag}]
+Leader: *${ctx.name || ctx.userId}*
+Capacity: *1/5*
+Room: \`${created.room_key}\`
+
+Invite guild members with *${ctx.prefix}guild squad invite @member*.
+Start with *${ctx.prefix}guild squad start*.`)
+      }
+      if (!room) return axyon.send(s, ctx.jid, m, `No open squad for *${membership.name}*. Create one with *${ctx.prefix}guild squad create*.`)
+      if (['story', 'continue', 'choose', 'explore', 'investigate', 'talk', 'recap', 'history', 'mission', 'objectives', 'map', 'chapter', 'floor', 'progress', 'discoveries', 'characters'].includes(action)) return invokeLocal('session', s, m, ctx, [action, ...args.slice(2)], {})
+      if (action === 'invite' || action === 'add') {
+        if (!leader(room) && membership.member_role !== 'leader' && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the squad creator or Guild Leader can invite members.')
+        const target = mentionedId(content)
+        if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild squad invite @member*`)
+        const targetGuild = await store.guildForUser(target)
+        if (!targetGuild || Number(targetGuild.id) !== Number(membership.id)) return axyon.send(s, ctx.jid, m, 'Only members of this guild can join its campaign squad.')
+        const current = (room.participants || []).map(p => String(p.userId))
+        const invited = room.entry_requirements?.invited || []
+        if (current.includes(target)) return axyon.send(s, ctx.jid, m, 'That member is already in the squad.')
+        if (current.length + invited.length >= 5) return axyon.send(s, ctx.jid, m, 'This guild squad is full (maximum 5).')
+        await store.updateRoom(room.room_key, { entryRequirements: { ...room.entry_requirements, invited: [...new Set([...invited, target])] } })
+        return axyon.send(s, ctx.jid, m, `📨 Guild squad invitation recorded for @${target.split('@')[0]}. Use *${ctx.prefix}guild squad join* to join.`)
+      }
+      if (action === 'join') {
+        const invites = room.entry_requirements?.invited || []
+        const already = (room.participants || []).some(p => String(p.userId) === String(ctx.userId))
+        if (!already && invites.length && !invites.includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'This squad is invite-only. Ask the Guild Leader or squad creator for an invitation.')
+        return invokeLocal('room', s, m, ctx, ['join', room.room_key], {})
+      }
+      if (action === 'decline') {
+        const invites = (room.entry_requirements?.invited || []).filter(id => id !== ctx.userId)
+        if (invites.length === (room.entry_requirements?.invited || []).length) return axyon.send(s, ctx.jid, m, 'You have no pending guild squad invitation.')
+        await store.updateRoom(room.room_key, { entryRequirements: { ...room.entry_requirements, invited: invites } })
+        return axyon.send(s, ctx.jid, m, 'Guild squad invitation declined.')
+      }
+      if (action === 'start') {
+        if (!leader(room) && membership.member_role !== 'leader' && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the squad creator or Guild Leader can start this campaign.')
+        if ((room.participants || []).length > 5) return axyon.send(s, ctx.jid, m, 'Guild campaigns are limited to five players.')
+        return invokeLocal('room', s, m, ctx, ['start', room.room_key], {})
+      }
+      if (action === 'leave') return invokeLocal('room', s, m, ctx, ['leave', room.room_key], {})
+      if (action === 'kick') {
+        if (!leader(room) && membership.member_role !== 'leader' && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the squad creator or Guild Leader can remove members.')
+        const target = mentionedId(content)
+        if (!target || target === String(room.owner_id)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}guild squad kick @member*`)
+        const participants = (room.participants || []).filter(p => String(p.userId) !== String(target))
+        const invited = (room.entry_requirements?.invited || []).filter(id => id !== target)
+        if (participants.length === (room.participants || []).length && invited.length === (room.entry_requirements?.invited || []).length) return axyon.send(s, ctx.jid, m, 'That player is not in this squad.')
+        await store.updateRoom(room.room_key, { participants, entryRequirements: { ...room.entry_requirements, invited } })
+        return axyon.send(s, ctx.jid, m, `Removed @${target.split('@')[0]} from the squad.`)
+      }
+      if (action === 'disband') {
+        if (!leader(room) && membership.member_role !== 'leader' && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the squad creator or Guild Leader can disband this squad.')
+        await store.updateRoom(room.room_key, { status: 'cancelled', result: 'disbanded' })
+        return axyon.send(s, ctx.jid, m, 'Guild squad disbanded. Guild membership and campaign saves remain intact.')
+      }
+      if (action === 'save') {
+        const saveAction = String(args[2] || 'progress').toLowerCase()
+        return saveAction === 'status' ? invokeLocal('save', s, m, ctx, ['status'], {})
+          : invokeLocal('save', s, m, ctx, ['progress', 'guild'], {})
+      }
+      if (action === 'login') return invokeLocal('login', s, m, ctx, ['guild', String(args[2] || '')], {})
+      if (action === 'logout') return invokeLocal('logout', s, m, ctx, ['guild'], {})
+      if (action === 'resume' || action === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
+      if (action === 'waiting' || action === 'members' || action === 'status' || action === 'leader') {
+        const parts = room.participants || []
+        const names = []
+        for (const part of parts) { const player = await store.player(part.userId); names.push(`• *${player?.name || part.userId}*${part.role === 'leader' ? ' 👑' : ''}`) }
+        const waiting = (room.entry_requirements?.invited || []).map(id => `◌ @${id.split('@')[0]} — invited`)
+        if (action === 'leader') return axyon.send(s, ctx.jid, m, `👑 Squad Leader: *${(await store.player(room.owner_id))?.name || room.owner_id}*`)
+        return axyon.send(s, ctx.jid, m, [W, '', '🛡️ *GUILD CAMPAIGN SQUAD*', '', ...names, ...waiting, '', `Players: *${parts.length}/5*`, `Status: *${room.status}*`, `Room: \`${room.room_key}\``, '', `Invite: *${ctx.prefix}guild squad invite @member*`, `Start: *${ctx.prefix}guild squad start*`].join('\n'))
+      }
+      return axyon.send(s, ctx.jid, m, `⚔️ *GUILD CAMPAIGN*\n\n${ctx.prefix}guild squad create\n${ctx.prefix}guild squad invite @member\n${ctx.prefix}guild squad join\n${ctx.prefix}guild squad members\n${ctx.prefix}guild squad start\n${ctx.prefix}guild squad save\n${ctx.prefix}guild squad logout`)
+    }
+
+    // Campaign shortcuts requested in the mode directory; the existing
+    // guild registry commands (list/join/info/members) remain unchanged.
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, ['guild', String(args[1] || '')], {})
+    if (['story', 'progress', 'chapter', 'floor', 'explore', 'investigate', 'mission', 'objectives', 'map', 'rewards', 'checkpoint', 'save', 'logout', 'rejoin', 'waiting', 'resume'].includes(sub)) {
+      const active = await activeRoomFor(ctx)
+      if (!active || !String(active.mode_id).startsWith('guild_')) {
+        return axyon.send(s, ctx.jid, m, `No active Guild Campaign here. Use *${ctx.prefix}guild squad create* first.`)
+      }
+      if (['save', 'logout', 'login', 'rejoin', 'waiting', 'resume'].includes(sub)) {
+        if (sub === 'save') return invokeLocal('save', s, m, ctx, ['progress', 'guild'], {})
+        if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['guild'], {})
+        if (sub === 'login') return invokeLocal('login', s, m, ctx, ['guild', String(args[1] || '')], {})
+        if (sub === 'rejoin' || sub === 'resume') return invokeLocal('session', s, m, ctx, ['resume'], {})
+        return invokeLocal('session', s, m, ctx, ['members'], {})
+      }
+      return invokeLocal('session', s, m, ctx, [sub, ...args.slice(1)], {})
+    }
+
     const ownerOnly = ['create', 'group', 'ungroup', 'leader', 'disband', 'suggestions', 'approve', 'reject'].includes(sub)
     if (ownerOnly && !ctx.auth.owner) return axyon.send(s, ctx.jid, m, `${W}\n\n🛡️ *AXYON OWNER ONLY*\n\nOnly the bot owner can perform that guild-management action.`)
 
@@ -1922,6 +2426,751 @@ function createCommands ({ axyon, economy, logger, ai }) {
       T.rule('', 'hair'),
       `\u2764\ufe0f HP ${T.m(`${r.player.hp}/${r.player.maxHp}`)} \u2022 \ud83d\udd0b ${T.m(`${r.player.powerEnergy}/${r.player.maxPowerEnergy}`)}`
     ].join('\n'))
+  })
+
+
+  /* -------------------------------------------------- adventure command layer */
+  /* These commands are additive façades over the existing floor, room, guild,
+   * duel, battle, player and inventory engines. `!floor` and `!choice` remain
+   * the canonical narrative/decision flow. */
+  function modeLabel (mode) { return adventure.MODES[mode]?.name || mode }
+  function groupFeatureEnabled (group, feature) {
+    return !!group && String(group.status || '').toUpperCase() === 'ACTIVE' && group.enabled !== false &&
+      Array.isArray(group.features) && group.features.includes(feature)
+  }
+  async function registeredGroupFor (ctx, feature) {
+    if (!String(ctx.jid).endsWith('@g.us')) throw new Error('This adventure mode must be started inside its registered WhatsApp group.')
+    const row = await store.group(ctx.jid)
+    if (!row || String(row.status || '').toUpperCase() !== 'ACTIVE' || row.enabled === false) throw new Error('This WhatsApp group is not actively registered with AXYON.')
+    if (feature && !groupFeatureEnabled(row, feature)) throw new Error(`This group needs the *${feature}* feature enabled. Ask AXYON to configure its registration.`)
+    return row
+  }
+  async function isLiveGroupAdmin (sock, ctx) {
+    if (!String(ctx.jid).endsWith('@g.us') || typeof sock.groupMetadata !== 'function') return false
+    try {
+      const meta = await withTimeout(sock.groupMetadata(ctx.jid), GROUP_META_TIMEOUT_MS)
+      const digits = value => String(value || '').split('@')[0].replace(/\D/g, '')
+      const self = digits(ctx.userId)
+      const participant = (meta?.participants || []).find(p => digits(p.id || p.jid) === self)
+      return !!participant && (participant.admin === 'admin' || participant.admin === 'superadmin')
+    } catch { return false }
+  }
+  function roomModeMatch (room, mode) {
+    if (!room) return false
+    if (mode === 'guild') return String(room.mode_id).startsWith('guild_')
+    if (mode === 'duel') return room.mode_id === 'duel'
+    if (mode === 'abyss') return room.mode_id === 'abyss'
+    if (mode === 'multiplayer') return room.mode_id === 'dungeon' && room.participation === 'multiplayer'
+    return room.participation === 'solo'
+  }
+  async function createModeRoom (sock, m, ctx, mode, participation = null) {
+    const locked = await adventure.modeLock(mode)
+    if (locked.locked) throw new Error(`${modeLabel(mode)} is locked.${locked.reason ? ` Reason: ${locked.reason}` : ''}`)
+    const player = await store.player(ctx.userId)
+    if (!player) throw new Error(`Use *${ctx.prefix}arise* first.`)
+    const existing = await activeRoomFor(ctx)
+    if (existing) throw new Error(`You already have an open session in this chat: *${existing.name}* (\`${existing.room_key}\`). Use *${ctx.prefix}session* to inspect it.`)
+    let group = null
+    let modeId = 'dungeon'
+    let type = participation || (mode === 'multiplayer' ? 'multiplayer' : 'solo')
+    let capacity = 1
+    let name = modeLabel(mode)
+    let entryRequirements = { adventureMode: mode }
+    if (mode === 'solo') {
+      // Solo Chronicles deliberately uses the existing floor story engine.
+      return { solo: true }
+    }
+    if (mode === 'multiplayer') {
+      group = await registeredGroupFor(ctx, null)
+      if (!groupFeatureEnabled(group, 'dungeon') && !groupFeatureEnabled(group, 'combat')) throw new Error('The registered group needs the combat or dungeon feature enabled.')
+      modeId = 'dungeon'; type = 'multiplayer'; capacity = 3
+    } else if (mode === 'guild') {
+      group = await registeredGroupFor(ctx, 'dungeon')
+      const membership = await store.guildForUser(ctx.userId)
+      if (!membership) throw new Error('Join a guild before starting a Guild Campaign.')
+      if (String(membership.group_jid || '') !== String(ctx.jid)) throw new Error('The campaign must run inside your guild’s linked WhatsApp group.')
+      modeId = 'guild_1'; type = 'party'; capacity = 5
+      entryRequirements.guildId = Number(membership.id)
+      entryRequirements.invited = [ctx.userId]
+    } else if (mode === 'duel') {
+      group = await registeredGroupFor(ctx, 'duel')
+      if (group.registration_mode !== 'duel' && !(group.features || []).includes('duel')) throw new Error('Duel Chronicles require a registered Duel Group.')
+      modeId = 'duel'; type = 'multiplayer'; capacity = 2
+      entryRequirements.invited = [ctx.userId]
+    } else if (mode === 'abyss') {
+      if (type === 'party') {
+        group = await registeredGroupFor(ctx, 'dungeon')
+        capacity = 5
+        entryRequirements.invited = [ctx.userId]
+      } else if (type === 'multiplayer') {
+        group = await registeredGroupFor(ctx, null)
+        if (!groupFeatureEnabled(group, 'combat') && !groupFeatureEnabled(group, 'dungeon')) throw new Error('The registered group needs the combat or dungeon feature enabled.')
+        capacity = 3
+        entryRequirements.invited = [ctx.userId]
+      } else { type = 'solo'; capacity = 1 }
+      modeId = 'abyss'
+    }
+    const room = await store.createRoom({
+      name: `${name.toUpperCase()} — ${String(Date.now()).slice(-4)}`,
+      groupJid: ctx.jid, ownerId: ctx.userId, modeId, participation: type,
+      privacy: 'public', capacity,
+      entryRequirements
+    })
+    await store.log(ctx.userId, 'adventure_mode_enter', room.room_key, { mode, participation: type, group: ctx.jid })
+    return { solo: false, room, mode, group }
+  }
+  async function adventureDirectory (sock, m, ctx, args = []) {
+    const sub = String(args[0] || 'list').toLowerCase()
+    const valid = Object.keys(adventure.MODES)
+    if (sub === 'help') return axyon.send(sock, ctx.jid, m, [
+      W, '', '⚔️ *ADVENTURE MODE DIRECTORY*', '',
+      '`!mode list` · Available modes', '`!mode info <mode>` · Rules and participant limits',
+      '`!mode enter <mode> [party|multiplayer|solo]` · Open a session', '`!mode start <mode>` · Start a waiting session',
+      '`!mode status` · Current mode and lock status', '`!mode leave` · Leave the current session',
+      '`!mode save progress <mode>` · Save a session', '`!mode login <save-code>` · Restore a save',
+      '', '*Modes:* solo · multiplayer · guild · duel · abyss',
+      '', 'Solo Chapters continue to use the established `!floor` and `!choice` story system.'
+    ].join('\n'))
+    if (sub === 'list' || sub === 'modes') {
+      const locks = await adventure.getModeLocks()
+      return axyon.send(sock, ctx.jid, m, [W, '', '⚔️ *AVAILABLE ADVENTURES*', '', ...valid.map(id => {
+        const lock = locks.find(x => x.mode === id)
+        return `${lock?.locked ? '🔒' : '🟢'} *${modeLabel(id)}* — ${id}\n   ${adventure.MODES[id].maxPlayers} max participant(s)${lock?.reason ? ` · ${lock.reason}` : ''}`
+      }), '', `Details: *${ctx.prefix}mode info <mode>*`].join('\n'))
+    }
+    if (sub === 'info') {
+      const mode = adventure.cleanMode(args[1])
+      if (!mode) return axyon.send(sock, ctx.jid, m, `Choose one: ${valid.join(', ')}`)
+      const lock = await adventure.modeLock(mode)
+      const details = {
+        solo: 'One player. Uses the existing floor campaign and four-choice decision engine.',
+        multiplayer: 'A shared group room for 2–3 players. The existing room lifecycle controls entry and start.',
+        guild: 'A 2–5 member campaign squad in its registered guild group. Guild membership is verified.',
+        duel: 'A two-player room in a registered Duel Group. Existing direct duel challenges remain available.',
+        abyss: 'Advanced exploration room for Solo, Multiplayer or Party participation.'
+      }
+      return axyon.send(sock, ctx.jid, m, `${W}\n\n⚔️ *${modeLabel(mode).toUpperCase()}*\n\n${details[mode]}\n\nParticipants: *1–${adventure.MODES[mode].maxPlayers}*\nStatus: *${lock.locked ? 'LOCKED' : 'AVAILABLE'}*${lock.reason ? `\nReason: ${lock.reason}` : ''}`)
+    }
+    if (sub === 'progress' || sub === 'checkpoint') {
+      const active = await activeRoomFor(ctx)
+      if (active) return invokeLocal('session', sock, m, ctx, [sub], {})
+      return invokeLocal('solo', sock, m, ctx, [sub], {})
+    }
+    if (sub === 'status') {
+      const locks = await adventure.getModeLocks()
+      const active = await activeRoomFor(ctx)
+      return axyon.send(sock, ctx.jid, m, [W, '', '⌘ *ADVENTURE STATUS*', '', `Current session: ${active ? `*${active.name}* · ${active.status}` : 'None'}`, '', ...locks.map(x => `${x.locked ? '🔒' : '✅'} ${x.mode.toUpperCase()}${x.reason ? ` — ${x.reason}` : ''}`)].join('\n'))
+    }
+    if (sub === 'locks') {
+      const locks = await adventure.getModeLocks()
+      return axyon.send(sock, ctx.jid, m, [W, '', '🔐 *MODE LOCKS*', '', ...locks.map(x => `${x.locked ? '🔒 LOCKED' : '🔓 OPEN'} · *${x.mode.toUpperCase()}*${x.reason ? `\n   ${x.reason}` : ''}`)].join('\n'))
+    }
+    if (sub === 'save') {
+      const action = String(args[1] || 'progress').toLowerCase()
+      if (action === 'progress') return invokeLocal('save', sock, m, ctx, ['progress', args[2] || ''], {})
+      if (action === 'status' || action === 'code') return invokeLocal('save', sock, m, ctx, [action], {})
+      return axyon.send(sock, ctx.jid, m, `Usage: *${ctx.prefix}mode save progress <mode>|status|code*`)
+    }
+    if (sub === 'lock' && ['info', 'reason'].includes(String(args[1] || '').toLowerCase())) {
+      if (!ctx.auth.axyon && !ctx.auth.rhm) return axyon.send(sock, ctx.jid, m, '🛡️ Only AXYON or RHM can inspect or change mode locks.')
+      const action = String(args[1]).toLowerCase()
+      const mode = adventure.cleanMode(args[2])
+      if (!mode) return axyon.send(sock, ctx.jid, m, `Choose one: ${valid.join(', ')}`)
+      if (action === 'info') {
+        const lock = await adventure.modeLock(mode)
+        return axyon.send(sock, ctx.jid, m, `${W}\n\n🔐 *${mode.toUpperCase()} LOCK*\nStatus: *${lock.locked ? 'LOCKED' : 'OPEN'}*\nReason: ${lock.reason || 'None recorded'}\nChanged by: ${lock.changed_by || '—'}\nUpdated: ${lock.updated_at || '—'}`)
+      }
+      const reason = args.slice(3).join(' ').trim()
+      if (!reason) return axyon.send(sock, ctx.jid, m, `Usage: *${ctx.prefix}mode lock reason <mode> <reason>*`)
+      const row = await adventure.setModeLock(mode, true, reason, ctx.userId)
+      await store.log(ctx.userId, 'adventure_mode_lock_reason', mode, { reason })
+      return axyon.send(sock, ctx.jid, m, `🔒 *${mode.toUpperCase()} LOCK REASON UPDATED*\n${row.reason}`)
+    }
+    if (sub === 'lock' || sub === 'unlock') {
+      if (!ctx.auth.axyon && !ctx.auth.rhm) return axyon.send(sock, ctx.jid, m, '🛡️ Only AXYON or RHM can lock adventure modes.')
+      const mode = String(args[1] || '').toLowerCase()
+      const lockAll = mode === 'all'
+      const validModes = lockAll ? valid : [adventure.cleanMode(mode)].filter(Boolean)
+      if (!validModes.length) return axyon.send(sock, ctx.jid, m, `Usage: *${ctx.prefix}mode ${sub} <${valid.join('|')}|all> [reason]*`)
+      const reason = args.slice(2).join(' ')
+      const rows = []
+      for (const id of validModes) rows.push(await adventure.setModeLock(id, sub === 'lock', reason, ctx.userId))
+      await store.log(ctx.userId, `adventure_modes_${sub}`, mode, { reason, modes: validModes })
+      return axyon.send(sock, ctx.jid, m, `${W}\n\n${sub === 'lock' ? '🔒' : '🔓'} *MODES ${sub.toUpperCase()}ED*\n\n${rows.map(x => `• ${x.mode.toUpperCase()}${x.reason ? ` — ${x.reason}` : ''}`).join('\n')}`)
+    }
+    if (sub === 'lock-info') {
+      const mode = adventure.cleanMode(args[1]); if (!mode) return axyon.send(sock, ctx.jid, m, `Choose one: ${valid.join(', ')}`)
+      const lock = await adventure.modeLock(mode)
+      return axyon.send(sock, ctx.jid, m, `${W}\n\n*${mode.toUpperCase()}*\n${lock.locked ? '🔒 LOCKED' : '🔓 OPEN'}\nReason: ${lock.reason || 'None recorded'}\nChanged by: ${lock.changed_by || '—'}`)
+    }
+    if (sub === 'enter' || sub === 'start') {
+      const mode = adventure.cleanMode(args[1])
+      if (!mode) return axyon.send(sock, ctx.jid, m, `Usage: *${ctx.prefix}mode ${sub} <${valid.join('|')}>`)
+      const lock = await adventure.modeLock(mode)
+      if (lock.locked) return axyon.send(sock, ctx.jid, m, `🔒 *${mode.toUpperCase()}* is locked.${lock.reason ? `\n${lock.reason}` : ''}`)
+      if (mode === 'solo') {
+        if (sub === 'start' || sub === 'enter') {
+          const existingBattle = await store.getBattle(ctx.userId)
+          if (existingBattle?.mode === 'floor') return axyon.send(sock, ctx.jid, m, `You already have an active floor encounter. Continue with *${ctx.prefix}battle* or save with *${ctx.prefix}save progress solo*.`)
+          return invokeLocal('floor', sock, m, ctx, [String(args[2] || '1')], {})
+        }
+      }
+      // These two modes already have mature, separate lifecycle handlers.
+      // Route the directory facade into them instead of creating a duplicate room.
+      if (mode === 'multiplayer') return invokeLocal('party', sock, m, ctx, [sub === 'enter' ? 'create' : 'start'], {})
+      if (mode === 'guild') return invokeLocal('guild', sock, m, ctx, ['squad', sub === 'enter' ? 'create' : 'start'], {})
+      if (sub === 'start') {
+        const rooms = await store.roomsFor(ctx.jid)
+        const room = rooms.find(r => roomModeMatch(r, mode) && String(r.owner_id) === String(ctx.userId) && ['waiting', 'ready', 'paused'].includes(String(r.status)))
+        if (!room) return axyon.send(sock, ctx.jid, m, `No waiting ${modeLabel(mode)} session found. Enter it first with *${ctx.prefix}mode enter ${mode}*.`)
+        return invokeLocal('room', sock, m, ctx, ['start', room.room_key], {})
+      }
+      try {
+        const result = await createModeRoom(sock, m, ctx, mode, String(args[2] || '').toLowerCase() || null)
+        if (result.solo) return invokeLocal('floor', sock, m, ctx, [String(args[2] || '1')], {})
+        return axyon.send(sock, ctx.jid, m, [W, '', `🧭 *${modeLabel(mode).toUpperCase()} SESSION OPENED*`, '', `Session: *${result.room.name}*`, `Mode: *${mode}* · Type: *${result.room.participation}*`, `Players: *1/${result.room.capacity}*`, `Session key: \`${result.room.room_key}\``, '', `Join with *${ctx.prefix}room join ${result.room.room_key}*`, `Start with *${ctx.prefix}mode start ${mode}*`].join('\n'))
+      } catch (error) { return axyon.send(sock, ctx.jid, m, `❌ ${error.message}`) }
+    }
+    if (sub === 'leave') return invokeLocal('mode', sock, m, ctx, ['logout'], {})
+    if (sub === 'logout') return invokeLocal('logout', sock, m, ctx, [String(args[1] || '')], {})
+    if (sub === 'login') return invokeLocal('login', sock, m, ctx, args.slice(1), {})
+    return axyon.send(sock, ctx.jid, m, `Usage: *${ctx.prefix}mode list|info <mode>|enter <mode>|start <mode>|status|leave|login <code>|lock|unlock|locks*`)
+  }
+
+  cmd('mode', 'dungeon', '{p}mode <list|info|enter|start|status|leave|login|logout|lock|unlock|locks>', 'Adventure mode directory and session controls; separate from the existing !modes admin configuration.', async (s, m, ctx, args) => adventureDirectory(s, m, ctx, args))
+
+  cmd('solo', 'dungeon', '{p}solo <start|continue|story|progress|chapter|floor|explore|investigate|mission|objectives|map|inventory|rewards|checkpoint|save|logout|login>', 'Solo Chronicles commands mapped to the existing floor-story engine.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'help').toLowerCase()
+    if (sub === 'start' || sub === 'floor') return invokeLocal('floor', s, m, ctx, [String(args[1] || '1')], {})
+    if (sub === 'continue') return invokeLocal('battle', s, m, ctx, [], {})
+    if (sub === 'story') return invokeLocal('story', s, m, ctx, ['recap'], {})
+    if (sub === 'progress' || sub === 'chapter' || sub === 'checkpoint') {
+      const b = storyBattle(await store.getBattle(ctx.userId)); const state = await store.floorStory(ctx.userId)
+      if (!b) return axyon.send(s, ctx.jid, m, `No active Solo floor. Start with *${ctx.prefix}solo start*.`)
+      const ch = floorStory.chapterFor(b.ordinal)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n📖 *SOLO CHRONICLES*\n\nChapter: *${b.ordinal} — ${ch.title}*\nFloor: *${b.ordinal}*\nLocation: *${b.location || ch.place}*\nObjectives: *${floorStory.objectives(state).length}*\nCheckpoint: *${b.ordinal}*`)
+    }
+    if (sub === 'explore') return invokeLocal('explore', s, m, ctx, args.slice(1), {})
+    if (sub === 'investigate') return invokeLocal('investigate', s, m, ctx, args.slice(1), {})
+    if (sub === 'mission' || sub === 'objectives') return invokeLocal('mission', s, m, ctx, args.slice(1), {})
+    if (sub === 'map') return invokeLocal('map', s, m, ctx, [], {})
+    if (sub === 'inventory') return invokeLocal('inventory', s, m, ctx, [], {})
+    if (sub === 'rewards') return axyon.send(s, ctx.jid, m, `Use *${ctx.prefix}quest* to view NPC quest rewards. Completed rewards are claimed with *${ctx.prefix}quest claim <id>*.`)
+    if (sub === 'save') {
+      const saveAction = String(args[1] || 'progress').toLowerCase()
+      return saveAction === 'status' ? invokeLocal('save', s, m, ctx, ['status'], {})
+        : invokeLocal('save', s, m, ctx, ['progress', 'solo'], {})
+    }
+    if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['solo'], {})
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, [String(args[1] || '')], {})
+    return axyon.send(s, ctx.jid, m, `⌘ *SOLO CHRONICLES*\n\n${ctx.prefix}solo start [floor]\n${ctx.prefix}solo continue\n${ctx.prefix}solo story\n${ctx.prefix}solo explore\n${ctx.prefix}solo investigate <target>\n${ctx.prefix}solo mission\n${ctx.prefix}solo save\n${ctx.prefix}solo logout`)
+  })
+
+  cmd('abyss', 'dungeon', '{p}abyss <start|continue|story|progress|chapter|floor|explore|investigate|events|discoveries|threats|loot|rewards|checkpoint|save|logout|login>', 'Abyssal Frontier exploration sessions.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'help').toLowerCase()
+    if (sub === 'start' || sub === 'continue') {
+      if (sub === 'continue') {
+        const room = await activeRoomFor(ctx)
+        if (room?.mode_id === 'abyss') return axyon.send(s, ctx.jid, m, `${W}\n\n🌌 *ABYSSAL FRONTIER*\n\n${room.name}\nStatus: *${room.status}*\nUse *${ctx.prefix}session resume* when paused or *${ctx.prefix}room view ${room.room_key}* for details.`)
+      }
+      return adventureDirectory(s, m, ctx, ['enter', 'abyss', String(args[1] || 'solo')])
+    }
+    const abyssRoom = await activeRoomFor(ctx)
+    if (abyssRoom?.mode_id === 'abyss' && ['story', 'progress', 'chapter', 'floor', 'checkpoint', 'explore', 'investigate', 'mission', 'objectives', 'map', 'discoveries', 'events', 'characters', 'location'].includes(sub)) {
+      return invokeLocal('session', s, m, ctx, [sub === 'events' ? 'history' : sub, ...args.slice(1)], {})
+    }
+    if (sub === 'story' || sub === 'progress' || sub === 'chapter' || sub === 'floor' || sub === 'checkpoint') return invokeLocal('story', s, m, ctx, ['recap'], {})
+    if (sub === 'explore') return invokeLocal('explore', s, m, ctx, [], {})
+    if (sub === 'investigate') return invokeLocal('investigate', s, m, ctx, args.slice(1), {})
+    if (sub === 'discoveries') return invokeLocal('discoveries', s, m, ctx, [], {})
+    if (sub === 'events') return axyon.send(s, ctx.jid, m, 'Abyss event entries unlock from the active exploration engine. No additional event table is configured yet.')
+    if (sub === 'threats') return invokeLocal('fight', s, m, ctx, ['enemies'], {})
+    if (sub === 'loot' || sub === 'rewards') return invokeLocal('inventory', s, m, ctx, [], {})
+    if (sub === 'save') {
+      const saveAction = String(args[1] || 'progress').toLowerCase()
+      return saveAction === 'status' ? invokeLocal('save', s, m, ctx, ['status'], {})
+        : invokeLocal('save', s, m, ctx, ['progress', 'abyss'], {})
+    }
+    if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['abyss'], {})
+    if (sub === 'login') return invokeLocal('login', s, m, ctx, [String(args[1] || '')], {})
+    return axyon.send(s, ctx.jid, m, `⌘ *ABYSSAL FRONTIER*\n\n${ctx.prefix}abyss start [solo|multiplayer|party]\n${ctx.prefix}abyss explore\n${ctx.prefix}abyss investigate <target>\n${ctx.prefix}abyss discoveries\n${ctx.prefix}abyss save`)
+  })
+
+  cmd('save', 'dungeon', '{p}save [progress|code|status|list|delete] ...', 'Save and manage adventure checkpoints.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'help').toLowerCase()
+    if (sub === 'progress' || sub === 'code') {
+      const requested = sub === 'progress' ? args[1] : null
+      try {
+        const row = await createAdventureSave(ctx, requested)
+        await store.log(ctx.userId, 'adventure_save', row.code, { mode: row.mode })
+        return axyon.send(s, ctx.jid, m, `${W}\n\n💾 *ADVENTURE SAVED*\n\nMode: *${row.mode.toUpperCase()}*\nSave Code: \`${row.code}\`\nParticipants: *${(row.participants || []).length}*\n\nKeep this code private. It identifies the session; player identity is still checked on login.`)
+      } catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+    }
+    if (sub === 'status') {
+      const row = await adventure.latestSave(ctx.userId)
+      return axyon.send(s, ctx.jid, m, row ? `${W}\n\n💾 *LATEST SAVE*\n${row.mode.toUpperCase()} · \`${row.code}\`\nUpdated: ${row.updated_at}` : 'No saved adventure found for your account.')
+    }
+    if (sub === 'history') return invokeLocal('save', s, m, ctx, ['list'], {})
+    if (sub === 'checkpoint') {
+      try {
+        const row = await createAdventureSave(ctx, args[1] || null)
+        await store.log(ctx.userId, 'adventure_checkpoint_save', row.code, { mode: row.mode })
+        return axyon.send(s, ctx.jid, m, `${W}\n\n📍 *CHECKPOINT SAVED*\n\n${row.mode.toUpperCase()} · \`${row.code}\``)
+      } catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+    }
+    if (sub === 'info') {
+      const code = String(args[1] || '').trim().toUpperCase()
+      if (!code) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}save info <code>*`)
+      const row = await adventure.getSave(code)
+      const participants = Array.isArray(row?.participants) ? row.participants.map(String) : []
+      if (!row || !participants.includes(String(ctx.userId))) return axyon.send(s, ctx.jid, m, 'Save not found, or you are not listed as a participant.')
+      return axyon.send(s, ctx.jid, m, `${W}\n\n💾 *SAVE INFORMATION*\n\nMode: *${row.mode.toUpperCase()}*\nCode: \`${row.code}\`\nStatus: *${row.status}*\nParticipants: *${participants.length}*\nCreated: ${row.created_at}\nUpdated: ${row.updated_at}`)
+    }
+    if (sub === 'list') {
+      const rows = await adventure.listSaves(ctx.userId)
+      return axyon.send(s, ctx.jid, m, rows.length ? [W, '', '💾 *YOUR SAVED ADVENTURES*', '', ...rows.map(r => `• *${r.mode.toUpperCase()}* — \`${r.code}\` · ${r.updated_at}`)].join('\n') : 'No saved adventures yet.')
+    }
+    if (sub === 'delete') {
+      const code = String(args[1] || '').toUpperCase()
+      if (!code || String(args[2] || '').toLowerCase() !== 'confirm') return axyon.send(s, ctx.jid, m, `Confirm deletion with *${ctx.prefix}save delete <code> confirm*. This only deletes your own save record.`)
+      const ok = await adventure.deleteSave(code, ctx.userId)
+      return axyon.send(s, ctx.jid, m, ok ? `🗑️ Save \`${code}\` deleted.` : 'Save not found or it does not belong to you.')
+    }
+    return axyon.send(s, ctx.jid, m, `💾 *SAVE SYSTEM*\n\n${ctx.prefix}save progress [mode]\n${ctx.prefix}save checkpoint [mode]\n${ctx.prefix}save status\n${ctx.prefix}save list|history\n${ctx.prefix}save info <code>\n${ctx.prefix}save delete <code> confirm`)
+  })
+
+  cmd('login', 'dungeon', '{p}login [mode] <save-code>', 'Restore an adventure session from a save code.', async (s, m, ctx, args) => {
+    const modeArg = adventure.cleanMode(args[0])
+    const code = modeArg ? args[1] : args[0]
+    if (!code) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}login <save-code>* or *${ctx.prefix}login <mode> <save-code>*`)
+    try {
+      const result = await restoreAdventureSave(ctx, code)
+      if (modeArg && result.mode !== modeArg) throw new Error(`That save belongs to ${result.mode}, not ${modeArg}.`)
+      await store.log(ctx.userId, 'adventure_login', result.code, { mode: result.mode })
+      if (result.restored) return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *${modeLabel(result.mode).toUpperCase()} RESTORED*\n\nSave: \`${result.code}\`\nYour player, active floor battle and story journal have been restored.`)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *${modeLabel(result.mode).toUpperCase()} SESSION FOUND*\n\nSave: \`${result.code}\`\nRoom: *${result.room.name}*\nStatus: *${result.room.status}*\nUse *${ctx.prefix}session resume* when the required participants have returned.`)
+    } catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+  })
+
+  cmd('logout', 'dungeon', '{p}logout [solo|multiplayer|guild|duel|abyss]', 'Save and exit or pause the current adventure session.', async (s, m, ctx, args) => {
+    const mode = adventure.cleanMode(args[0])
+    try {
+      const row = await createAdventureSave(ctx, mode)
+      if (row.mode === 'solo') await store.setBattle(ctx.userId, null)
+      else if (row.room_key) {
+        const room = await store.room(row.room_key)
+        if (room && ['active', 'ready', 'waiting'].includes(String(room.status))) await store.updateRoom(room.room_key, { status: 'paused' })
+      }
+      await store.log(ctx.userId, 'adventure_logout', row.code, { mode: row.mode })
+      return axyon.send(s, ctx.jid, m, `${W}\n\n💤 *${row.mode.toUpperCase()} SAVED & PAUSED*\n\nSave Code: \`${row.code}\`\nYour progress is preserved. Resume with *${ctx.prefix}login ${row.code}*.`)
+    } catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+  })
+
+  async function sessionStoryAction (room, action, value, ctx) {
+    if (!room || !['active', 'paused'].includes(String(room.status))) {
+      return { message: 'This shared story is available after the room session has started.' }
+    }
+    let message = ''
+    let failed = false
+    const currentRoom = await store.mutateRoomState(room.room_key, state => {
+      const campaign = state.campaignStory && typeof state.campaignStory === 'object'
+        ? state.campaignStory
+        : { ordinal: 1, storyState: floorStory.cleanState(), sceneOpen: false, lastChoice: null }
+      campaign.ordinal = Math.max(1, Math.floor(Number(campaign.ordinal) || 1))
+      campaign.storyState = floorStory.cleanState(campaign.storyState || {})
+
+      if (action === 'story' || action === 'continue') {
+        const scene = floorStory.begin(campaign.ordinal, campaign.storyState)
+        campaign.sceneOpen = true
+        message = scene.text
+      } else if (action === 'choose' || action === 'choice') {
+        if (!campaign.sceneOpen) { failed = true; message = `There is no pending shared story decision. Use *${ctx.prefix}session story* first.` }
+        else {
+          const picked = floorStory.choose(campaign.ordinal, value, campaign.storyState)
+          if (!picked.ok) { failed = true; message = picked.message }
+          else {
+            campaign.storyState = picked.state
+            campaign.lastChoice = { chapter: picked.chapter.title, label: picked.choice.label, by: ctx.userId, at: new Date().toISOString() }
+            campaign.ordinal += 1
+            campaign.sceneOpen = false
+            message = `${picked.message}\n\nThe shared decision is recorded. Continue with *${ctx.prefix}session story* when the party is ready.`
+          }
+        }
+      } else if (action === 'explore') {
+        if (!campaign.sceneOpen) { failed = true; message = `Open the current chapter with *${ctx.prefix}session story* first.` }
+        else { const r = floorStory.explore(campaign.ordinal, campaign.storyState); campaign.storyState = r.state; message = r.message }
+      } else if (action === 'investigate') {
+        if (!campaign.sceneOpen) { failed = true; message = `Open the current chapter with *${ctx.prefix}session story* first.` }
+        else { const r = floorStory.investigate(campaign.ordinal, value, campaign.storyState); campaign.storyState = r.state; message = r.message }
+      } else if (action === 'talk' || action === 'interact') {
+        if (!campaign.sceneOpen) { failed = true; message = `Open the current chapter with *${ctx.prefix}session story* first.` }
+        else { const r = floorStory.talk(campaign.ordinal, value, campaign.storyState); if (!r.ok) failed = true; else campaign.storyState = r.state; message = r.message }
+      } else if (action === 'recap' || action === 'history') {
+        const rows = campaign.storyState.history || []
+        message = rows.length ? [W, '', '📖 *SHARED STORY RECAP*', '', ...rows.slice(-10).map((r, i) => `${i + 1}. Chapter ${r.floor} — *${r.chapter}*\n   Decision: ${r.choice}\n   By: ${r.by || 'party'}`)].join('\n\n') : 'The shared story journal is empty. Begin with *!session story*.'
+      } else if (action === 'objectives' || action === 'mission') {
+        const rows = floorStory.objectives(campaign.storyState)
+        message = rows.length ? [W, '', '🎯 *SHARED OBJECTIVES*', '', ...rows.map(q => `${q.status === 'complete' ? '✅' : q.status === 'claimed' ? '🏅' : '▫️'} *${q.name}*\n${q.objective}`)].join('\n\n') : 'No shared NPC side quests have been unlocked yet.'
+      } else if (action === 'map' || action === 'location' || action === 'chapter' || action === 'floor' || action === 'progress') {
+        const chapter = floorStory.chapterFor(campaign.ordinal)
+        message = `${W}\n\n🗺️ *${chapter.title.toUpperCase()}*\n\nLocation: *${chapter.place}*\nNPC: *${chapter.npc}*\nChapter: *${campaign.ordinal}*\nDecision: *${campaign.sceneOpen ? 'Awaiting party choice' : 'Not opened'}*\nDiscoveries: *${campaign.storyState.discoveries.length}*\nObjectives: *${floorStory.objectives(campaign.storyState).length}*`
+      } else if (action === 'discoveries') {
+        const rows = [...campaign.storyState.discoveries, ...campaign.storyState.investigations]
+        message = rows.length ? [W, '', '🔎 *SHARED DISCOVERIES*', '', ...rows.slice(-25).map(x => `• ${x}`)].join('\n') : 'No shared discoveries have been recorded yet.'
+      } else if (action === 'characters') {
+        const chapter = floorStory.chapterFor(campaign.ordinal)
+        message = `👥 *CHAPTER CHARACTERS*\n\n• ${chapter.npc}\n\nRecorded conversations: *${campaign.storyState.npcContacts.length}*`
+      } else if (action === 'skip') {
+        failed = true; message = campaign.sceneOpen ? 'This chapter has a required decision. Choose one of the four options; it cannot be skipped.' : 'There is no open shared scene to skip.'
+      } else {
+        failed = true; message = `Unknown shared story action. Use *${ctx.prefix}session story|choose|explore|investigate|talk|recap|objectives|map*.`
+      }
+      state.campaignStory = campaign
+      return state
+    })
+    if (!currentRoom) return { message: 'The session room no longer exists.' }
+    if (!failed) await store.log(ctx.userId, `session_story_${action}`, room.room_key, { ordinal: currentRoom.state?.campaignStory?.ordinal })
+    return { message }
+  }
+
+  cmd('session', 'dungeon', '{p}session <status|members|save|leave|resume|code|story|choose|explore|investigate|talk|recap|objectives|map>', 'Inspect the active room session and its shared campaign story.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'status').toLowerCase()
+    const room = await activeRoomFor(ctx)
+    if (!room) return axyon.send(s, ctx.jid, m, `No active room session in this chat. Enter with *${ctx.prefix}mode enter <mode>*.`)
+    if (['story', 'continue', 'choose', 'choice', 'explore', 'investigate', 'talk', 'interact', 'recap', 'history', 'objectives', 'mission', 'map', 'location', 'chapter', 'floor', 'progress', 'discoveries', 'characters', 'skip'].includes(sub)) {
+      const result = await sessionStoryAction(room, sub, args.slice(1).join(' '), ctx)
+      return axyon.send(s, ctx.jid, m, result.message)
+    }
+    if (sub === 'members') return axyon.send(s, ctx.jid, m, [W, '', '👥 *SESSION MEMBERS*', '', ...(room.participants || []).map((p, i) => `${i + 1}. ${p.userId}${p.role === 'leader' ? ' 👑' : ''}`), '', `Capacity: ${room.participants.length}/${room.capacity}`].join('\n'))
+    if (sub === 'save' || sub === 'code') return invokeLocal('save', s, m, ctx, ['progress', adventureModeForRoom(room)], {})
+    if (sub === 'leave') return invokeLocal('room', s, m, ctx, ['leave', room.room_key], {})
+    if (sub === 'resume') {
+      if (!['paused', 'waiting', 'ready'].includes(String(room.status))) return axyon.send(s, ctx.jid, m, `This session is ${room.status} and cannot be resumed.`)
+      if (String(room.owner_id) !== String(ctx.userId) && !ctx.auth.axyon) return axyon.send(s, ctx.jid, m, 'Only the session leader can resume this session.')
+      const updated = await store.updateRoom(room.room_key, { status: 'active' })
+      await store.log(ctx.userId, 'adventure_resume', room.room_key)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n▶️ *SESSION RESUMED*\n\n${updated.name}`)
+    }
+    return axyon.send(s, ctx.jid, m, `${W}\n\n🧭 *SESSION STATUS*\n\n${room.name}\nMode: *${adventureModeForRoom(room)}* · ${room.mode_id}\nStatus: *${room.status}*\nPlayers: *${room.participants.length}/${room.capacity}*\nKey: \`${room.room_key}\`\n\nUse *${ctx.prefix}session members* or *${ctx.prefix}session save*.`)
+  })
+
+  /* Shared story actions reuse the current persisted floor state. They do not
+   * advance or bypass required four-choice decisions. */
+  async function currentFloorContext (ctx) {
+    const battle = storyBattle(await store.getBattle(ctx.userId))
+    if (!battle) return null
+    return { battle, state: await store.floorStory(ctx.userId) }
+  }
+  cmd('continue', 'dungeon', '{p}continue', 'Continue the current story scene or battle.', async (s, m, ctx) => invokeLocal('battle', s, m, ctx, [], {}))
+  cmd('explore', 'dungeon', '{p}explore', 'Explore the active floor location and record discoveries.', async (s, m, ctx) => {
+    const current = await currentFloorContext(ctx)
+    if (!current) return axyon.send(s, ctx.jid, m, `Enter a floor with *${ctx.prefix}floor* first.`)
+    const r = floorStory.explore(current.battle.ordinal, current.state)
+    await store.saveFloorStory(ctx.userId, r.state)
+    return axyon.send(s, ctx.jid, m, r.message)
+  })
+  cmd('investigate', 'dungeon', '{p}investigate [target]', 'Investigate an object or location in the active floor.', async (s, m, ctx, args) => {
+    const current = await currentFloorContext(ctx)
+    if (!current) return axyon.send(s, ctx.jid, m, `Enter a floor with *${ctx.prefix}floor* first.`)
+    const r = floorStory.investigate(current.battle.ordinal, args.join(' '), current.state)
+    await store.saveFloorStory(ctx.userId, r.state)
+    return axyon.send(s, ctx.jid, m, r.message)
+  })
+  cmd('talk', 'dungeon', '{p}talk <character>', 'Speak to the current chapter NPC.', async (s, m, ctx, args) => {
+    const current = await currentFloorContext(ctx)
+    if (!current) return axyon.send(s, ctx.jid, m, `Enter a floor with *${ctx.prefix}floor* first.`)
+    const r = floorStory.talk(current.battle.ordinal, args.join(' '), current.state)
+    if (r.ok) await store.saveFloorStory(ctx.userId, r.state)
+    return axyon.send(s, ctx.jid, m, r.message)
+  })
+  cmd('interact', 'dungeon', '{p}interact <target>', 'Interact with a known NPC or object in the current chapter.', async (s, m, ctx, args) => invokeLocal('talk', s, m, ctx, args, {}))
+  cmd('mission', 'dungeon', '{p}mission [list|status|abandon <id>|complete]', 'Manage unlocked NPC side quests without bypassing their objectives.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'list').toLowerCase()
+    const state = await store.floorStory(ctx.userId)
+    if (sub === 'abandon') {
+      const r = floorStory.abandonQuest(state, args[1])
+      if (r.ok) await store.saveFloorStory(ctx.userId, r.state)
+      return axyon.send(s, ctx.jid, m, r.ok ? `Quest *${r.name}* abandoned.` : r.message)
+    }
+    if (sub === 'complete') return axyon.send(s, ctx.jid, m, `Quest objectives are completed by the story engine after the associated encounter. Use *${ctx.prefix}quest claim <id>* only when its status is complete.`)
+    if (sub === 'status') {
+      const rows = floorStory.objectives(state)
+      return axyon.send(s, ctx.jid, m, rows.length ? rows.map(q => `${q.name}: *${q.status}*`).join('\n') : 'No unlocked missions yet.')
+    }
+    return axyon.send(s, ctx.jid, m, floorStory.questList(state))
+  })
+  cmd('objectives', 'dungeon', '{p}objectives', 'Display active floor and NPC quest objectives.', async (s, m, ctx) => invokeLocal('mission', s, m, ctx, ['status'], {}))
+  cmd('map', 'dungeon', '{p}map', 'Display the current chapter location and recorded discoveries.', async (s, m, ctx) => {
+    const current = await currentFloorContext(ctx)
+    if (!current) return axyon.send(s, ctx.jid, m, 'No active floor map. Enter a floor first.')
+    const chapter = floorStory.chapterFor(current.battle.ordinal)
+    return axyon.send(s, ctx.jid, m, `🗺️ *${chapter.place.toUpperCase()}*\n\nCurrent chapter: *${chapter.title}*\nArea: ${current.state.discoveries?.includes(`floor_${current.battle.ordinal}_zone`) ? 'Explored' : 'Unexplored'}\nClues: *${(current.state.investigations || []).filter(x => x.startsWith(`floor_${current.battle.ordinal}:`)).length}*`)
+  })
+  cmd('location', 'dungeon', '{p}location', 'Display the current chapter location.', async (s, m, ctx) => {
+    const current = await currentFloorContext(ctx)
+    if (!current) return axyon.send(s, ctx.jid, m, 'You are not inside a floor location.')
+    const ch = floorStory.chapterFor(current.battle.ordinal)
+    return axyon.send(s, ctx.jid, m, `⌖ *${current.battle.location || ch.place}*\n${ch.title}`)
+  })
+  cmd('discoveries', 'dungeon', '{p}discoveries', 'View recorded discoveries and investigated clues.', async (s, m, ctx) => {
+    const state = await store.floorStory(ctx.userId)
+    const rows = [...(state.discoveries || []), ...(state.investigations || [])]
+    return axyon.send(s, ctx.jid, m, rows.length ? [W, '', '🔎 *DISCOVERIES*', '', ...rows.slice(-30).map(x => `• ${x}`)].join('\n') : 'No discoveries recorded yet. Use *!explore* or *!investigate*.')
+  })
+  cmd('treasure', 'dungeon', '{p}treasure', 'Inspect treasure discoveries recorded by the current floor.', async (s, m, ctx) => axyon.send(s, ctx.jid, m, 'No dedicated treasure tables are configured yet. Keep exploring and inspect the discoveries journal with *!discoveries*.'))
+  cmd('checkpoint', 'dungeon', '{p}checkpoint', 'Display the current story checkpoint.', async (s, m, ctx) => invokeLocal('solo', s, m, ctx, ['checkpoint'], {}))
+
+  /* Combat directory aliases are adapters to existing mechanics, not new
+   * damage systems. */
+  cmd('move', 'battle', '{p}move <name>', 'Alias for the existing class-move engine.', async (s, m, ctx, args) => invokeLocal('classmove', s, m, ctx, args, {}))
+  cmd('weapon', 'battle', '{p}weapon <name>', 'Inspect currently supported weapon equipment.', async (s, m, ctx) => axyon.send(s, ctx.jid, m, 'Weapon-specific combat actions are not yet wired to a separate weapon engine. Your existing equipped battle cards and class moves remain available.'))
+  cmd('target', 'battle', '{p}target <enemy>', 'Select the current encounter target.', async (s, m, ctx) => invokeLocal('fight', s, m, ctx, ['info'], {}))
+  cmd('targets', 'battle', '{p}targets', 'List targets in the current encounter.', async (s, m, ctx) => invokeLocal('fight', s, m, ctx, ['enemies'], {}))
+  cmd('hp', 'battle', '{p}hp', 'Display current HP.', async (s, m, ctx) => {
+    const p = await store.player(ctx.userId); return axyon.send(s, ctx.jid, m, `❤️ HP: *${p.hp}/${p.maxHp}*`)
+  })
+  cmd('energy', 'battle', '{p}energy', 'Display current Power Energy.', async (s, m, ctx) => {
+    const p = await store.player(ctx.userId); return axyon.send(s, ctx.jid, m, `⚡ Power Energy: *${p.powerEnergy}/${p.maxPowerEnergy}*`)
+  })
+  cmd('cooldowns', 'battle', '{p}cooldowns', 'Display remaining class-move and card ability uses.', async (s, m, ctx) => {
+    const b = await store.getBattle(ctx.userId)
+    const moves = await store.classMovesUsedToday(ctx.userId).catch(() => 0)
+    const cards = typeof store.cardAbilityUsage === 'function'
+      ? await store.cardAbilityUsage(ctx.userId).catch(() => null)
+      : null
+    return axyon.send(s, ctx.jid, m, `⏱️ *COMBAT AVAILABILITY*\n\nClass moves used today: *${moves}*\nBattle: *${b ? 'Active' : 'No active battle'}*${cards ? `\nCard abilities: ${JSON.stringify(cards)}` : ''}`)
+  })
+  cmd('fightstatus', 'battle', '{p}fightstatus', 'Inspect the current fight without starting a new one.', async (s, m, ctx) => invokeLocal('fight', s, m, ctx, ['status'], {}), { hidden: true })
+
+  if (!axyon.COMMANDS.some(c => c.name === 'boss')) {
+    cmd('boss', 'battle', '{p}boss [inspect|status|rewards]', 'Inspect the current boss encounter without starting a new fight.', async (s, m, ctx, args) => {
+      const sub = String(args[0] || 'status').toLowerCase()
+      const battle = await store.getBattle(ctx.userId)
+      const enemy = battle?.enemy
+      if (!battle || !enemy || !enemy.boss) return axyon.send(s, ctx.jid, m, 'No active boss encounter. Boss encounters are opened by the campaign or an eligible boss stage.')
+      if (sub === 'rewards') return axyon.send(s, ctx.jid, m, 'Boss rewards are granted by the existing encounter completion flow; they cannot be claimed before victory.')
+      const player = await store.player(ctx.userId)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n👑 *BOSS ${sub === 'inspect' ? 'INSPECTION' : 'STATUS'}*\n\n*${enemy.name || 'Unknown Guardian'}*\nHP: *${battle.enemyHp ?? enemy.hp}*\nLocation: *${battle.location || 'Unknown'}*\nTurn: *${battle.turn || 1}*\nYour HP: *${player?.hp ?? battle.playerHp}*`)
+    })
+  }
+  if (!axyon.COMMANDS.some(c => c.name === 'rewards')) {
+    cmd('rewards', 'dungeon', '{p}rewards', 'Review earned NPC quest rewards and their claim status.', async (s, m, ctx) => {
+      const state = await store.floorStory(ctx.userId)
+      const rows = floorStory.objectives(state)
+      if (!rows.length) return axyon.send(s, ctx.jid, m, 'No NPC quest rewards have been unlocked yet. Continue the floor story and speak with its characters.')
+      const lines = rows.map(q => `${q.status === 'claimed' ? '🏅' : q.status === 'complete' ? '✅' : '▫️'} *${q.name}* — ${q.status}${q.status === 'complete' ? `\nClaim with *${ctx.prefix}quest claim ${q.id}*` : ''}`)
+      return axyon.send(s, ctx.jid, m, [W, '', '🎁 *ADVENTURE REWARDS*', '', ...lines].join('\n\n'))
+    })
+  }
+
+  /* Group collaboration system, adapted from the provided standalone package
+   * to AXYON group registration, live WhatsApp admin checks and PostgreSQL. */
+  cmd('collab', 'social', '{p}collab <list|create|submit|info|approve|start|pause|resume|end|group|join|leave|event|mission|reward|stats|leaderboard>', 'Create cross-group collaborations with verified groups, missions, events and shared rewards.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'help').toLowerCase()
+    const isOwner = !!ctx.auth.axyon
+    const groupJid = String(ctx.jid || '')
+    const inGroup = groupJid.endsWith('@g.us')
+    const ensureCollabGroup = async () => {
+      const g = await registeredGroupFor(ctx, 'collab')
+      return g
+    }
+    const format = c => `*#${c.id} ${c.title}* — ${String(c.status).toUpperCase()}\n${c.description || 'No description.'}\nGroups: ${(c.groups || []).length} · Participants: ${c.participant_count || 0}`
+    try {
+      if (sub === 'list') {
+        const rows = await collab.list(args[1] || null)
+        return axyon.send(s, ctx.jid, m, rows.length ? [W, '', '🤝 *AXYON COLLABORATIONS*', '', ...rows.map(c => `*#${c.id} ${c.title}* · ${c.status.toUpperCase()}\n   Groups: ${c.group_count} · Participants: ${c.participant_count}`)].join('\n') : 'No collaborations found.')
+      }
+      if (sub === 'create') {
+        const [title, description] = args.slice(1).join(' ').split('|').map(x => String(x || '').trim())
+        if (!title) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}collab create <title> | <description>*`)
+        const row = await collab.create({ title, description, creatorId: ctx.userId })
+        await store.log(ctx.userId, 'collab_create', String(row.id), { title })
+        return axyon.send(s, ctx.jid, m, `${W}\n\n🤝 *COLLABORATION CREATED*\n\n${format({ ...row, groups: [] })}\n\nAttach verified groups with *${ctx.prefix}collab group add ${row.id}* then submit with *${ctx.prefix}collab submit ${row.id}*.`)
+      }
+      if (sub === 'info') {
+        const c = await collab.get(args[1]); if (!c) return axyon.send(s, ctx.jid, m, 'Collaboration not found.')
+        return axyon.send(s, ctx.jid, m, [W, '', '🤝 *COLLABORATION DETAILS*', '', format(c), '', '*GROUPS*', ...(c.groups || []).map(g => `• ${g.group_name} — ${g.group_jid}`), '', '*UPCOMING EVENTS*', ...(c.events || []).map(e => `• ${e.title} — ${e.starts_at}`), '', '*MISSIONS*', ...(c.missions || []).map(q => `• #${q.id} ${q.title} — ${q.points} pts`), '', '*REWARDS*', ...(c.rewards || []).map(r => `• #${r.id} ${r.name} — ${r.points_required} pts`)].join('\n'))
+      }
+      if (sub === 'submit') {
+        const row = await collab.setStatus(args[1], ctx.userId, 'pending', isOwner)
+        return axyon.send(s, ctx.jid, m, `📨 *SUBMITTED FOR REVIEW*\n\n#${row.id} ${row.title}`)
+      }
+      if (sub === 'approve') {
+        if (!isOwner) return axyon.send(s, ctx.jid, m, '🛡️ Only AXYON can approve a collaboration.')
+        const row = await collab.setStatus(args[1], ctx.userId, 'approved', true)
+        return axyon.send(s, ctx.jid, m, `✅ *COLLABORATION APPROVED*\n\n#${row.id} ${row.title}`)
+      }
+      if (['start', 'pause', 'resume', 'end', 'cancel'].includes(sub)) {
+        const next = ({ start: 'active', pause: 'paused', resume: 'active', end: 'completed', cancel: 'cancelled' })[sub]
+        if (sub === 'start' || sub === 'resume') {
+          const candidate = await collab.get(args[1])
+          if (!candidate) throw new Error('Collaboration not found.')
+          for (const linked of candidate.groups || []) {
+            const live = await store.group(linked.group_jid)
+            if (!live || String(live.status || '').toUpperCase() !== 'ACTIVE' || live.enabled === false || !(live.features || []).includes('collab')) {
+              throw new Error(`Group ${linked.group_name || linked.group_jid} is no longer actively registered with the collab feature.`)
+            }
+          }
+        }
+        const row = await collab.setStatus(args[1], ctx.userId, next, isOwner)
+        await store.log(ctx.userId, `collab_${sub}`, String(row.id))
+        return axyon.send(s, ctx.jid, m, `🤝 *${row.title}* is now *${row.status.toUpperCase()}*.`)
+      }
+      if (sub === 'group') {
+        const action = String(args[1] || '').toLowerCase(); const id = args[2]
+        if (!id) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}collab group add|remove <collab-id>*`)
+        if (action === 'add') {
+          if (!inGroup) throw new Error('Run this inside the registered WhatsApp group you want to attach.')
+          const registered = await ensureCollabGroup()
+          const verifiedAdmin = await isLiveGroupAdmin(s, ctx)
+          if (!verifiedAdmin) throw new Error('Your WhatsApp group-admin status could not be verified live.')
+          const row = await collab.addGroup(id, { groupJid, name: registered.name || '', actorId: ctx.userId, verifiedAdmin, isOwner })
+          return axyon.send(s, ctx.jid, m, `✅ *GROUP LINKED*\n\n${row.group_name}\nThis group is now attached to collaboration #${id}.`)
+        }
+        if (action === 'remove') {
+          if (!inGroup) throw new Error('Run this inside the group being removed.')
+          await ensureCollabGroup()
+          const verifiedAdmin = await isLiveGroupAdmin(s, ctx)
+          if (!verifiedAdmin) throw new Error('Your WhatsApp group-admin status could not be verified live.')
+          const row = await collab.removeGroup(id, groupJid, ctx.userId, isOwner)
+          return axyon.send(s, ctx.jid, m, `Group *${row.group_name}* removed from collaboration #${id}.`)
+        }
+      }
+      if (sub === 'join') {
+        if (!inGroup) throw new Error('Join collaboration from one of its participating registered groups.')
+        await ensureCollabGroup()
+        const row = await collab.join(args[1], { groupJid, userId: ctx.userId, displayName: ctx.name })
+        return axyon.send(s, ctx.jid, m, `✅ You joined collaboration #${args[1]}. Your points are now tracked across this campaign.`)
+      }
+      if (sub === 'leave') {
+        if (!inGroup) throw new Error('Leave from the group where you joined the collaboration.')
+        const row = await collab.leave(args[1], groupJid, ctx.userId)
+        return axyon.send(s, ctx.jid, m, `You left collaboration #${args[1]}.`)
+      }
+      if (sub === 'event') {
+        const action = String(args[1] || '').toLowerCase(); const id = args[2]
+        if (action === 'list') {
+          const c = await collab.get(id); if (!c) throw new Error('Collaboration not found.')
+          return axyon.send(s, ctx.jid, m, c.events.length ? c.events.map(e => `#${e.id} *${e.title}*\n${e.description}\n${e.starts_at} → ${e.ends_at}`).join('\n\n') : 'No events yet.')
+        }
+        if (action === 'add') {
+          const [title, description, startsAt, endsAt] = args.slice(3).join(' ').split('|').map(x => String(x || '').trim())
+          const e = await collab.addEvent(id, { title, description, startsAt, endsAt }, ctx.userId, isOwner)
+          return axyon.send(s, ctx.jid, m, `📅 Event *${e.title}* added to collaboration #${id}.`)
+        }
+      }
+      if (sub === 'mission') {
+        const action = String(args[1] || '').toLowerCase(); const id = args[2]
+        if (action === 'list') {
+          const c = await collab.get(id); if (!c) throw new Error('Collaboration not found.')
+          return axyon.send(s, ctx.jid, m, c.missions.length ? c.missions.map(q => `#${q.id} *${q.title}* — ${q.points} points\n${q.description}`).join('\n\n') : 'No missions yet.')
+        }
+        if (action === 'add') {
+          const [title, description, points] = args.slice(3).join(' ').split('|').map(x => String(x || '').trim())
+          const q = await collab.addMission(id, { title, description, points }, ctx.userId, isOwner)
+          return axyon.send(s, ctx.jid, m, `📜 Mission *${q.title}* added (#${q.id}).`)
+        }
+        if (action === 'submit') {
+          if (!inGroup) throw new Error('Submit missions from a participating group.')
+          const row = await collab.requestMission(id, groupJid, ctx.userId)
+          return axyon.send(s, ctx.jid, m, `📨 Mission submission #${id} is pending review.`)
+        }
+        if (action === 'review') {
+          if (!inGroup) throw new Error('Review submissions inside the participating group.')
+          await ensureCollabGroup()
+          const campaign = await collab.get(id)
+          if (!campaign) throw new Error('Collaboration not found.')
+          const campaignCreator = String(campaign.creator_id) === String(ctx.userId)
+          if (!isOwner && !ctx.auth.rhm && !campaignCreator) throw new Error('Only the collaboration creator or AXYON/RHM may review submissions.')
+          const verdict = String(args[args.length - 1] || '').toLowerCase()
+          const targetArg = args.slice(3, -1).join(' ').trim()
+          const target = mentionedId(content) || norm(targetArg)
+          if (!target || !['approve', 'reject'].includes(verdict)) throw new Error(`Usage: ${ctx.prefix}collab mission review <mission-id> @player approve|reject`)
+          const row = await collab.reviewMission(id, groupJid, target, ctx.userId, verdict === 'approve', isOwner || ctx.auth.rhm)
+          return axyon.send(s, ctx.jid, m, `Mission submission ${row.status}. ${row.points ? `+${row.points} collaboration points.` : ''}`)
+        }
+      }
+      if (sub === 'reward') {
+        const action = String(args[1] || '').toLowerCase(); const id = args[2]
+        if (action === 'list') {
+          const c = await collab.get(id); if (!c) throw new Error('Collaboration not found.')
+          return axyon.send(s, ctx.jid, m, c.rewards.length ? c.rewards.map(r => `#${r.id} *${r.name}* — ${r.points_required} points · stock ${r.quantity}`).join('\n') : 'No rewards yet.')
+        }
+        if (action === 'add') {
+          const [name, description, pointsRequired, quantity] = args.slice(3).join(' ').split('|').map(x => String(x || '').trim())
+          const r = await collab.addReward(id, { name, description, pointsRequired, quantity }, ctx.userId, isOwner)
+          return axyon.send(s, ctx.jid, m, `🎁 Reward *${r.name}* added (#${r.id}).`)
+        }
+        if (action === 'claim') {
+          if (!inGroup) throw new Error('Claim a collaboration reward from a participating group.')
+          const r = await collab.claimReward(id, groupJid, ctx.userId)
+          return axyon.send(s, ctx.jid, m, `🏅 *REWARD CLAIMED*\n\n${r.name}`)
+        }
+      }
+      if (sub === 'stats') {
+        const st = await collab.stats(args[1])
+        return axyon.send(s, ctx.jid, m, `📊 *COLLABORATION STATISTICS*\n\nGroups: ${st.groups}\nParticipants: ${st.participants}\nPoints: ${fmt(st.points)}\nEvents: ${st.events}\nMissions: ${st.missions}\nApproved missions: ${st.missionCompletions}\nRewards: ${st.rewards}`)
+      }
+      if (sub === 'leaderboard') {
+        const rows = await collab.leaderboard(args[1])
+        return axyon.send(s, ctx.jid, m, rows.length ? [W, '', '🏆 *COLLABORATION LEADERBOARD*', '', ...rows.map((r, i) => `${i + 1}. *${r.display_name}* — ${r.points} pts`)].join('\n') : 'No participants yet.')
+      }
+    } catch (error) { return axyon.send(s, ctx.jid, m, `❌ ${error.message}`) }
+    return axyon.send(s, ctx.jid, m, [W, '', '🤝 *AXYON COLLABORATION SYSTEM*', '', `*${ctx.prefix}collab list*`, `*${ctx.prefix}collab create <title> | <description>*`, `*${ctx.prefix}collab group add <id>*`, `*${ctx.prefix}collab submit <id>*`, `*${ctx.prefix}collab approve <id>*`, `*${ctx.prefix}collab start <id>*`, `*${ctx.prefix}collab join <id>*`, `*${ctx.prefix}collab mission add|list|submit|review ...*`, `*${ctx.prefix}collab event add|list ...*`, `*${ctx.prefix}collab reward add|list|claim ...*`, `*${ctx.prefix}collab stats <id>*`, `*${ctx.prefix}collab leaderboard <id>*`, '', 'Groups must be registered with the `collab` feature; group linking also verifies live WhatsApp admin status.'].join('\n'))
+  })
+
+  /* ------------------------------------------------------- progression views */
+  const progressViews = {
+    progression: ['level', 'rank', 'grade', 'class', 'xp', 'zen'],
+    level: ['level'], rank: ['rank'], grade: ['grade'], stats: ['stats'], xp: ['xp'], coins: ['zen']
+  }
+  for (const name of Object.keys(progressViews)) {
+    if (axyon.COMMANDS.some(c => c.name === name)) continue
+    cmd(name, 'core', `{p}${name}`, `Display ${name} information from your existing profile.`, async (s, m, ctx) => {
+      const p = await store.player(ctx.userId)
+      if (!p) return axyon.send(s, ctx.jid, m, `Use *${ctx.prefix}arise* first.`)
+      const rows = []
+      if (name === 'progression' || name === 'stats') rows.push(`Level: *${p.level}* · Rank: *${p.rank}* · Grade: *${p.grade}*`, `HP: *${p.hp}/${p.maxHp}* · Power Energy: *${p.powerEnergy}/${p.maxPowerEnergy}*`, `Attack: *${p.atk}* · Defence: *${p.def}*`, `XP: *${fmt(p.xp)}* · Zen: *${fmt(p.zen)}*`)
+      else if (name === 'level') rows.push(`Level: *${p.level}* · XP: *${fmt(p.xp)}*`)
+      else if (name === 'rank') rows.push(`Rank: *${p.rank}*`)
+      else if (name === 'grade') rows.push(`Grade: *${p.grade}*`)
+      else if (name === 'xp') rows.push(`XP: *${fmt(p.xp)}*`)
+      else if (name === 'coins') rows.push(`Coins: *${fmt(p.coins)}*`)
+      else rows.push(`Zen: *${fmt(p.zen)}*`)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n📈 *${name.toUpperCase()}*\n\n${rows.join('\n')}`)
+    })
+  }
+
+  if (!axyon.COMMANDS.some(c => c.name === 'moves')) {
+    cmd('moves', 'battle', '{p}moves', 'Display your existing class and its available moves.', async (s, m, ctx) => invokeLocal('class', s, m, ctx, [], {}))
+  }
+  if (!axyon.COMMANDS.some(c => c.name === 'equipment')) {
+    cmd('equipment', 'cards', '{p}equipment', 'Display your existing equipped card slots.', async (s, m, ctx) => invokeLocal('card', s, m, ctx, ['slots'], {}))
+  }
+  if (!axyon.COMMANDS.some(c => c.name === 'appearance')) {
+    cmd('appearance', 'cards', '{p}appearance', 'Display your currently selected cosmetic appearance.', async (s, m, ctx) => invokeLocal('skin', s, m, ctx, ['current'], {}))
+  }
+
+  cmd('skin', 'cards', '{p}skin <list|current|equip|unequip|inventory|view>', 'Equip and inspect unlocked cosmetic skins.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || 'list').toLowerCase()
+    if (sub === 'list' || sub === 'inventory' || sub === 'unlocked') {
+      const rows = await adventure.skins(ctx.userId)
+      return axyon.send(s, ctx.jid, m, [W, '', '🎭 *SKIN INVENTORY*', '', '• default (always available)', ...(rows.map(x => `• ${x.skin_id}${x.equipped ? ' ✅ EQUIPPED' : ''}`))].join('\n'))
+    }
+    if (sub === 'current') {
+      const rows = await adventure.skins(ctx.userId); const current = rows.find(x => x.equipped)
+      return axyon.send(s, ctx.jid, m, `Current appearance: *${current?.skin_id || 'default'}*`)
+    }
+    if (sub === 'equip') {
+      const result = await adventure.equipSkin(ctx.userId, args[1])
+      return axyon.send(s, ctx.jid, m, result.ok ? `✅ Equipped skin *${result.skin}*.` : `❌ ${result.message}`)
+    }
+    if (sub === 'unequip' || sub === 'reset') {
+      const result = await adventure.equipSkin(ctx.userId, 'default')
+      return axyon.send(s, ctx.jid, m, result.ok ? '✅ Returned to the default appearance.' : 'Could not reset appearance.')
+    }
+    if (sub === 'view' || sub === 'inspect' || sub === 'preview') return axyon.send(s, ctx.jid, m, 'Skin previews are not connected to the character artwork renderer yet.')
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}skin list|current|equip <owned-skin>|unequip*`)
   })
 
   /* --------------------------------------------------------------- dispatch */

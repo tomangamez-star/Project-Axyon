@@ -13,7 +13,7 @@ const aiCustom = require('../src/card-renderers/ai-custom-card')
 test('card collection, management and drop commands remain registered', () => {
   const router = createCommands({ axyon: createAxyon({}) })
   for (const name of ['claim', 'spawncard', 'card', 'cards', 'cardadmin']) assert.equal(router.BY_NAME.has(name), true)
-  assert.equal(router.BY_NAME.has('mode'), false)
+  assert.equal(router.BY_NAME.has('mode'), true)
 })
 
 test('automatic card spawn interval remains six hours and new drops expire after 30 days by default', () => {

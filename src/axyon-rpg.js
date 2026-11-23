@@ -531,8 +531,6 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function cardDetail (sock, m, ctx, collectionNo) {
     let c = await store.card(ctx.userId, Number(collectionNo))
     if (!c) return send(sock, ctx.jid, m, `No card #${collectionNo} exists in your collection.`)
-    // Upgrade inherited card art lazily, using its original stored artwork URL.
-    // If the old source is unavailable, preserve and show the existing image.
     // Re-render only AI Custom cards from their original artwork URL. Old Gen
     // is intentionally left untouched; both archive previews and manual card
     // opens now use the exact same stored rendered image bytes.

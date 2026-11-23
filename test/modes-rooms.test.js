@@ -73,7 +73,7 @@ test('modes: guild slots and collaboration are real, enabled modes', () => {
 test('modes: menu order matches the spec', () => {
   const reg = modes.createModeRegistry()
   const ids = reg.ordered().map(m => m.id)
-  assert.deepStrictEqual(ids.slice(0, 10), modes.MENU_ORDER)
+  assert.deepStrictEqual(ids.slice(0, modes.MENU_ORDER.length), modes.MENU_ORDER)
 })
 
 test('modes: an unknown mode is refused, not silently allowed', () => {
