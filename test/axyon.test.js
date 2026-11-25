@@ -17,7 +17,8 @@ function freshPlayer (over = {}) {
   return {
     userId: '1', name: 'Hunter', rank: 'E', level: 1, grade: 1, xp: 0, zen: 0, coins: 0,
     hp: 100, maxHp: 100, atk: 6, def: 4, spd: 5, powerEnergy: 50, maxPowerEnergy: 50,
-    stage: 1, wins: 0, losses: 0, zenToday: 0, xpToday: 0, dayKey: '', class: 'Fighter',
+    stage: 1, wins: 0, losses: 0, battlesSinceRest: 0, zenToday: 0, xpToday: 0,
+    trainingXpToday: 0, trainingUsesToday: 0, dayKey: '', class: 'Fighter',
     classMovesUsed: 0, healUses: 0, cardUses: 0, lastDaily: null, ...over
   }
 }
@@ -30,6 +31,15 @@ test('global purge command and resetall alias are registered', () => {
   assert.ok(c.BY_NAME.has('purge'))
   assert.ok(c.BY_NAME.has('resetall'))
   assert.equal(c.BY_NAME.get('resetall'), c.BY_NAME.get('purge'))
+})
+
+
+test('the next combat patch commands are registered', () => {
+  const a = createAxyon({})
+  const c = createCommands({ axyon: a })
+  for (const name of ['heavy', 'battleinfo', 'rest', 'train', 'power', 'convert']) {
+    assert.ok(c.BY_NAME.has(name), `${name} should be registered`)
+  }
 })
 
 test('default prefix is ! and registration is !arise', () => {
@@ -79,6 +89,13 @@ test('xp accumulates and levels up', () => {
   assert.strictEqual(r.player.level, 2)
   assert.strictEqual(r.player.xp, 0)
   assert.strictEqual(r.player.zen, 100)
+})
+
+test('progression can award Coins alongside XP and Zen', () => {
+  const r = rpg.applyProgress(freshPlayer(), { xp: 10, zen: 20, coins: 250 })
+  assert.strictEqual(r.player.xp, 10)
+  assert.strictEqual(r.player.zen, 20)
+  assert.strictEqual(r.player.coins, 250)
 })
 
 test('grade-up at level 10 grants +15 HP and +4 ATK', () => {
@@ -141,13 +158,17 @@ test('daily counters roll over on a new day', () => {
   const rolled = store.rollDay({ dayKey: '2000-01-01', zenToday: 500, xpToday: 500, classMovesUsed: 3, cardUses: 3 })
   assert.strictEqual(rolled.zenToday, 0)
   assert.strictEqual(rolled.xpToday, 0)
+  assert.strictEqual(rolled.trainingXpToday, 0)
+  assert.strictEqual(rolled.trainingUsesToday, 0)
   assert.strictEqual(rolled.classMovesUsed, 0)
   assert.strictEqual(rolled.cardUses, 0)
 })
 
 test('daily counters survive within the same day', () => {
-  const same = store.rollDay({ dayKey: store.dayKey(), zenToday: 500 })
+  const same = store.rollDay({ dayKey: store.dayKey(), zenToday: 500, trainingXpToday: 10, trainingUsesToday: 2 })
   assert.strictEqual(same.zenToday, 500)
+  assert.strictEqual(same.trainingXpToday, 10)
+  assert.strictEqual(same.trainingUsesToday, 2)
 })
 
 /* ------------------------------------------------------- command registry */

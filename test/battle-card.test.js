@@ -1,11 +1,7 @@
 'use strict'
 /*
- * THE LIVE BATTLE CARD IS RENDERED THROUGH THE DISPLAY LAYER.
- *
- * The display module is only worth having if the real battle output uses it.
- * These assert that the card a player actually receives carries the spec's
- * 20-segment HP/PE bars, the exact values beside them, and the usage tracker —
- * and that a damaged combatant never shows a full bar.
+ * The live battle card is intentionally compact. The former detailed report
+ * remains available through !battleinfo and is tested separately below.
  */
 const test = require('node:test')
 const assert = require('node:assert')
@@ -15,14 +11,13 @@ const T = require('../src/theme')
 
 const a = createAxyon({})
 
-function card (b, p) {
-  return a.battleCard(b, p, '')
-}
+function card (b, p) { return a.battleCard(b, p, '') }
+function info (b, p) { return a.battleInfoCard(b, p, '') }
 
 const player = {
-  name: 'Montai', rank: 'Rookie', level: 3, grade: 1, class: 'Swordsman',
+  name: 'Montai', rank: 'E', level: 3, grade: 1, class: 'Swordsman',
   hp: 100, maxHp: 550, powerEnergy: 50, maxPowerEnergy: 145,
-  atk: 44, def: 18, spd: 10, classMovesUsed: 1
+  xp: 0, atk: 44, def: 18, spd: 10, classMovesUsed: 1
 }
 
 const battle = {
@@ -30,78 +25,78 @@ const battle = {
   enemy: { name: 'Shadow Beast', hp: 460, atk: 55, def: 20, xp: 120, zen: 90 }
 }
 
-test('battle card: shows monster and player HP with compact XP', () => {
+test('battle HUD: uses the profile HP, Energy and XP bar style', () => {
   const text = card(battle, player)
-  assert.ok(text.includes('520 / 550 HP'), `expected player HP, got:\n${text}`)
-  assert.ok(text.includes('415 / 460 HP'), `expected monster HP, got:\n${text}`)
-  assert.ok(text.includes('0 / 250 XP'), `expected compact XP, got:\n${text}`)
+  assert.ok(text.includes('❤️ HP  [▰'))
+  assert.ok(text.includes('⚡ Energy  [▰'))
+  assert.ok(text.includes('💠 XP  [▱'))
+  assert.ok(text.includes('520/550'))
+  assert.ok(text.includes('415/460'))
+  assert.ok(text.includes('0/250'))
 })
 
-test('battle card: omits PE bars and raw combat stats', () => {
+test('battle HUD: shows monster, hunter vitals and boss status without filler', () => {
   const text = card(battle, player)
-  assert.ok(!/POWER ENERGY|\bPE\b/i.test(text), 'PE must not clutter the battle screen')
-  assert.ok(!/ATTACK:|DEFENCE:|\bATK\b|\bDEF\b/i.test(text), 'raw attack and defence must be hidden')
+  assert.ok(text.includes('*MONSTER*'))
+  assert.ok(text.includes('SHADOW BEAST'))
+  assert.ok(text.includes('*VITALS*'))
+  assert.ok(text.includes('Level *3*'))
+  assert.ok(!text.includes('The arena where this encounter is unfolding'))
+  assert.ok(!text.includes('A hostile presence stands in your way'))
+  assert.ok(!/ATTACK:|DEFENCE:|\bATK\b|\bDEF\b/i.test(text))
+  const boss = card({ ...battle, enemy: { ...battle.enemy, boss: true } }, player)
+  assert.ok(boss.includes('*BOSS*'))
 })
 
-test('battle card: the enemy is shown as a monster, not as a player', () => {
-  const text = card(battle, player)
-  assert.ok(text.includes(T.font('MONSTER')), 'the enemy must be labelled MONSTER')
-  assert.ok(!text.includes('EQUIPPED CARD'), 'a monster must not be given a player card')
+test('battle HUD: keeps equipped cards and all current action commands visible', () => {
+  const equippedBattle = {
+    ...battle,
+    equippedCards: [{ equipped_slot: 1, name: 'Makima', ability: 'Control Chain', ability_damage: 13 }]
+  }
+  const text = card(equippedBattle, player)
+  assert.ok(text.includes('Makima'))
+  assert.ok(text.includes('Control Chain'))
+  assert.ok(text.includes('!attack') && text.includes('!heavy') && text.includes('!heal'))
+  assert.ok(text.includes('!guard') && text.includes('!defend'))
+  assert.ok(text.includes('!ability') && text.includes('!power') && text.includes('!class'))
+  assert.ok(text.includes('!battleinfo') && text.includes('!retreat'))
+  assert.ok(text.includes('Retreats do not count towards !rest.'))
 })
 
-test('battle card: hides permanent usage trackers and shows command actions', () => {
-  const text = card(battle, player)
-  assert.ok(!/ABILITY & USAGE TRACKER|CLASS MOVES|SELF-HEALING/i.test(text))
-  assert.ok(text.includes('!attack') && text.includes('!heal') && text.includes('!defend'))
-  assert.ok(!text.includes('BATTLE ACTIVITY'), 'empty activity should not clutter the opening battle card')
-  assert.ok(!text.includes('Damage taken: 0') && !text.includes('Damage blocked: 0'))
-})
-
-
-test('battle card: separates sections and shows the real location, HP bars and equipped cards', () => {
+test('detailed battle info: retains location, equipped card detail and activity counters', () => {
   const equippedBattle = {
     ...battle,
     location: 'Sunken Citadel · Dungeon Hall',
     equippedCards: [{
-      equipped_slot: 1,
-      name: 'Makima',
-      ability: 'Control Chain',
-      ability_damage: 13,
-      damage: 7,
-      expires_at: null
-    }]
+      equipped_slot: 1, name: 'Makima', ability: 'Control Chain', ability_damage: 13,
+      damage: 7, expires_at: null
+    }],
+    damageTaken: 24,
+    damageBlocked: 8
   }
-  const text = card(equippedBattle, player)
+  const text = info(equippedBattle, player)
   assert.ok(text.includes('Sunken Citadel · Dungeon Hall'))
   assert.ok(text.includes('Makima'))
   assert.ok(text.includes('Control Chain'))
-  assert.ok(text.includes('13'))
-  assert.ok(text.includes('████'))
-  assert.ok(text.includes('━━━━━━━━━━━━━━━━━━━━'))
+  assert.ok(text.includes('Damage taken: *24*'))
+  assert.ok(text.includes('Damage blocked: *8*'))
+  assert.ok(text.includes(T.font('BATTLE ACTIVITY')))
   assert.ok(text.includes(T.font('EQUIPPED CARDS')))
 })
 
-
-test('battle card: shows only activity counters that have actually occurred', () => {
-  const text = card({ ...battle, damageTaken: 24, damageBlocked: 8 }, player)
-  assert.ok(text.includes(T.font('BATTLE ACTIVITY')))
-  assert.ok(text.includes('Damage taken: *24*'))
-  assert.ok(text.includes('Damage blocked: *8*'))
-
-  const partial = card({ ...battle, damageTaken: 12, damageBlocked: 0 }, player)
+test('detailed battle info: hides zero activity counters and includes command details', () => {
+  const text = info(battle, player)
+  assert.ok(text.includes(T.font('MONSTER')))
+  assert.ok(text.includes('!attack') && text.includes('!heal') && text.includes('!defend'))
+  assert.ok(!text.includes('Damage taken: 0') && !text.includes('Damage blocked: 0'))
+  const partial = info({ ...battle, damageTaken: 12, damageBlocked: 0 }, player)
   assert.ok(partial.includes('Damage taken: *12*'))
   assert.ok(!partial.includes('Damage blocked:'))
 })
 
-test('battle card: a boss enemy is labelled BOSS', () => {
-  const text = card({ ...battle, enemy: { ...battle.enemy, boss: true } }, player)
-  assert.ok(text.toUpperCase().includes('BOSS'), 'a boss must be labelled BOSS')
-})
-
-test('battle card: a legacy class shows no invented move names', () => {
+test('detailed battle info: legacy classes render without invented move names', () => {
   const legacy = { ...player, class: 'Fighter' }
-  const text = card(battle, legacy)
-  /* It must render, and must not fabricate a move list for an unconfigured class. */
+  const text = info(battle, legacy)
   assert.ok(text.includes('520 / 550 HP'))
   assert.strictEqual(typeof text, 'string')
 })
