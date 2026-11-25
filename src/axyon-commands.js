@@ -26,7 +26,7 @@ const collab = require('./axyon-collab')
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
 const { norm, isOwner } = require('./access')
-const { canonicalUserId, displayName, mentionedId, resolveMentionedId } = require('./identity')
+const { displayName, mentionedId, resolveMentionedId, resolveMessageUserId } = require('./identity')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -230,15 +230,19 @@ Reason: ${lock.reason}` : ''}`)
   cmd('battle', 'battle', '{p}battle', 'Resume an active battle.', async (s, m, ctx) => {
     const b = await store.getBattle(ctx.userId)
     const p = await store.player(ctx.userId)
-    if (!b) return axyon.send(s, ctx.jid, m, `\u2694\ufe0f No active battle. Use *${ctx.prefix}stages*.`)
+    if (!b) return axyon.battleInfo(s, m, ctx)
     b.equippedCards = await store.equippedCards(ctx.userId)
     if (b.storyPending) return axyon.send(s, ctx.jid, m, floorStory.begin(b.ordinal, await store.floorStory(ctx.userId)).text)
     return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), [], true)
   }, { hidden: true })
   cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
+  cmd('heavy', 'battle', '{p}heavy', 'A stronger strike that costs 15 Power Energy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heavy'))
+  cmd('battleinfo', 'battle', '{p}battleinfo', 'Show the full detailed report for your current battle or duel.', async (s, m, ctx) => axyon.battleInfo(s, m, ctx))
+  cmd('rest', 'battle', '{p}rest', 'Restore full HP after two completed battles. Retreats do not count.', async (s, m, ctx) => axyon.rest(s, m, ctx))
+  cmd('train', 'battle', '{p}train <atk|def|spd>', 'Spend Coins to increase a combat stat and gain a small amount of capped XP.', async (s, m, ctx, args) => axyon.train(s, m, ctx, args[0]))
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('defend', 'battle', '{p}defend', 'Alias for guard.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
-  cmd('heal', 'battle', '{p}heal', 'Recover 25% HP. 5 uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
+  cmd('heal', 'battle', '{p}heal', 'Recover 10 HP. Limited uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
   cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
     /*
      * `!class` is BOTH the class sheet and the in-battle move command.
@@ -250,8 +254,9 @@ Reason: ${lock.reason}` : ''}`)
      * default move, which is the old behaviour.
      */
     const b = await store.getBattle(ctx.userId)
+    const duel = await store.activeDuelForUser(ctx.userId, ctx.jid).catch(() => null)
     const moveName = args && args.length ? args.join(' ') : null
-    if (b || moveName) return axyon.battleAct(s, m, ctx, 'class', 1, moveName)
+    if (b || duel || moveName) return axyon.battleAct(s, m, ctx, 'class', 1, moveName)
     return axyon.classSheet(s, m, ctx)
   })
   cmd('classmove', 'battle', '{p}classmove <move>', 'Use a named class move in battle.', async (s, m, ctx, args) => {
@@ -260,7 +265,18 @@ Reason: ${lock.reason}` : ''}`)
   }, { hidden: true })
   cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
   cmd('ability', 'battle', '{p}ability', 'Use your equipped card ability in battle.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
-  cmd('retreat', 'battle', '{p}retreat', 'Leave the fight with no rewards.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
+  cmd('power', 'battle', '{p}power [owned power]', 'View purchased hunter powers or use one in battle.', async (s, m, ctx, args) => {
+    if (args && args.length) return axyon.battleAct(s, m, ctx, 'power', 1, args.join(' '))
+    const rows = await store.inventory(ctx.userId)
+    const owned = rows.map(row => ({ ...row, entry: items.get(row.key) })).filter(row => row.entry?.kind === 'ability')
+    if (!owned.length) return axyon.send(s, ctx.jid, m, `✨ *HUNTER POWERS*\n\nYou have no purchased powers yet. Browse *${ctx.prefix}shop abilities*.`)
+    return axyon.send(s, ctx.jid, m, [
+      `${W}`, '', '✨ *UNLOCKED HUNTER POWERS*', '',
+      ...owned.map(row => `${row.entry.icon} *${row.entry.name}*\n${row.entry.desc}\nUse: *${ctx.prefix}power ${row.key}*`),
+      '', 'Card abilities remain under `!ability`.'
+    ].join('\n'))
+  })
+  cmd('retreat', 'battle', '{p}retreat', 'Leave the encounter. Retreats give no rewards and do not count towards rest.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
 
   /* --------------------------------------------------------------- dungeon */
 
@@ -1039,7 +1055,15 @@ Accept with *${ctx.prefix}duel accept*.`)
 
   /* --------------------------------------------------------------- economy */
 
-  cmd('zen', 'economy', '{p}zen', 'Your Zen holdings and daily allowance.', async (s, m, ctx) => axyon.zenWallet(s, m, ctx))
+  cmd('zen', 'economy', '{p}zen', 'Your Zen and Coin holdings.', async (s, m, ctx) => axyon.zenWallet(s, m, ctx))
+  cmd('convert', 'economy', '{p}convert <coins>', 'Convert Coins into Zen at 1,000 Coins for 100 Zen.', async (s, m, ctx, args) => {
+    const amount = parseNum(String(args[0] || '').toLowerCase() === 'coins' ? args[1] : args[0])
+    if (amount === null || amount <= 0 || amount % 10 !== 0) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}convert <coins>*\nAmount must be a positive multiple of 10.\nRate: *1,000 Coins = 100 Zen*.`)
+    const result = await store.convertCoinsToZen(ctx.userId, amount)
+    if (!result.ok) return axyon.send(s, ctx.jid, m, result.reason === 'coins' ? `💎 You have *${fmt(result.balance)} Coins*, not enough for that conversion.` : 'That conversion could not be completed.')
+    await store.log(ctx.userId, 'coin_conversion', String(amount), { zen: result.zen })
+    return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *CONVERSION COMPLETE*\n\n💎 -${fmt(result.coins)} Coins\n💠 +${fmt(result.zen)} Zen\n\nNew balance: *${fmt(result.player.coins)} Coins* · *${fmt(result.player.zen)} Zen*`)
+  })
   cmd('daily', 'economy', '{p}daily', 'Claim Zen and restore Power Energy.', async (s, m, ctx) => axyon.daily(s, m, ctx))
   cmd('economy', 'economy', '{p}economy <xp|zen|view> [value]', 'View or set daily XP and Zen limits (AXYON only).', async (s, m, ctx, args) => {
     const sub = String(args[0] || 'view').toLowerCase()
@@ -1049,9 +1073,13 @@ Accept with *${ctx.prefix}duel accept*.`)
       return axyon.send(s, ctx.jid, m, [
         `${W}`, '', '\ud83e\ude99 *ECONOMY*', '',
         `Daily XP limit: *${s2.xpDailyLimit}*`,
-        `Daily Zen limit: *${s2.zenDailyLimit}*`, '',
+        `Daily Zen limit: *${s2.zenDailyLimit}*`,
+        `Training cap: *5 sessions / 25 XP per day*`, '',
         `Your XP today: *${p?.xpToday ?? 0}*`,
-        `Your Zen today: *${p?.zenToday ?? 0}*`
+        `Training today: *${p?.trainingUsesToday ?? 0}/5*`,
+        `Training XP today: *${p?.trainingXpToday ?? 0}/25*`,
+        `Your Zen today: *${p?.zenToday ?? 0}*`,
+        `Your Coins: *${fmt(p?.coins ?? 0)}*`
       ].join('\n'))
     }
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*\n\nOnly AXYON can change the economy limits.')
@@ -2350,7 +2378,7 @@ Start with *${ctx.prefix}guild squad start*.`)
       return [
         `${e.icon} ${T.b(e.name)} \u00d7 ${T.m(r.qty)}`,
         `   ${T.i(e.desc)}`,
-        `   ${T.m(`${ctx.prefix}use ${e.key}`)}`
+        `   ${T.m(`${ctx.prefix}${e.kind === 'ability' ? 'power' : 'use'} ${e.key}`)}`
       ].join('\n')
     })
     return axyon.send(s, ctx.jid, m, [
@@ -2378,6 +2406,7 @@ Start with *${ctx.prefix}guild squad start*.`)
     const p = await store.player(ctx.userId)
     if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
     const battle = await store.getBattle(ctx.userId)
+    if (entry.kind === 'ability') return axyon.battleAct(s, m, ctx, 'power', 1, entry.key)
 
     const r = items.apply(entry, battle, p)
     if (!r.ok) return axyon.send(s, ctx.jid, m, `\u274c ${r.note}`)
@@ -2394,6 +2423,7 @@ Start with *${ctx.prefix}guild squad start*.`)
       if (r.battle.playerHp <= 0) {
         await store.setBattle(ctx.userId, null)
         p.losses += 1
+        p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
         p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
         await store.savePlayer(p)
         await store.log(ctx.userId, 'item_use', entry.key, { died: true })
@@ -3186,7 +3216,10 @@ Start with *${ctx.prefix}guild squad start*.`)
   }
 
   async function buildContext (sock, m, content) {
-    const userId = canonicalUserId(m.key)
+    // Resolve LID-only WhatsApp identities to their phone-number player key.
+    // canonicalUserId() is synchronous and can return a LID in newer groups,
+    // which made an already-registered opponent look unregistered.
+    const userId = await resolveMessageUserId(sock, m)
     const jid = m.key.remoteJid
     const settings = await store.settings()
     let group = null

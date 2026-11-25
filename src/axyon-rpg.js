@@ -15,6 +15,7 @@ const greetings = require('./greetings')
 const T = require('./theme')
 const music = require('./music')
 const classes = require('./axyon-classes')
+const items = require('./axyon-items')
 const floorStory = require('./floor-story')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
@@ -60,6 +61,12 @@ const MODES = {
  * percentage, so the five uses are worth the same at every level.
  */
 const SELF_HEAL_HP = 10
+const TRAINING_COST = 250
+const TRAINING_XP_PER_USE = 5
+const TRAINING_XP_DAILY_CAP = 25
+const TRAINING_USES_DAILY_CAP = 5
+const HEAVY_ATTACK_ENERGY = 15
+const HEAVY_ATTACK_MULTIPLIER = 1.65
 
 const rnd = (n) => Math.floor(Math.random() * n)
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
@@ -214,7 +221,7 @@ function profileCard (p, extra = {}) {
  * Heavy frame, because a fight should not look like a profile. Enemy on top,
  * hunter below, both with monospace bars, then the remaining uses.
  */
-function battleCard (b, p, note = '') {
+function battleInfoCard (b, p, note = '') {
   const e = b.enemy || {}
   const xpNeed = store.xpNeed(p.level)
   const playerName = String(p.name || 'Hunter')
@@ -298,15 +305,17 @@ function battleCard (b, p, note = '') {
       'Choose the action that best fits the situation. AXYON will update the battle record after every turn.',
       [
         '`!attack`  ·  Strike the enemy',
+        '`!heavy`  ·  Stronger strike; costs Power Energy',
         '`!heal`  ·  Restore health',
         '`!guard` / `!defend`  ·  Brace for impact',
         '`!ability`  ·  Use an equipped card ability',
+        '`!power`  ·  Use a purchased hunter power',
         '`!class`  ·  Use a class move',
         '`!card`  ·  View or manage your cards'
       ]),
     '',
-    '`!retreat`  ·  Leave this encounter',
-    T.i('The battle continues until you win, fall, or retreat.')
+    '`!retreat`  ·  Leave this encounter (no rest credit)',
+    T.i('The battle continues until you win, fall, or retreat. Retreating does not advance your next !rest.')
   ]
 
   if (note) {
@@ -316,6 +325,58 @@ function battleCard (b, p, note = '') {
   }
 
   return out.filter(x => x !== null && x !== undefined && x !== '').join('\n')
+}
+
+/** Compact combat HUD. The detailed narrative remains available via !battleinfo. */
+function battleCard (b, p, note = '') {
+  const enemy = b.enemy || {}
+  const playerName = String(p.name || 'Hunter').trim() || 'Hunter'
+  const hpBar = (current, maximum) => {
+    const width = 8
+    const cur = Math.max(0, Number(current) || 0)
+    const max = Math.max(0, Number(maximum) || 0)
+    const filled = max > 0 ? clamp(Math.round(cur / max * width), 0, width) : 0
+    return `[${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}] ${Math.round(cur)}/${Math.round(max)}`
+  }
+  const equipped = Array.isArray(b.equippedCards)
+    ? b.equippedCards.filter(c => c && (!c.expires_at || new Date(c.expires_at).getTime() > Date.now()))
+    : Array.isArray(p.equippedCards) ? p.equippedCards.filter(Boolean) : []
+  const cardLines = equipped.slice(0, 2).map((card, index) => {
+    const label = card.ability ? `${card.name} · ${card.ability}` : card.name
+    return `🎴 ${index + 1}. ${label}`
+  })
+  const latest = String(note || '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 2)
+  const xpNeed = store.xpNeed(p.level)
+  const maxEnergy = Math.max(0, Number(p.maxPowerEnergy) || 0)
+  const energy = Math.max(0, Number(b.energy ?? p.powerEnergy) || 0)
+  const location = String(b.location || enemy.name || `Stage ${b.ordinal || p.stage || 1}`)
+  const lines = [
+    '⬡ *AXYN CORE*',
+    `*亗『${T.hunterName(playerName)}』亗*`,
+    '',
+    `┈┈┈ *BATTLE · TURN ${Number(b.turn) || 1}* ┈┈┈`,
+    `📍 ${location}`,
+    latest.length ? `✦ ${latest.join('\n')}` : null,
+    '',
+    `┈┈┈ *${enemy.boss ? 'BOSS' : 'MONSTER'}* ┈┈┈`,
+    `👹 *${String(enemy.name || 'ENEMY').toUpperCase()}*`,
+    `❤️ HP ${hpBar(b.enemyHp ?? enemy.hp, enemy.hp)}`,
+    '',
+    '┈┈┈ *VITALS* ┈┈┈',
+    `📈 Level *${p.level || 1}*  ·  🏅 Rank *${p.rank || 'E'}*  ·  🎖 Grade *${p.grade || 1}*`,
+    `🎭 Class *${p.class || 'Fighter'}*`,
+    `❤️ HP  ${hpBar(b.playerHp ?? p.hp, p.maxHp)}`,
+    `⚡ Energy  ${hpBar(energy, maxEnergy)}`,
+    `💠 XP  ${hpBar(p.xp, xpNeed)}`,
+    '',
+    cardLines.length ? cardLines.join('\n') : '🎴 No cards equipped',
+    '',
+    '`!attack` · `!heavy` · `!heal` · `!guard / !defend`',
+    '`!ability` · `!power` · `!class` · `!card`',
+    '`!battleinfo` · `!retreat`',
+    '↳ Retreats do not count towards !rest.'
+  ]
+  return lines.filter(line => line !== null && line !== undefined).join('\n')
 }
 
 /**
@@ -476,6 +537,94 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return []
   }
 
+  async function battleInfo (sock, m, ctx) {
+    const p = await store.player(ctx.userId)
+    if (!p) return arise(sock, m, ctx)
+    const battle = await store.getBattle(ctx.userId)
+    if (battle) return send(sock, ctx.jid, m, battleInfoCard(battle, p, battle.lastEvent || ''))
+
+    const duel = await store.activeDuelForUser(ctx.userId, ctx.jid).catch(() => null)
+    if (duel) {
+      const first = await store.player(duel.challenger)
+      const second = await store.player(duel.opponent)
+      const state = duel.state || {}
+      const hp = state.hp || {}
+      const nextId = String(state.turn || duel.challenger)
+      return send(sock, ctx.jid, m, [
+        `${WATERMARK}`, '', `⚔️ *DUEL DETAILS · #${duel.id}*`, '',
+        `*${first?.name || duel.challenger}* · ${first?.rank || 'E'} Rank · Lv.${first?.level || 1}`,
+        `❤️ HP ${Number(hp[duel.challenger] ?? first?.hp ?? 0)}/${first?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.challenger] ?? first?.powerEnergy ?? 0)}/${first?.maxPowerEnergy || 0}`,
+        '',
+        `*${second?.name || duel.opponent}* · ${second?.rank || 'E'} Rank · Lv.${second?.level || 1}`,
+        `❤️ HP ${Number(hp[duel.opponent] ?? second?.hp ?? 0)}/${second?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.opponent] ?? second?.powerEnergy ?? 0)}/${second?.maxPowerEnergy || 0}`,
+        '',
+        `Round: *${Number(state.round) || 1}* · Next turn: *${(nextId === String(duel.challenger) ? first?.name : second?.name) || 'Unknown'}*`,
+        state.lastAction ? `Latest action: ${state.lastAction}` : 'No actions taken yet.',
+        `Guard states: ${Object.entries(state.guards || {}).filter(([, value]) => Number(value) > 0).map(([id, value]) => `${id === String(duel.challenger) ? first?.name : second?.name} ${Math.round(Number(value) * 100)}%`).join(', ') || 'None'}`,
+        `Healing uses: ${Number(state.heals?.[duel.challenger] || 0)} / ${Number(state.heals?.[duel.opponent] || 0)}`,
+        '',
+        `Actions: ${ctx.prefix}attack · ${ctx.prefix}heavy · ${ctx.prefix}guard · ${ctx.prefix}heal · ${ctx.prefix}ability · ${ctx.prefix}power · ${ctx.prefix}class · ${ctx.prefix}retreat`
+      ].join('\n'))
+    }
+    return send(sock, ctx.jid, m, `You are not in a battle. Use *${ctx.prefix}stages* or *${ctx.prefix}floor*.`)
+  }
+
+  async function rest (sock, m, ctx) {
+    const p = await store.player(ctx.userId)
+    if (!p) return arise(sock, m, ctx)
+    const battle = await store.getBattle(ctx.userId)
+    const duel = await store.activeDuelForUser(ctx.userId).catch(() => null)
+    if (battle || duel) return send(sock, ctx.jid, m, '⛔ You can only rest outside a battle. Finish or leave the encounter first.')
+    const completed = Math.max(0, Number(p.battlesSinceRest) || 0)
+    if (completed < 2) {
+      const remaining = 2 - completed
+      return send(sock, ctx.jid, m, `🛌 *REST UNAVAILABLE*\n\nComplete *${remaining}* more battle${remaining === 1 ? '' : 's'} to restore your HP.\nRetreating does not count.`)
+    }
+    p.hp = p.maxHp
+    p.battlesSinceRest = 0
+    await store.savePlayer(p)
+    await store.log(ctx.userId, 'rest', ctx.userId, { restoredHp: p.maxHp })
+    return send(sock, ctx.jid, m, `${WATERMARK}\n\n🛌 *REST COMPLETE*\n\n❤️ HP restored to *${p.hp}/${p.maxHp}*.\nYour next rest unlocks after 2 more completed battles.`)
+  }
+
+  async function train (sock, m, ctx, requestedStat) {
+    const p = await store.player(ctx.userId)
+    if (!p) return arise(sock, m, ctx)
+    if (await store.getBattle(ctx.userId) || await store.activeDuelForUser(ctx.userId).catch(() => null)) return send(sock, ctx.jid, m, '⛔ You cannot train during an active battle.')
+    const stat = String(requestedStat || '').trim().toLowerCase()
+    const labels = { atk: 'ATK', attack: 'ATK', def: 'DEF', defence: 'DEF', defense: 'DEF', spd: 'SPD', speed: 'SPD' }
+    const key = ({ ATK: 'atk', DEF: 'def', SPD: 'spd' })[labels[stat]]
+    if (!key) return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}train <atk|def|spd>*\nCost: *${TRAINING_COST} Coins* · Reward: *${TRAINING_XP_PER_USE} XP* (up to *${TRAINING_USES_DAILY_CAP} trainings / ${TRAINING_XP_DAILY_CAP} training XP per day).`)
+
+    const result = await store.trainPlayer(ctx.userId, key, {
+      cost: TRAINING_COST,
+      xp: TRAINING_XP_PER_USE,
+      trainingXpCap: TRAINING_XP_DAILY_CAP,
+      trainingUsesCap: TRAINING_USES_DAILY_CAP,
+      xpDailyLimit: ctx.settings.xpDailyLimit
+    })
+    if (!result.ok) {
+      if (result.reason === 'coins') return send(sock, ctx.jid, m, `💎 *NOT ENOUGH COINS*\n\nTraining costs *${TRAINING_COST} Coins*. You have *${fmt(result.coins)}*.`)
+      if (result.reason === 'daily_cap') return send(sock, ctx.jid, m, `⏳ *TRAINING LIMIT REACHED*\n\nYou can train *${TRAINING_USES_DAILY_CAP} times per day*, earning up to *${TRAINING_XP_DAILY_CAP} XP*. Resets at 00:00 UTC.`)
+      if (result.reason === 'player') return arise(sock, m, ctx)
+      return send(sock, ctx.jid, m, 'That training option is unavailable.')
+    }
+    const progressed = applyProgress(result.player, { xp: 0 })
+    await store.savePlayer(progressed.player)
+    const statValue = progressed.player[key]
+    const events = progressed.events.map(event => event.type === 'level'
+      ? `⬆️ Level *${event.level}*`
+      : event.type === 'grade' ? `🎖 Grade *${event.grade}*` : `🏅 Rank *${event.rank}*`).join('\n')
+    const xpNote = result.xp ? `✨ +${result.xp} XP` : `✨ +0 XP · ${result.xpReason === 'training_cap' ? 'Training XP cap reached' : 'Daily XP cap reached'}`
+    return send(sock, ctx.jid, m, [
+      `${WATERMARK}`, '', '🏋️ *TRAINING COMPLETE*', '',
+      `⚔️ ${labels[stat]} *${statValue}*  (+1)`,
+      `💎 -${TRAINING_COST} Coins`, xpNote,
+      `Training today: *${result.trainingUsesToday}/${TRAINING_USES_DAILY_CAP}* · XP: *${result.trainingXpToday}/${TRAINING_XP_DAILY_CAP}*`,
+      events ? `\n${events}` : ''
+    ].filter(Boolean).join('\n'))
+  }
+
   function cardExpiryText (value) {
     if (!value) return 'PERMANENT'
     const date = new Date(value)
@@ -605,11 +754,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
     const b = await store.getBattle(ctx.userId)
-    if (!b) return send(sock, ctx.jid, m, `\u2694\ufe0f You are not in a battle. Use *${ctx.settings.prefix}stages*.`)
+    if (!b) return duelAct(sock, m, ctx, action, moveName, cardSlot)
 
     if (action === 'retreat') {
       await store.setBattle(ctx.userId, null)
-      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udfc3 *RETREATED*\n\nYou pull back. No rewards, no losses.`)
+      const progress = Math.max(0, Number(p.battlesSinceRest) || 0)
+      return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udfc3 *RETREATED*\n\nYou pull back. No rewards, no losses.\nRest progress: *${progress}/2* completed battles. Retreating does not count.`)
     }
 
     if (action === 'heal' && b.healsLeft <= 0) {
@@ -668,6 +818,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       }
     }
 
+    if (action === 'heavy' && Number(b.energy) < HEAVY_ATTACK_ENERGY) {
+      return send(sock, ctx.jid, m, `⚡ Heavy Attack costs *${HEAVY_ATTACK_ENERGY} Energy*. You have *${Math.max(0, Number(b.energy) || 0)}*.`)
+    }
+
     let selectedAbility = null
     if (action === 'card') {
       const use = await store.useCardAbility(ctx.userId, Number(cardSlot))
@@ -683,6 +837,18 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       selectedAbility = use.card
     }
 
+    let selectedPower = null
+    if (action === 'power') {
+      const key = String(moveName || '').trim().toLowerCase()
+      selectedPower = items.get(key) || items.abilities().find(entry => entry.name.toLowerCase() === key)
+      if (!selectedPower || selectedPower.kind !== 'ability') {
+        return send(sock, ctx.jid, m, `Usage: *${ctx.settings.prefix}power <owned power>* · See your powers with *${ctx.settings.prefix}power*.`)
+      }
+      if ((await store.inventoryQty(ctx.userId, selectedPower.key)) < 1) {
+        return send(sock, ctx.jid, m, `🔒 You have not unlocked *${selectedPower.name}*. Buy it from *${ctx.settings.prefix}shop abilities*.`)
+      }
+    }
+
     let note = ''
     let dealt = 0
 
@@ -692,6 +858,13 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
       dealt = playerHit(p, b.enemy, 1.0, baseBonus)
       note = `\u2694\ufe0f You strike for *${dealt}*${baseBonus ? ` (includes ${weaponCard.name} +${baseBonus})` : ''}.`
+    } else if (action === 'heavy') {
+      const equipped = await store.equippedCards(ctx.userId)
+      const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
+      const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
+      b.energy = Math.max(0, Number(b.energy) - HEAVY_ATTACK_ENERGY)
+      dealt = playerHit(p, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
+      note = `💥 *HEAVY ATTACK* deals *${dealt}* damage. (-${HEAVY_ATTACK_ENERGY} Energy)`
     } else if (action === 'guard') {
       b.guard = 0.6
       note = '\ud83d\udee1\ufe0f You brace for the counter.'
@@ -771,6 +944,13 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     } else if (action === 'card') {
       dealt = playerHit(p, b.enemy, 1.0, Number(selectedAbility?.ability_damage) || 0)
       note = `\ud83c\udccf *${selectedAbility.name} · ${selectedAbility.ability}* erupts for *${dealt}*. (${selectedAbility.ability_uses}/3 today)`
+    } else if (action === 'power') {
+      const result = items.apply(selectedPower, b, p)
+      if (!result.ok) return send(sock, ctx.jid, m, `❌ ${result.note}`)
+      b.enemyHp = result.battle.enemyHp
+      b.playerHp = result.battle.playerHp
+      b.guard = result.battle.guard
+      note = `✨ *${selectedPower.name}*\n${result.note}`
     }
 
     b.enemyHp -= dealt
@@ -813,9 +993,289 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     b.turn += 1
     b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
     b.equippedCards = await store.equippedCards(ctx.userId)
+    b.lastEvent = note
     await store.setBattle(ctx.userId, b)
 
     return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
+  }
+
+  /* ---------------------------------------------------------- direct duels */
+
+  async function demoteDuelPlayers (sock, duelRow) {
+    const promoted = Array.isArray(duelRow?.promoted) ? duelRow.promoted : []
+    if (!promoted.length || !duelRow?.group_jid || !sock.groupParticipantsUpdate) return
+    try {
+      await sock.groupParticipantsUpdate(
+        duelRow.group_jid,
+        promoted.map(id => `${String(id).split('@')[0]}@s.whatsapp.net`),
+        'demote'
+      )
+    } catch (error) {
+      logger?.warn?.({ err: error?.message || error, duelId: duelRow.id }, 'duel admin demotion failed')
+    }
+  }
+
+  async function duelAct (sock, m, ctx, action, moveName = null, cardSlot = 1) {
+    const d = await store.activeDuelForUser(ctx.userId, ctx.jid)
+    if (!d) return send(sock, ctx.jid, m, `⚔️ No active battle. Use *${ctx.prefix}stages* or challenge someone with *${ctx.prefix}duel @player*.`)
+    const actorId = String(ctx.userId)
+    const challengerId = String(d.challenger)
+    const opponentId = String(d.opponent)
+    if (![challengerId, opponentId].includes(actorId)) {
+      return send(sock, ctx.jid, m, '🔒 You are not a fighter in this duel.')
+    }
+    const first = await store.player(challengerId)
+    const second = await store.player(opponentId)
+    if (!first || !second) return send(sock, ctx.jid, m, '❌ A fighter is no longer registered. This duel cannot continue.')
+
+    if (action === 'retreat') {
+      let retired = false
+      const closed = await store.mutateDuel(d.id, current => {
+        if (current.status !== 'active') return null
+        retired = true
+        return { status: 'retreated', state: { ...(current.state || {}), retreatedBy: actorId } }
+      })
+      if (!retired || closed?.status !== 'retreated') return send(sock, ctx.jid, m, '⌛ This duel has already ended.')
+      await store.log(actorId, 'duel_retreat', String(d.id), { opponent: actorId === challengerId ? opponentId : challengerId })
+      await demoteDuelPlayers(sock, d)
+      return send(sock, ctx.jid, m, `${WATERMARK}\n\n🏃 *DUEL RETREATED*\n\nNo rewards or losses were recorded. Retreating does not count towards either fighter's rest progress.`)
+    }
+
+    const liveState = d.state || {}
+    if (String(liveState.turn || challengerId) !== actorId) {
+      const nextId = String(liveState.turn || challengerId)
+      const next = nextId === challengerId ? first : second
+      return send(sock, ctx.jid, m, `⌛ It is *${next.name || 'the other hunter'}*'s turn.`)
+    }
+
+    const actor = actorId === challengerId ? first : second
+    const targetId = actorId === challengerId ? opponentId : challengerId
+    const target = actorId === challengerId ? second : first
+    let card = null
+    let power = null
+    let classMove = null
+    let classSpend = null
+    let classMastery = 0
+    let weaponCard = null
+
+    if (action === 'attack' || action === 'heavy') {
+      const equipped = await store.equippedCards(actorId)
+      weaponCard = equipped.find(c => Number(c.equipped_slot) === 1) || null
+    }
+
+    if (action === 'card') {
+      const use = await store.useCardAbility(actorId, Number(cardSlot) || 1)
+      if (!use.ok) {
+        const messages = {
+          empty_slot: `Equipment slot ${cardSlot} is empty. Use !card equip <number>.`,
+          expired: 'Expired cards cannot be used in combat.',
+          no_ability: 'That card has no ability assigned.',
+          depleted: 'That card has used all three ability charges for today.'
+        }
+        return send(sock, ctx.jid, m, `❌ ${messages[use.reason] || 'Card ability is unavailable.'}`)
+      }
+      card = use.card
+    }
+
+    if (action === 'power') {
+      const key = String(moveName || '').trim().toLowerCase()
+      power = items.get(key) || items.abilities().find(entry => entry.name.toLowerCase() === key)
+      if (!power || power.kind !== 'ability') {
+        return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}power <owned power>* · See available powers with *${ctx.prefix}power*.`)
+      }
+      if ((await store.inventoryQty(actorId, power.key)) < 1) {
+        return send(sock, ctx.jid, m, `🔒 You have not unlocked *${power.name}*. Buy it from *${ctx.prefix}shop abilities*.`)
+      }
+    }
+
+    if (action === 'class') {
+      const classId = classes.normalizeClassId(actor.class)
+      const moves = classId ? classes.movesForClass(classId) : []
+      classMastery = await store.classMastery(actorId, classId)
+      if (!classId || !moves.length) return send(sock, ctx.jid, m, '🎭 You do not have an available class move.')
+      classMove = moveName ? classes.moveByName(classId, moveName) : moves.filter(x => x.unlock == null || classMastery >= Number(x.unlock)).filter(x => Number(x.damage) > 0).pop()
+      if (!classMove) return send(sock, ctx.jid, m, `🔒 That class move is unavailable. Use *${ctx.prefix}class* to see your moves.`)
+      const usesToday = await store.classMovesUsedToday(actorId)
+      const check = classes.validateMoveUse({ player: actor, move: classMove, mastery: classMastery, usesToday, dailyLimit: ctx.settings.classMovesPerDay, inBattle: true, energy: Number((liveState.energy || {})[actorId] ?? actor.powerEnergy) })
+      if (!check.ok) return send(sock, ctx.jid, m, check.message)
+      classSpend = await store.consumeClassMove(actorId, ctx.settings.classMovesPerDay)
+      if (!classSpend.ok) return send(sock, ctx.jid, m, `🧠 You have used all ${ctx.settings.classMovesPerDay} class moves today.`)
+    }
+
+    let mutationError = ''
+    let waitingForTurn = false
+    let resultState = null
+    let winnerId = null
+    let actionNote = ''
+    const updated = await store.mutateDuel(d.id, current => {
+      if (current.status !== 'active') { mutationError = 'ended'; return null }
+      const state = { ...(current.state || {}) }
+      state.hp = { ...(state.hp || { [challengerId]: first.hp, [opponentId]: second.hp }) }
+      state.maxHp = { ...(state.maxHp || { [challengerId]: first.maxHp, [opponentId]: second.maxHp }) }
+      state.energy = { ...(state.energy || { [challengerId]: first.powerEnergy, [opponentId]: second.powerEnergy }) }
+      state.maxEnergy = { ...(state.maxEnergy || { [challengerId]: first.maxPowerEnergy, [opponentId]: second.maxPowerEnergy }) }
+      state.guards = { ...(state.guards || {}) }
+      state.heals = { ...(state.heals || {}) }
+      if (String(state.turn || challengerId) !== actorId) { waitingForTurn = true; return null }
+
+      let damage = 0
+      const actorHp = Math.max(0, Number(state.hp[actorId] ?? actor.hp))
+      const targetHp = Math.max(0, Number(state.hp[targetId] ?? target.hp))
+      const targetStats = { def: target.def, atk: target.atk }
+      if (action === 'attack' || action === 'heavy') {
+        const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        if (action === 'heavy' && energy < HEAVY_ATTACK_ENERGY) {
+          mutationError = `Heavy Attack costs ${HEAVY_ATTACK_ENERGY} Energy. You have ${energy}.`
+          return null
+        }
+        let cardBonus = 0
+        let weaponName = ''
+        if (weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now())) {
+          cardBonus = Number(weaponCard.damage) || 0
+          weaponName = weaponCard.name || ''
+        }
+        damage = playerHit(actor, targetStats, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, cardBonus)
+        if (action === 'heavy') state.energy[actorId] = energy - HEAVY_ATTACK_ENERGY
+        actionNote = action === 'heavy' ? `💥 Heavy Attack (-${HEAVY_ATTACK_ENERGY} Energy)` : `⚔️ Strike${weaponName ? ` · ${weaponName}` : ''}`
+      } else if (action === 'guard') {
+        state.guards[actorId] = 0.6
+        actionNote = '🛡️ Guard raised'
+      } else if (action === 'heal') {
+        const used = Number(state.heals[actorId] || 0)
+        const limit = Math.max(1, Number(ctx.settings.selfHealPerCombat) || 5)
+        if (used >= limit) { mutationError = `You have used all ${limit} heals in this duel.`; return null }
+        const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + SELF_HEAL_HP) - actorHp
+        if (healed <= 0) { mutationError = 'Your HP is already full.'; return null }
+        state.hp[actorId] = actorHp + healed
+        state.heals[actorId] = used + 1
+        actionNote = `❤️ +${healed} HP`
+      } else if (action === 'card') {
+        damage = playerHit(actor, targetStats, 1, Number(card?.ability_damage) || 0)
+        actionNote = `🎴 ${card?.ability || card?.name || 'Card ability'}`
+      } else if (action === 'power') {
+        const fakeBattle = { enemy: { hp: target.maxHp, atk: target.atk, def: target.def }, enemyHp: targetHp, playerHp: actorHp, guard: 0 }
+        const applied = items.apply(power, fakeBattle, actor)
+        if (!applied.ok) { mutationError = applied.note; return null }
+        state.hp[actorId] = applied.battle.playerHp
+        state.guards[actorId] = applied.battle.guard || 0
+        damage = targetHp - Number(applied.battle.enemyHp)
+        actionNote = `✨ ${power.name}`
+      } else if (action === 'class') {
+        const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        const cost = Math.max(0, Number(classMove.cost) || 0)
+        if (energy < cost) { mutationError = `Not enough Energy. This move costs ${cost}.`; return null }
+        if (cost) state.energy[actorId] = energy - cost
+        const classId = classes.normalizeClassId(actor.class)
+        const grade = classes.classGradeFor(classMastery)
+        const effect = classes.classDamage({ move: classMove, mastery: classMastery, gradeBonus: grade.bonus })
+        if (effect.damaging) {
+          damage = Math.max(1, Number(effect.final) || 1)
+          actionNote = `🎭 ${classMove.name}`
+        } else if (classMove.type === 'defensive') {
+          state.guards[actorId] = 0.6
+          actionNote = `🛡️ ${classMove.name} · Guard raised`
+        } else if (classMove.type === 'support' && Number(classMove.heal) > 0) {
+          const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + Number(classMove.heal)) - actorHp
+          state.hp[actorId] = actorHp + healed
+          actionNote = `❤️ ${classMove.name} · +${healed} HP`
+        } else actionNote = `✨ ${classMove.name}`
+      } else {
+        mutationError = 'That action is not available in a direct duel.'
+        return null
+      }
+
+      if (damage > 0) {
+        const guard = Math.max(0, Math.min(0.9, Number(state.guards[targetId]) || 0))
+        const finalDamage = Math.max(1, Math.round(damage * (1 - guard)))
+        state.guards[targetId] = 0
+        state.hp[targetId] = Math.max(0, targetHp - finalDamage)
+        actionNote += ` · ${finalDamage} dealt`
+      }
+
+      state.round = Math.max(1, Number(state.round) || 1)
+      if (Number(state.hp[targetId]) <= 0) {
+        winnerId = actorId
+        state.winner = actorId
+      } else {
+        const currentEnergy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        state.energy[actorId] = Math.min(Number(state.maxEnergy[actorId] ?? actor.maxPowerEnergy), currentEnergy + 8)
+        state.turn = targetId
+        state.round += 1
+      }
+      state.lastAction = actionNote
+      resultState = state
+      return { status: winnerId ? 'completed' : 'active', state }
+    })
+
+    if (mutationError) {
+      if (classSpend?.ok) await store.refundClassMove(actorId).catch(() => {})
+      if (mutationError === 'ended') return send(sock, ctx.jid, m, '⌛ This duel has already ended.')
+      return send(sock, ctx.jid, m, `❌ ${mutationError}`)
+    }
+    if (waitingForTurn) {
+      if (classSpend?.ok) await store.refundClassMove(actorId).catch(() => {})
+      const nextId = String((updated?.state || liveState).turn || challengerId)
+      const next = nextId === challengerId ? first : second
+      return send(sock, ctx.jid, m, `⌛ It is *${next.name}*'s turn.`)
+    }
+    if (!updated) {
+      if (classSpend?.ok) await store.refundClassMove(actorId).catch(() => {})
+      return send(sock, ctx.jid, m, '⌛ This duel has already ended.')
+    }
+    if (updated.status === 'completed' && winnerId) {
+      const winningPlayer = await store.player(winnerId)
+      const losingId = winnerId === challengerId ? opponentId : challengerId
+      const losingPlayer = await store.player(losingId)
+      if (!winningPlayer || !losingPlayer) return send(sock, ctx.jid, m, '⚠️ Duel ended, but a fighter record could not be loaded for rewards.')
+
+      let winner = store.rollDay(winningPlayer)
+      let loser = store.rollDay(losingPlayer)
+      const finalState = resultState || updated.state || {}
+      winner.hp = Math.max(1, Math.min(winner.maxHp, Number(finalState.hp?.[winnerId] ?? winner.hp)))
+      loser.hp = Math.max(1, Math.round(loser.maxHp * 0.25))
+      winner.powerEnergy = Math.max(0, Math.min(winner.maxPowerEnergy, Number(finalState.energy?.[winnerId] ?? winner.powerEnergy)))
+      loser.powerEnergy = Math.max(0, Math.min(loser.maxPowerEnergy, Number(finalState.energy?.[losingId] ?? loser.powerEnergy)))
+      winner.battlesSinceRest = Math.max(0, Number(winner.battlesSinceRest) || 0) + 1
+      loser.battlesSinceRest = Math.max(0, Number(loser.battlesSinceRest) || 0) + 1
+      winner.wins += 1
+      loser.losses += 1
+
+      const xp = Math.min(60 + loser.level * 5, Math.max(0, ctx.settings.xpDailyLimit - winner.xpToday))
+      const requestedZen = 80 + loser.level * 8
+      const zen = Math.min(requestedZen, Math.max(0, ctx.settings.zenDailyLimit - winner.zenToday))
+      const coins = 300 + loser.level * 40
+      winner.xpToday += xp
+      winner.zenToday += zen
+      const { player: rewarded, events } = applyProgress(winner, { xp, zen, coins })
+      await store.savePlayer(rewarded)
+      await store.savePlayer(loser)
+      await store.log(winnerId, 'duel_win', String(d.id), { opponent: losingId, xp, zen, coins })
+      await store.log(losingId, 'duel_loss', String(d.id), { opponent: winnerId })
+      await demoteDuelPlayers(sock, d)
+      const ups = events.filter(x => x.type === 'level' || x.type === 'rank').map(x => x.type === 'level' ? `⬆️ Lv. ${x.level}` : `🏅 ${x.rank}`).join(' · ')
+      return send(sock, ctx.jid, m, [
+        `${WATERMARK}`, '', '🏆 *DUEL COMPLETE*', '',
+        `👑 *${rewarded.name}* defeats *${loser.name}*.`,
+        `⚔️ ${actionNote}`, '',
+        `✨ +${fmt(xp)} XP  ·  💰 +${fmt(coins)} Coins  ·  💠 +${fmt(zen)} Zen`,
+        `❤️ HP ${rewarded.hp}/${rewarded.maxHp}  ·  ${loser.name}: ${loser.hp}/${loser.maxHp}`,
+        ups ? `\n${ups}` : '',
+        `Both fighters' rest counters advanced. Retreating does not count.`
+      ].filter(Boolean).join('\n'))
+    }
+
+    const state = resultState || updated.state || {}
+    const nextId = String(state.turn || targetId)
+    const nextPlayer = nextId === challengerId ? first : second
+    const nextActorHp = Number(state.hp?.[actorId] ?? actor.hp)
+    const nextTargetHp = Number(state.hp?.[targetId] ?? target.hp)
+    return send(sock, ctx.jid, m, [
+      `${WATERMARK}`, '', `⚔️ *DUEL · ROUND ${Number(state.round) || 1}*`, '',
+      `*${actor.name}* · ${actionNote}`,
+      `❤️ ${actor.name}: *${nextActorHp}/${actor.maxHp}*`,
+      `❤️ ${target.name}: *${nextTargetHp}/${target.maxHp}*`, '',
+      `Next turn: *${nextPlayer.name}* · ${ctx.prefix}attack / ${ctx.prefix}heavy / ${ctx.prefix}guard / ${ctx.prefix}heal`
+    ].join('\n'))
   }
 
   /* ------------------------------------------------------------ class sheet */
@@ -892,33 +1352,39 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
   async function finishBattle (sock, m, ctx, p, b, won) {
     await store.setBattle(ctx.userId, null)
+    p = store.rollDay(p)
+    p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
+    p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp) || 0))
+    p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy) || 0))
     if (won) {
       const settings = ctx.settings
       const xpRoom = Math.max(0, settings.xpDailyLimit - p.xpToday)
       const zenRoom = Math.max(0, settings.zenDailyLimit - p.zenToday)
       const xp = Math.min(b.enemy.xp, xpRoom)
-      const zen = Math.min(b.enemy.zen, zenRoom)
+      const requestedZen = Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 2 : 1.5))
+      const zen = Math.min(requestedZen, zenRoom)
+      const coins = Math.max(75, Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 6 : 4)))
       p.wins += 1
       p.xpToday += xp
       p.zenToday += zen
       if (b.mode === 'stage' && b.ordinal >= p.stage) p.stage = b.ordinal + 1
-      const { player: after, events } = applyProgress(p, { xp, zen })
+      const { player: after, events } = applyProgress(p, { xp, zen, coins })
       await store.savePlayer(after)
       if (b.mode === 'floor' && b.storyQuestId) {
         const storyState = await store.floorStory(ctx.userId)
         await store.saveFloorStory(ctx.userId, floorStory.completeQuest(storyState, b.storyQuestId))
       }
-      await store.log(ctx.userId, 'battle_win', b.enemy.name, { xp, zen, ordinal: b.ordinal })
+      await store.log(ctx.userId, 'battle_win', b.enemy.name, { xp, zen, coins, ordinal: b.ordinal })
 
       const notes = events.map(e => e.type === 'level' ? `\u2b06\ufe0f Level *${e.level}*`
         : e.type === 'grade' ? `\ud83c\udf1f Grade *${e.grade}* \u2014 +\u2764\ufe0f${e.hp} +\u2694\ufe0f${e.atk}`
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
-      const capped = (b.enemy.xp > xp || b.enemy.zen > zen) ? `\n\n> Daily cap reached \u2014 see *${ctx.settings.prefix}economy view*.` : ''
+      const capped = (b.enemy.xp > xp || requestedZen > zen) ? `\n\n> Daily XP or Zen cap reached.` : ''
 
       return buttons(sock, ctx.jid, m, [
         `${WATERMARK}`, '', '\ud83c\udfc6 *VICTORY*', '',
         `*${b.enemy.name}* falls.`, '',
-        `\u2728 +${fmt(xp)} XP \u2022 \ud83e\ude99 +${fmt(zen)} Zen`,
+        `\u2728 +${fmt(xp)} XP \u2022 \ud83e\ude99 +${fmt(zen)} Zen \u2022 \ud83d\udcb0 +${fmt(coins)} Coins`,
         notes.length ? `\n${notes.join('\n')}` : '',
         capped, '',
         `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`
@@ -940,21 +1406,22 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   /* ----------------------------------------------------------------- duels */
 
   async function beginDuel (sock, m, ctx, opponentId) {
-    if (!ctx.jid.endsWith('@g.us')) return send(sock, ctx.jid, m, '\ud83e\udd4a Duels happen inside a WhatsApp group.')
-    if (!opponentId || opponentId === ctx.userId) return send(sock, ctx.jid, m, `\ud83e\udd4a Mention an opponent: *${ctx.settings.prefix}duel @player*`)
+    if (!ctx.jid.endsWith('@g.us')) return send(sock, ctx.jid, m, '🥊 Duels happen inside a WhatsApp group.')
+    if (!opponentId) return send(sock, ctx.jid, m, `🥊 Mention an opponent: *${ctx.settings.prefix}duel @player*`)
     const a = await store.player(ctx.userId)
-    const b = await store.player(opponentId)
-    if (!a) return send(sock, ctx.jid, m, `\ud83c\udf00 Register first with *${ctx.settings.prefix}arise*.`)
-    if (!b) return send(sock, ctx.jid, m, '\ud83c\udf00 That player has not used `!arise` yet.')
-    const d = await store.createDuel(ctx.jid, ctx.userId, opponentId)
-    await store.log(ctx.userId, 'duel_challenge', opponentId, { id: d.id })
+    const b = await store.player(String(opponentId).split('@')[0])
+    if (!a) return send(sock, ctx.jid, m, `🌱 Register first with *${ctx.settings.prefix}arise*.`)
+    if (!b) return send(sock, ctx.jid, m, '🌱 That player has not used `!arise` yet. Make sure their WhatsApp number is linked to their registered account.')
+    if (String(a.userId) === String(b.userId)) return send(sock, ctx.jid, m, '❌ You cannot challenge yourself.')
+    const d = await store.createDuel(ctx.jid, a.userId, b.userId)
+    await store.log(a.userId, 'duel_challenge', b.userId, { id: d.id })
     return tapButtons(sock, ctx.jid, m, [
-      `${WATERMARK}`, '', '\ud83e\udd4a *DUEL CHALLENGE*', '',
-      `> *${a.name}* \u2694\ufe0f *${b.name}*`, '',
+      `${WATERMARK}`, '', '🥊 *DUEL CHALLENGE*', '',
+      `> *${a.name}* ⚔️ *${b.name}*`, '',
       `Rank *${a.rank}* Lv.${a.level} vs Rank *${b.rank}* Lv.${b.level}`, '',
-      'Both fighters are granted temporary group admin for the duration of the duel, then demoted when it ends.', '',
-      `*${ctx.settings.prefix}duel accept ${d.id}*  \u2022  *${ctx.settings.prefix}duel decline ${d.id}*`
-    ].join('\n'), WATERMARK, [['\u2705 Accept', `ax_duel_accept_${d.id}`], ['\u274c Decline', `ax_duel_decline_${d.id}`]])
+      'Both fighters may receive temporary group admin while the duel is active, then are demoted when it ends.', '',
+      `*${ctx.settings.prefix}duel accept ${d.id}*  •  *${ctx.settings.prefix}duel decline ${d.id}*`
+    ].join('\n'), WATERMARK, [['✅ Accept', `ax_duel_accept_${d.id}`], ['❌ Decline', `ax_duel_decline_${d.id}`]])
   }
 
   /**
@@ -967,10 +1434,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
    */
   async function answerDuel (sock, m, ctx, id, accept) {
     const d = await store.duel(Number(id))
-    if (!d || d.status !== 'pending') {
-      return send(sock, ctx.jid, m, '\u231b That challenge is no longer active.')
+    if (!d || d.status !== 'pending' || String(d.group_jid) !== String(ctx.jid)) {
+      return send(sock, ctx.jid, m, '\u231b That challenge is no longer active in this group.')
     }
-    if (ctx.userId !== d.opponent && !ctx.auth.axyon) {
+    if (String(ctx.userId) !== String(d.opponent) && !ctx.auth.axyon) {
       return send(sock, ctx.jid, m, '\ud83d\udd12 Only the challenged player can answer this duel.')
     }
     if (!accept) {
@@ -982,6 +1449,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const a = await store.player(d.challenger)
     const b = await store.player(d.opponent)
     if (!a || !b) return send(sock, ctx.jid, m, '\u274c One of the fighters no longer exists.')
+    if (String(a.userId) !== String(d.challenger) || String(b.userId) !== String(d.opponent)) {
+      return send(sock, ctx.jid, m, '\u274c A fighter identity could not be matched to their registered account.')
+    }
 
     let promoted = []
     let promoteNote = ''
@@ -997,16 +1467,28 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       }
     }
 
-    await store.updateDuel(d.id, { status: 'active', state: { turn: d.challenger, round: 1 }, promoted })
+    const state = {
+      turn: String(a.userId),
+      round: 1,
+      hp: { [a.userId]: a.hp, [b.userId]: b.hp },
+      maxHp: { [a.userId]: a.maxHp, [b.userId]: b.maxHp },
+      energy: { [a.userId]: a.powerEnergy, [b.userId]: b.powerEnergy },
+      maxEnergy: { [a.userId]: a.maxPowerEnergy, [b.userId]: b.maxPowerEnergy },
+      guards: {},
+      heals: {}
+    }
+    await store.updateDuel(d.id, { status: 'active', state, promoted })
     await store.log(ctx.userId, 'duel_accept', String(d.id), { promoted })
 
     return send(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '\u2694\ufe0f *DUEL BEGINS*', '',
       `> *${a.name || d.challenger}* vs *${b.name || d.opponent}*`, '',
-      `Rank *${a.rank}* Lv.${a.level} \u2022 ${a.hp} HP`,
-      `Rank *${b.rank}* Lv.${b.level} \u2022 ${b.hp} HP`, '',
+      `Rank *${a.rank}* Lv.${a.level} \u2022 ${a.hp}/${a.maxHp} HP`,
+      `Rank *${b.rank}* Lv.${b.level} \u2022 ${b.hp}/${b.maxHp} HP`, '',
       promoteNote, '',
-      `Duel *#${d.id}* is live.`
+      `Duel *#${d.id}* is live. *${a.name}* moves first.`,
+      `Use *${ctx.settings.prefix}attack*, *${ctx.settings.prefix}heavy*, *${ctx.settings.prefix}guard*, *${ctx.settings.prefix}heal*, *${ctx.settings.prefix}ability*, *${ctx.settings.prefix}power <name>* or *${ctx.settings.prefix}class*.`,
+      `Use *${ctx.settings.prefix}battleinfo* for details. *${ctx.settings.prefix}retreat* gives no rewards and does not count towards rest.`
     ].filter(Boolean).join('\n'))
   }
 
@@ -1040,16 +1522,18 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const q = store.rollDay(p)
     const left = Math.max(0, ctx.settings.zenDailyLimit - q.zenToday)
     const lines = [
-      `${WATERMARK}`, '', '\ud83e\ude99 *ZEN WALLET*', '',
-      `Zen held: *${fmt(q.zen)}*`,
-      `Earned today: *${fmt(q.zenToday)}/${fmt(ctx.settings.zenDailyLimit)}*`,
-      `Remaining daily allowance: *${fmt(left)}*`, '',
-      '\ud83d\udc8e Coins are separate \u2014 they come from gameplay and have no daily limit.'
+      `${WATERMARK}`, '', '💠 *WALLET*', '',
+      `💠 Zen: *${fmt(q.zen)}*`,
+      `💎 Coins: *${fmt(q.coins)}*`,
+      `Earned today: *${fmt(q.zenToday)}/${fmt(ctx.settings.zenDailyLimit)} Zen*`,
+      `Remaining Zen allowance: *${fmt(left)}*`, '',
+      'Exchange: *1,000 Coins = 100 Zen*',
+      `Convert with *${ctx.settings.prefix}convert 1000*.`
     ]
     if (economy) {
       try {
         const u = await economy.getBalance(ctx.userId, q.name)
-        lines.push('', `\ud83d\udc5b Casino wallet: *${economy.fmt(u.wallet)}*`)
+        lines.push('', `💵 Casino wallet: *${economy.fmt(u.wallet)}*`)
       } catch { /* wallet is optional */ }
     }
     return send(sock, ctx.jid, m, lines.join('\n'))
@@ -1236,16 +1720,16 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
     cmd, send, buttons, tapButtons, withVisual,
-    arise, profile, listStages, beginBattle, battleAct, finishBattle, battleButtons,
+    arise, profile, listStages, beginBattle, battleAct, battleInfo, rest, train, finishBattle, battleButtons,
     classSheet,
     cardPanel, cardDetail, equipCard, unequipCard, cardSlots, cardAbilities, claimCard, claimDrop, beginDuel, answerDuel, daily, zenWallet, play,
     helpPage, helpAll, helpButtons, helpCommand,
-    applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard
+    applyProgress, powerEnergyForRank, buildEnemy, profileCard, battleCard, battleInfoCard
   }
 }
 
 module.exports = {
   createAxyon, applyProgress, buildEnemy, playerHit, enemyHit,
-  powerEnergyForRank, profileCard, battleCard,
+  powerEnergyForRank, profileCard, battleCard, battleInfoCard,
   CLASSES, CLASS_MOVES, MODES, WATERMARK
 }
