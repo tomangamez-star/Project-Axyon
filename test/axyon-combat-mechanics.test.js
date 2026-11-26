@@ -74,9 +74,10 @@ test('VIT improves Soul Drain and other lifesteal recovery', () => {
   const result = items.apply(drain, {
     enemyHp: 100,
     playerHp: 50,
+    mp: 50,
     guard: 0,
     enemy: { name: 'Test Enemy', hp: 100, atk: 1, def: 0 }
-  }, { maxHp: 100, vit: 11 })
+  }, { maxHp: 100, vit: 11, mp: 50, maxMp: 100 })
   assert.equal(result.battle.enemyHp, 60)
   assert.equal(result.battle.playerHp, 92)
 })
