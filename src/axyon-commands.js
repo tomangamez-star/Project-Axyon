@@ -298,24 +298,45 @@ Reason: ${lock.reason}` : ''}`)
     if (b.storyPending) return axyon.send(s, ctx.jid, m, floorStory.begin(b.ordinal, await store.floorStory(ctx.userId)).text)
     return axyon.withVisual(s, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', axyon.battleCard(b, p), [], true)
   }, { hidden: true })
-  cmd('attack', 'battle', '{p}attack', 'Strike the enemy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'attack'), { hidden: true })
-  cmd('heavy', 'battle', '{p}heavy', 'A stronger strike that costs 15 Power Energy.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heavy'))
+  cmd('attack', 'battle', '{p}attack [+ command]', 'Strike the enemy or execute an unlocked combo.', async (s, m, ctx, args = []) => {
+    if (args.includes('+')) {
+      const combo = combos.parseRecipe(['attack', ...args])
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Unknown combination. Check *${ctx.prefix}cc shop*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
+    return axyon.battleAct(s, m, ctx, 'attack')
+  }, { hidden: true })
+  cmd('heavy', 'battle', '{p}heavy [+ command]', 'A stronger strike that costs Power Energy.', async (s, m, ctx, args = []) => {
+    if (args.includes('+')) {
+      const combo = combos.parseRecipe(['heavy', ...args])
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Unknown combination. Check *${ctx.prefix}cc shop*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
+    return axyon.battleAct(s, m, ctx, 'heavy')
+  })
+  cmd('dodge', 'battle', '{p}dodge [+ command]', 'Attempt to evade the next enemy attack. Perfect dodges are rare.', async (s, m, ctx, args = []) => {
+    if (args.includes('+')) {
+      const combo = combos.parseRecipe(['dodge', ...args])
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Unknown combination. Check *${ctx.prefix}cc shop*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
+    return axyon.battleAct(s, m, ctx, 'dodge')
+  })
+  cmd('block', 'battle', '{p}block [+ command]', 'Brace against the next hit or execute a defensive combo.', async (s, m, ctx, args = []) => {
+    if (args.includes('+')) {
+      const combo = combos.parseRecipe(['block', ...args])
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Unknown combination. Check *${ctx.prefix}cc shop*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
+    return axyon.battleAct(s, m, ctx, 'guard')
+  })
   cmd('battleinfo', 'battle', '{p}battleinfo', 'Show the full detailed report for your current battle or duel.', async (s, m, ctx) => axyon.battleInfo(s, m, ctx))
   cmd('rest', 'battle', '{p}rest', 'Restore full HP after two completed battles. Retreats do not count.', async (s, m, ctx) => axyon.rest(s, m, ctx))
-  cmd('train', 'battle', '{p}train <atk|def|spd>', 'Spend Coins to increase a combat stat and gain a small amount of capped XP.', async (s, m, ctx, args) => axyon.train(s, m, ctx, args[0]))
+  cmd('train', 'battle', '{p}train <atk|def|spd|str|per|sta|vit>', 'Train a combat attribute. Training XP has a daily cap.', async (s, m, ctx, args) => axyon.train(s, m, ctx, args[0]))
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('defend', 'battle', '{p}defend', 'Alias for guard.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
-  cmd('heal', 'battle', '{p}heal', 'Recover 10 HP. Limited uses per combat.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
+  cmd('heal', 'battle', '{p}heal', 'Recover HP. Limited uses per combat; VIT improves recovery.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })
   cmd('class', 'battle', '{p}class [move]', 'Your class, mastery, grade and moves. In battle, uses a move.', async (s, m, ctx, args) => {
-    /*
-     * `!class` is BOTH the class sheet and the in-battle move command.
-     *
-     * The old command was hidden and only ever fired a move, so a player had
-     * no way to see their class, mastery, grade or remaining uses. Now: with
-     * no argument and no active battle it shows the sheet; with an argument it
-     * uses that named move; with no argument inside a battle it uses the
-     * default move, which is the old behaviour.
-     */
     const b = await store.getBattle(ctx.userId)
     const duel = await store.activeDuelForUser(ctx.userId, ctx.jid).catch(() => null)
     const moveName = args && args.length ? args.join(' ') : null
@@ -323,29 +344,33 @@ Reason: ${lock.reason}` : ''}`)
     return axyon.classSheet(s, m, ctx)
   })
   cmd('classmove', 'battle', '{p}classmove <move>', 'Use a named class move in battle.', async (s, m, ctx, args) => {
-    if (!args || !args.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}classmove <move name>* \u2014 see *${ctx.prefix}class*.`)
+    if (!args || !args.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}classmove <move name>* — see *${ctx.prefix}class*.`)
     return axyon.battleAct(s, m, ctx, 'class', 1, args.join(' '))
   }, { hidden: true })
   cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
   cmd('ability', 'battle', '{p}ability', 'Use your equipped card ability in battle.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
-  cmd('power', 'battle', '{p}power [owned power + !heavy]', 'View hunter powers, use one, or execute an unlocked command combo.', async (s, m, ctx, args) => {
+  cmd('power', 'battle', '{p}power [owned power + command]', 'View hunter powers, use one, or execute an unlocked command combo.', async (s, m, ctx, args) => {
     if (args && args.includes('+')) {
-      const combo = combos.parseRecipe(args)
-      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Invalid combo order. Try *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy*.`)
+      const combo = combos.parseRecipe(['power', ...args])
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Invalid combo order. Example: *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy*.`)
       return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
     }
     if (args && args.length) return axyon.battleAct(s, m, ctx, 'power', 1, args.join(' '))
     const rows = await store.inventory(ctx.userId)
     const owned = rows.map(row => ({ ...row, entry: items.get(row.key) })).filter(row => row.entry?.kind === 'ability')
-    if (!owned.length) return axyon.send(s, ctx.jid, m, `✨ *HUNTER POWERS*\n\nYou have no purchased powers yet. Browse *${ctx.prefix}shop abilities*.`)
+    if (!owned.length) return axyon.send(s, ctx.jid, m, `✨ *HUNTER POWERS*
+
+You have no purchased powers yet. Browse *${ctx.prefix}shop abilities*.`)
     return axyon.send(s, ctx.jid, m, [
       `${W}`, '', '✨ *UNLOCKED HUNTER POWERS*', '',
-      ...owned.map(row => `${row.entry.icon} *${row.entry.name}*\n${row.entry.desc}\nUse: *${ctx.prefix}power ${row.key}*`),
+      ...owned.map(row => `${row.entry.icon} *${row.entry.name}*
+${row.entry.desc}
+Use: *${ctx.prefix}power ${row.key}*`),
       '', 'Card abilities remain under `!ability`.'
     ].join('\n'))
   })
 
-  cmd('cc', 'battle', '{p}cc [shop|buy <combo>|power <ability> + heavy]', 'View, purchase and execute personal Command Combos.', async (s, m, ctx, args) => {
+  cmd('cc', 'battle', '{p}cc [shop|buy <combo>|<command> + <command>]', 'View, purchase and execute personal Command Combos.', async (s, m, ctx, args) => {
     const sub = String(args[0] || '').toLowerCase()
     if (sub === 'shop') {
       const owned = await store.combos(ctx.userId)
@@ -353,14 +378,19 @@ Reason: ${lock.reason}` : ''}`)
         `${W}`, '', '🔗 *COMMAND COMBO CATALOGUE*', '',
         ...combos.CATALOGUE.map(combo => {
           const has = owned.some(row => row.combo_key === combo.key)
-          return `${has ? '✅' : '🔒'} *${combo.name}*\\n${combo.description}\\n💰 ${fmt(combo.price)} Zen · Lv.${combo.requiredLevel}+\\nKey: \`${combo.key}\``
+          return `${has ? '✅' : '🔒'} *${combo.name}* · ${combo.category}
+${combo.description}
+💰 ${fmt(combo.price)} Zen · Lv.${combo.requiredLevel}+`
         }),
-        '', 'Unlock through training discovery or purchase.'
-      ].join('\\n'))
+        '', 'Unlock through training discovery or purchase. Recipes are shown in your personal combo list after unlocking.'
+      ].join('\n'))
     }
     if (sub === 'buy') {
       const combo = combos.get(args.slice(1).join(' '))
       if (!combo) return axyon.send(s, ctx.jid, m, `Unknown combo. Use *${ctx.prefix}cc shop*.`)
+      if (combo.abilityKey && (await store.inventoryQty(ctx.userId, combo.abilityKey)) < 1) {
+        return axyon.send(s, ctx.jid, m, `🔒 Unlock *${items.get(combo.abilityKey)?.name || combo.abilityKey}* before purchasing this fusion.`)
+      }
       const result = await store.buyCombo(ctx.userId, combo.key, combo.price, combo.requiredLevel)
       if (!result.ok) {
         const messages = {
@@ -372,23 +402,32 @@ Reason: ${lock.reason}` : ''}`)
         return axyon.send(s, ctx.jid, m, `🔒 ${messages[result.reason] || 'Purchase unavailable.'}`)
       }
       await store.log(ctx.userId, 'combo_purchase', combo.key, { price: combo.price })
-      return axyon.send(s, ctx.jid, m, `✅ *COMBO UNLOCKED*\\n\\n${combo.name}\\nBalance: *${fmt(result.balance)} Zen*\\nUse *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy* in battle.`)
+      return axyon.send(s, ctx.jid, m, `✅ *COMBO UNLOCKED*
+
+${combo.name}
+Balance: *${fmt(result.balance)} Zen*
+Use in battle: *${combos.formatRecipe(combo, ctx.prefix)}*`)
     }
-    if (sub === 'power' && args.includes('+')) {
-      const combo = combos.parseRecipe(args.slice(1))
-      if (!combo) return axyon.send(s, ctx.jid, m, `Invalid order. Use *${ctx.prefix}cc power ability_drain + heavy*.`)
+    if (args.includes('+')) {
+      const recipe = sub === 'power' ? ['power', ...args.slice(1)] : args
+      const combo = combos.parseRecipe(recipe)
+      if (!combo) return axyon.send(s, ctx.jid, m, `Invalid combo order. Use *${ctx.prefix}cc shop* to browse combinations.`)
       return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
     }
     const owned = await store.combos(ctx.userId)
-    if (!owned.length) return axyon.send(s, ctx.jid, m, `🔗 *COMMAND COMBOS*\\n\\nYou have no unlocked combos yet. Train for a 1-in-5 discovery chance or use *${ctx.prefix}cc shop*.`)
+    if (!owned.length) return axyon.send(s, ctx.jid, m, `🔗 *COMMAND COMBOS*
+
+You have no unlocked combos yet. Train for a 1-in-5 discovery chance or use *${ctx.prefix}cc shop*.`)
     return axyon.send(s, ctx.jid, m, [
       `${W}`, '', '🔗 *YOUR COMMAND COMBOS*', '',
       ...owned.map(row => {
         const combo = combos.get(row.combo_key)
-        return combo ? `✅ *${combo.name}*\\n${combo.description}\\nRecipe: *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy*` : `✅ ${row.combo_key}`
+        return combo ? `✅ *${combo.name}* · ${combo.category}
+${combo.description}
+Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
       }),
       '', `Catalogue: *${ctx.prefix}cc shop*`
-    ].join('\\n'))
+    ].join('\n'))
   })
 
   cmd('retreat', 'battle', '{p}retreat', 'Leave the encounter. Retreats give no rewards and do not count towards rest.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })

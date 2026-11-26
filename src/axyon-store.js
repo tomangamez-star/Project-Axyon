@@ -138,6 +138,12 @@ async function ensureSchema () {
       atk INT NOT NULL DEFAULT 6,
       def INT NOT NULL DEFAULT 4,
       spd INT NOT NULL DEFAULT 5,
+      str INT NOT NULL DEFAULT 5,
+      per INT NOT NULL DEFAULT 5,
+      sta INT NOT NULL DEFAULT 5,
+      vit INT NOT NULL DEFAULT 5,
+      fatigue INT NOT NULL DEFAULT 0,
+      fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       power_energy INT NOT NULL DEFAULT 50,
       max_power_energy INT NOT NULL DEFAULT 50,
       stage INT NOT NULL DEFAULT 1,
@@ -160,6 +166,12 @@ async function ensureSchema () {
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS battles_since_rest INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS training_xp_today INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS training_uses_today INT NOT NULL DEFAULT 0;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS str INT NOT NULL DEFAULT 5;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS per INT NOT NULL DEFAULT 5;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS sta INT NOT NULL DEFAULT 5;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS vit INT NOT NULL DEFAULT 5;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS fatigue INT NOT NULL DEFAULT 0;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
     CREATE TABLE IF NOT EXISTS axyon_stages(
       id BIGSERIAL PRIMARY KEY,
@@ -730,6 +742,12 @@ function norm (r) {
     atk: Number(r.atk),
     def: Number(r.def),
     spd: Number(r.spd),
+    str: Number(r.str ?? 5),
+    per: Number(r.per ?? 5),
+    sta: Number(r.sta ?? 5),
+    vit: Number(r.vit ?? 5),
+    fatigue: Number(r.fatigue ?? 0),
+    fatigueUpdatedAt: r.fatigue_updated_at || null,
     powerEnergy: Number(r.power_energy),
     maxPowerEnergy: Number(r.max_power_energy),
     stage: Number(r.stage),
@@ -765,7 +783,31 @@ async function arise (userId, name = '') {
 
 async function player (userId) {
   await ensureSchema()
+  const cooled = await db().query(
+    `UPDATE axyon_players p
+       SET fatigue=GREATEST(0, p.fatigue - FLOOR(EXTRACT(EPOCH FROM (NOW()-p.fatigue_updated_at))/900)::int),
+           fatigue_updated_at=p.fatigue_updated_at + (FLOOR(EXTRACT(EPOCH FROM (NOW()-p.fatigue_updated_at))/900)::int * INTERVAL '15 minutes')
+     WHERE p.user_id=$1 AND p.fatigue>0
+       AND p.active_battle IS NULL
+       AND NOT EXISTS (SELECT 1 FROM axyon_duels d WHERE d.status='active' AND (d.challenger=p.user_id OR d.opponent=p.user_id))
+       AND p.fatigue_updated_at <= NOW()-INTERVAL '15 minutes'
+     RETURNING p.*`, [String(userId)]
+  )
+  if (cooled.rowCount) return norm(cooled.rows[0])
   return norm((await db().query('SELECT * FROM axyon_players WHERE user_id=$1', [userId])).rows[0])
+}
+
+
+async function updateFatigue (userId, fatigue, updatedAt = new Date().toISOString()) {
+  await ensureSchema()
+  const result = await db().query(
+    `UPDATE axyon_players
+       SET fatigue=$2,fatigue_updated_at=$3::timestamptz,updated_at=NOW()
+     WHERE user_id=$1
+     RETURNING fatigue,fatigue_updated_at`,
+    [String(userId), Math.max(0, Math.min(100, Math.floor(Number(fatigue) || 0))), updatedAt]
+  )
+  return result.rows[0] || null
 }
 
 async function savePlayer (p) {
@@ -774,12 +816,15 @@ async function savePlayer (p) {
     `UPDATE axyon_players SET name=$2,rank=$3,level=$4,grade=$5,xp=$6,zen=$7,coins=$8,hp=$9,max_hp=$10,
        atk=$11,def=$12,spd=$13,power_energy=$14,max_power_energy=$15,stage=$16,wins=$17,losses=$18,
        battles_since_rest=$19,zen_today=$20,xp_today=$21,training_xp_today=$22,training_uses_today=$23,
-       day_key=$24,class=$25,class_moves_used=$26,heal_uses=$27,card_uses=$28,last_daily=$29,updated_at=NOW()
+       day_key=$24,class=$25,class_moves_used=$26,heal_uses=$27,card_uses=$28,last_daily=$29,
+       str=$30,per=$31,sta=$32,vit=$33,fatigue=$34,fatigue_updated_at=COALESCE($35::timestamptz,NOW()),updated_at=NOW()
      WHERE user_id=$1 RETURNING *`,
     [p.userId, p.name, p.rank, p.level, p.grade, p.xp, p.zen, p.coins, p.hp, p.maxHp,
       p.atk, p.def, p.spd, p.powerEnergy, p.maxPowerEnergy, p.stage, p.wins, p.losses,
       p.battlesSinceRest || 0, p.zenToday, p.xpToday, p.trainingXpToday || 0, p.trainingUsesToday || 0, p.dayKey, p.class,
-      p.classMovesUsed, p.healUses, p.cardUses, p.lastDaily]
+      p.classMovesUsed, p.healUses, p.cardUses, p.lastDaily,
+      Math.max(1, Number(p.str) || 5), Math.max(1, Number(p.per) || 5), Math.max(1, Number(p.sta) || 5), Math.max(1, Number(p.vit) || 5),
+      Math.max(0, Math.min(100, Number(p.fatigue) || 0)), p.fatigueUpdatedAt || null]
   )
   return norm(r.rows[0])
 }
@@ -795,6 +840,7 @@ async function resetPlayer (userId) {
   await ensureSchema()
   const r = await db().query(
     `UPDATE axyon_players SET rank='E',level=1,grade=1,xp=0,zen=0,coins=0,hp=$2,max_hp=$2,atk=$3,def=$4,spd=$5,
+       str=5,per=5,sta=5,vit=5,fatigue=0,fatigue_updated_at=NOW(),
        power_energy=$6,max_power_energy=$6,stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$7,
        class_moves_used=0,heal_uses=0,card_uses=0,battles_since_rest=0,training_xp_today=0,training_uses_today=0,updated_at=NOW()
      WHERE user_id=$1 RETURNING *`,
@@ -812,6 +858,7 @@ async function resetAllPlayers () {
     const result = await client.query(
       `UPDATE axyon_players SET rank='E',level=1,grade=1,xp=0,zen=0,coins=0,
          hp=$1,max_hp=$1,atk=$2,def=$3,spd=$4,power_energy=$5,max_power_energy=$5,
+         str=5,per=5,sta=5,vit=5,fatigue=0,fatigue_updated_at=NOW(),
          stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$6,
          class='Fighter',class_moves_used=0,heal_uses=0,card_uses=0,battles_since_rest=0,training_xp_today=0,training_uses_today=0,active_battle=NULL,updated_at=NOW()`,
       [BASE_HP, BASE_ATK, BASE_DEF, BASE_SPD, POWER_ENERGY_BASE, dayKey()]
@@ -852,7 +899,7 @@ async function getBattle (userId) {
 
 /** Spend Coins for one permanent +1 training upgrade and award capped XP. */
 async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 25, trainingUsesCap = 5, xpDailyLimit = 5000 } = {}) {
-  const columns = { atk: 'atk', def: 'def', spd: 'spd' }
+  const columns = { atk: 'atk', def: 'def', spd: 'spd', str: 'str', per: 'per', sta: 'sta', vit: 'vit' }
   const column = columns[String(stat || '').toLowerCase()]
   if (!column) return { ok: false, reason: 'stat' }
   await ensureSchema()
@@ -874,6 +921,12 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
       await client.query('ROLLBACK')
       return { ok: false, reason: 'coins', coins }
     }
+    const currentStat = Number(row[column]) || 0
+    if (['str', 'per', 'sta', 'vit'].includes(column) && currentStat >= 100) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'stat_cap', stat: column, value: currentStat }
+    }
+    const hpBonus = column === 'vit' ? 5 : 0
     const previousTrainingXp = sameDay ? Number(row.training_xp_today) || 0 : 0
     const previousXpToday = sameDay ? Number(row.xp_today) || 0 : 0
     const trainingRoom = Math.max(0, Math.floor(Number(trainingXpCap) || 0) - previousTrainingXp)
@@ -881,6 +934,7 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
     const awardedXp = Math.max(0, Math.min(Math.floor(Number(xp) || 0), trainingRoom, dailyXpRoom))
     const update = await client.query(
       `UPDATE axyon_players SET ${column}=${column}+1,coins=coins-$2,xp=xp+$6,xp_today=$3,
+         max_hp=max_hp+$8,hp=LEAST(max_hp+$8,hp+$8),fatigue_updated_at=NOW(),
          training_xp_today=$4,training_uses_today=$7,day_key=$5,
          zen_today=CASE WHEN day_key=$5 THEN zen_today ELSE 0 END,
          class_moves_used=CASE WHEN day_key=$5 THEN class_moves_used ELSE 0 END,
@@ -888,7 +942,7 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
          updated_at=NOW()
        WHERE user_id=$1 RETURNING *`,
       [String(userId), Math.floor(Number(cost) || 0), previousXpToday + awardedXp,
-        previousTrainingXp + awardedXp, today, awardedXp, usesToday + 1]
+        previousTrainingXp + awardedXp, today, awardedXp, usesToday + 1, hpBonus]
     )
     await client.query('COMMIT')
     return {
@@ -899,7 +953,8 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
       trainingXpToday: previousTrainingXp + awardedXp,
       trainingXpCap,
       trainingUsesToday: usesToday + 1,
-      trainingUsesCap
+      trainingUsesCap,
+      hpBonus
     }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
@@ -2286,6 +2341,8 @@ module.exports = {
   BASE_HP,
   BASE_DEF,
   BASE_SPD,
+  BASE_COMBAT_STATS: Object.freeze({ str: 5, per: 5, sta: 5, vit: 5 }),
+  FATIGUE_RECOVERY_MINUTES: 15,
   DEFAULT_SETTINGS,
   ORIGINAL_STAGES,
   ORIGINAL_FLOORS,

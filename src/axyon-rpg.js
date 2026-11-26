@@ -17,6 +17,7 @@ const music = require('./music')
 const classes = require('./axyon-classes')
 const items = require('./axyon-items')
 const comboCatalog = require('./axyon-combos')
+const combatMechanics = require('./axyon-combat-mechanics')
 const floorStory = require('./floor-story')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
@@ -145,13 +146,16 @@ function buildEnemy (stage) {
 }
 
 function playerHit (p, enemy, mult = 1, bonus = 0) {
-  const base = p.atk * 1.15 + rnd(7) + bonus
-  const dmg = base * mult - enemy.def * 0.35
-  return Math.max(1, Math.round(dmg))
+  const strengthBonus = Math.max(0, (Number(p.str) || 5) - 5) * 0.35
+  const base = p.atk * 1.15 + strengthBonus + rnd(7) + bonus
+  const rawDamage = base * mult - enemy.def * 0.35
+  return Math.max(1, Math.round(combatMechanics.applyFatiguePenalty(rawDamage, p, p.fatigue)))
 }
 
 function enemyHitDetails (enemy, p, guardRatio = 0) {
-  const incoming = Math.max(1, Math.round(enemy.atk + rnd(6) - p.def * 0.3))
+  const defencePenalty = combatMechanics.fatiguePenalty(p, p.fatigue) * 0.5
+  const effectiveDef = Math.max(0, Number(p.def) * (1 - defencePenalty))
+  const incoming = Math.max(1, Math.round(enemy.atk + rnd(6) - effectiveDef * 0.3))
   const finalDamage = guardRatio ? Math.max(1, Math.round(incoming * (1 - guardRatio))) : incoming
   return { incoming, finalDamage, blocked: Math.max(0, incoming - finalDamage) }
 }
@@ -204,8 +208,10 @@ function profileCard (p, extra = {}) {
     `💠 XP  ${compactBar(p.xp, need)}`,
     '',
     '┈┈┈ *COMBAT* ┈┈┈',
-    `⚔ ATK *${p.atk}*  ·  🛡 DEF *${p.def}*`,
-    `💨 SPD *${p.spd}*`,
+    `⚔ ATK *${p.atk}*  ·  🛡 DEF *${p.def}*  ·  💨 SPD *${p.spd}*`,
+    `💪 STR *${p.str ?? 5}*  ·  👁 PER *${p.per ?? 5}*`,
+    `🫁 STA *${p.sta ?? 5}*  ·  🧬 VIT *${p.vit ?? 5}*`,
+    `😮‍💨 Fatigue *${p.fatigue ?? 0}/100*`,
     `🏆 Record *${p.wins}W* / *${p.losses}L*`,
     '',
     '┈┈┈ *HOLDINGS* ┈┈┈',
@@ -289,6 +295,8 @@ function battleInfoCard (b, p, note = '') {
       [
         `*${T.hunterName(playerName)}*`,
         `${p.rank || 'E'} Rank  ·  Level ${p.level || 1}  ·  ${p.class || 'Fighter'}`,
+        `ATK ${p.atk} · DEF ${p.def} · SPD ${p.spd} · STR ${p.str ?? 5} · PER ${p.per ?? 5} · STA ${p.sta ?? 5} · VIT ${p.vit ?? 5}`,
+        `Fatigue ${p.fatigue ?? b.fatigue ?? 0}/100`,
         bar(playerHp, playerMaxHp),
         `*${playerHp} / ${playerMaxHp} HP*`,
         `⭐ XP  ·  *${Math.max(0, Number(p.xp) || 0)} / ${xpNeed} XP*`
@@ -346,7 +354,7 @@ function battleCard (b, p, note = '') {
     const label = card.ability ? `${card.name} · ${card.ability}` : card.name
     return `🎴 ${index + 1}. ${label}`
   })
-  const latest = String(note || '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 2)
+  const latest = String(note || '').split('\n').map(line => line.trim()).filter(Boolean).slice(0, 3)
   const xpNeed = store.xpNeed(p.level)
   const maxEnergy = Math.max(0, Number(p.maxPowerEnergy) || 0)
   const energy = Math.max(0, Number(b.energy ?? p.powerEnergy) || 0)
@@ -369,11 +377,13 @@ function battleCard (b, p, note = '') {
     `❤️ HP  ${hpBar(b.playerHp ?? p.hp, p.maxHp)}`,
     `⚡ Energy  ${hpBar(energy, maxEnergy)}`,
     `💠 XP  ${hpBar(p.xp, xpNeed)}`,
+    `💪 STR *${p.str ?? 5}* · 👁 PER *${p.per ?? 5}* · 🫁 STA *${p.sta ?? 5}* · 🧬 VIT *${p.vit ?? 5}*`,
+    `😮‍💨 Fatigue *${Math.max(0, Number(b.fatigue ?? p.fatigue) || 0)}/100*`,
     '',
     cardLines.length ? cardLines.join('\n') : '🎴 No cards equipped',
     '',
-    '`!attack` · `!heavy` · `!heal` · `!guard / !defend`',
-    '`!ability` · `!power` · `!class` · `!card`',
+    '`!attack` · `!heavy` · `!dodge` · `!block` · `!guard / !defend` · `!heal`',
+    '`!ability` · `!power` · `!class` · `!card` · `!cc`',
     '`!battleinfo` · `!retreat`',
     '↳ Retreats do not count towards !rest.'
   ]
@@ -401,6 +411,16 @@ function liveClassMoves (p) {
 
 function createAxyon ({ economy, logger, sendButtons } = {}) {
   const send = (s, j, m, t) => s.sendMessage(j, { text: t }, { quoted: m })
+  const persistFatigue = async (userId, fatigue, updatedAt, playerState) => {
+    if (typeof store.updateFatigue === 'function') return store.updateFatigue(userId, fatigue, updatedAt)
+    // Keep lightweight test adapters and older injected stores compatible.
+    if (playerState && typeof store.savePlayer === 'function') {
+      playerState.fatigue = combatMechanics.fatigueValue(fatigue)
+      playerState.fatigueUpdatedAt = updatedAt
+      return store.savePlayer(playerState)
+    }
+    return null
+  }
 
   /*
    * BUTTON POLICY
@@ -523,6 +543,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       enemyHp: enemy.hp,
       playerHp: p.hp,
       energy: p.powerEnergy,
+      fatigue: Math.max(0, Number(p.fatigue) || 0),
       turn: 1,
       healsLeft: ctx.settings.selfHealPerCombat,
       guard: 0
@@ -555,16 +576,18 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         `${WATERMARK}`, '', `⚔️ *DUEL DETAILS · #${duel.id}*`, '',
         `*${first?.name || duel.challenger}* · ${first?.rank || 'E'} Rank · Lv.${first?.level || 1}`,
         `❤️ HP ${Number(hp[duel.challenger] ?? first?.hp ?? 0)}/${first?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.challenger] ?? first?.powerEnergy ?? 0)}/${first?.maxPowerEnergy || 0}`,
+        `ATK ${first?.atk || 0} · DEF ${first?.def || 0} · SPD ${first?.spd || 0} · STR ${first?.str ?? 5} · PER ${first?.per ?? 5} · STA ${first?.sta ?? 5} · VIT ${first?.vit ?? 5} · Fatigue ${state.fatigue?.[duel.challenger] ?? first?.fatigue ?? 0}/100`,
         '',
         `*${second?.name || duel.opponent}* · ${second?.rank || 'E'} Rank · Lv.${second?.level || 1}`,
         `❤️ HP ${Number(hp[duel.opponent] ?? second?.hp ?? 0)}/${second?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.opponent] ?? second?.powerEnergy ?? 0)}/${second?.maxPowerEnergy || 0}`,
+        `ATK ${second?.atk || 0} · DEF ${second?.def || 0} · SPD ${second?.spd || 0} · STR ${second?.str ?? 5} · PER ${second?.per ?? 5} · STA ${second?.sta ?? 5} · VIT ${second?.vit ?? 5} · Fatigue ${state.fatigue?.[duel.opponent] ?? second?.fatigue ?? 0}/100`,
         '',
         `Round: *${Number(state.round) || 1}* · Next turn: *${(nextId === String(duel.challenger) ? first?.name : second?.name) || 'Unknown'}*`,
         state.lastAction ? `Latest action: ${state.lastAction}` : 'No actions taken yet.',
         `Guard states: ${Object.entries(state.guards || {}).filter(([, value]) => Number(value) > 0).map(([id, value]) => `${id === String(duel.challenger) ? first?.name : second?.name} ${Math.round(Number(value) * 100)}%`).join(', ') || 'None'}`,
         `Healing uses: ${Number(state.heals?.[duel.challenger] || 0)} / ${Number(state.heals?.[duel.opponent] || 0)}`,
         '',
-        `Actions: ${ctx.prefix}attack · ${ctx.prefix}heavy · ${ctx.prefix}guard · ${ctx.prefix}heal · ${ctx.prefix}ability · ${ctx.prefix}power · ${ctx.prefix}class · ${ctx.prefix}retreat`
+        `Actions: ${ctx.prefix}attack · ${ctx.prefix}heavy · ${ctx.prefix}dodge · ${ctx.prefix}block · ${ctx.prefix}heal · ${ctx.prefix}power · ${ctx.prefix}cc · ${ctx.prefix}class · ${ctx.prefix}retreat`
       ].join('\n'))
     }
     return send(sock, ctx.jid, m, `You are not in a battle. Use *${ctx.prefix}stages* or *${ctx.prefix}floor*.`)
@@ -593,9 +616,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (!p) return arise(sock, m, ctx)
     if (await store.getBattle(ctx.userId) || await store.activeDuelForUser(ctx.userId).catch(() => null)) return send(sock, ctx.jid, m, '⛔ You cannot train during an active battle.')
     const stat = String(requestedStat || '').trim().toLowerCase()
-    const labels = { atk: 'ATK', attack: 'ATK', def: 'DEF', defence: 'DEF', defense: 'DEF', spd: 'SPD', speed: 'SPD' }
-    const key = ({ ATK: 'atk', DEF: 'def', SPD: 'spd' })[labels[stat]]
-    if (!key) return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}train <atk|def|spd>*\nCost: *${TRAINING_COST} Coins* · Reward: *${TRAINING_XP_PER_USE} XP* (up to *${TRAINING_USES_DAILY_CAP} trainings / ${TRAINING_XP_DAILY_CAP} training XP per day).`)
+    const labels = { atk: 'ATK', attack: 'ATK', def: 'DEF', defence: 'DEF', defense: 'DEF', spd: 'SPD', speed: 'SPD', str: 'STR', strength: 'STR', per: 'PER', perception: 'PER', sta: 'STA', stamina: 'STA', vit: 'VIT', vitality: 'VIT' }
+    const key = ({ ATK: 'atk', DEF: 'def', SPD: 'spd', STR: 'str', PER: 'per', STA: 'sta', VIT: 'vit' })[labels[stat]]
+    if (!key) return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}train <atk|def|spd|str|per|sta|vit>*\nSTR boosts physical force · PER and SPD improve dodging · STA reduces fatigue gain · VIT increases HP and recovery.\nCost: *${TRAINING_COST} Coins* · Reward: *${TRAINING_XP_PER_USE} XP* (up to *${TRAINING_USES_DAILY_CAP} trainings / ${TRAINING_XP_DAILY_CAP} training XP per day).`)
 
     const result = await store.trainPlayer(ctx.userId, key, {
       cost: TRAINING_COST,
@@ -608,6 +631,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (result.reason === 'coins') return send(sock, ctx.jid, m, `💎 *NOT ENOUGH COINS*\n\nTraining costs *${TRAINING_COST} Coins*. You have *${fmt(result.coins)}*.`)
       if (result.reason === 'daily_cap') return send(sock, ctx.jid, m, `⏳ *TRAINING LIMIT REACHED*\n\nYou can train *${TRAINING_USES_DAILY_CAP} times per day*, earning up to *${TRAINING_XP_DAILY_CAP} XP*. Resets at 00:00 UTC.`)
       if (result.reason === 'player') return arise(sock, m, ctx)
+      if (result.reason === 'stat_cap') return send(sock, ctx.jid, m, `${labels[stat]} has reached its training cap of *100*.`)
       return send(sock, ctx.jid, m, 'That training option is unavailable.')
     }
     const progressed = applyProgress(result.player, { xp: 0 })
@@ -615,7 +639,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const statValue = progressed.player[key]
     let comboDiscovery = null
     const ownedCombos = await store.combos(ctx.userId).catch(() => [])
-    const undiscovered = comboCatalog.CATALOGUE.filter(combo => !ownedCombos.some(row => row.combo_key === combo.key))
+    const inventory = await store.inventory(ctx.userId).catch(() => [])
+    const ownedPowerKeys = new Set(inventory.filter(row => Number(row.qty) > 0).map(row => row.key))
+    const undiscovered = comboCatalog.CATALOGUE.filter(combo => Number(progressed.player.level) >= Number(combo.requiredLevel || 1) && !ownedCombos.some(row => row.combo_key === combo.key) && (!combo.abilityKey || ownedPowerKeys.has(combo.abilityKey)))
     if (undiscovered.length) {
       const candidate = undiscovered[Math.floor(Math.random() * undiscovered.length)]
       if (comboCatalog.rollDiscovery(Math.random, candidate.trainingChance)) {
@@ -629,6 +655,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return send(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '🏋️ *TRAINING COMPLETE*', '',
       `⚔️ ${labels[stat]} *${statValue}*  (+1)`,
+      result.hpBonus ? `❤️ Maximum HP +${result.hpBonus} · Current HP +${result.hpBonus}` : '',
       `💎 -${TRAINING_COST} Coins`, xpNote,
       `Training today: *${result.trainingUsesToday}/${TRAINING_USES_DAILY_CAP}* · XP: *${result.trainingXpToday}/${TRAINING_XP_DAILY_CAP}*`,
       comboDiscovery ? `\n🔓 *NEW COMBO DISCOVERED*\n${comboCatalog.get(comboDiscovery.combo_key)?.name || comboDiscovery.combo_key}\nView it with *${ctx.prefix}cc*.` : '',
@@ -766,6 +793,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (!p) return arise(sock, m, ctx)
     const b = await store.getBattle(ctx.userId)
     if (!b) return duelAct(sock, m, ctx, action, moveName, cardSlot)
+    b.fatigue = combatMechanics.fatigueValue(b.fatigue ?? p.fatigue)
+    p.fatigue = b.fatigue
 
     if (action === 'retreat') {
       await store.setBattle(ctx.userId, null)
@@ -856,7 +885,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (!(await store.hasCombo(ctx.userId, selectedCombo.key))) {
         return send(sock, ctx.jid, m, `🔒 *COMBO LOCKED*\n\n${selectedCombo.name}\nYou have not unlocked this combination. Discover it through training or purchase it with *${ctx.prefix}cc buy ${selectedCombo.key}*.`)
       }
-      if ((await store.inventoryQty(ctx.userId, selectedCombo.abilityKey)) < 1) {
+      if (selectedCombo.abilityKey && (await store.inventoryQty(ctx.userId, selectedCombo.abilityKey)) < 1) {
         return send(sock, ctx.jid, m, `🔒 You must own *${items.get(selectedCombo.abilityKey)?.name || selectedCombo.abilityKey}* to execute this combo.`)
       }
       if (Number(b.energy) < selectedCombo.energyCost) {
@@ -881,18 +910,25 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const equipped = await store.equippedCards(ctx.userId)
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
-      dealt = playerHit(p, b.enemy, 1.0, baseBonus)
+      dealt = playerHit({ ...p, fatigue: b.fatigue }, b.enemy, 1.0, baseBonus)
+      b.fatigue = combatMechanics.addFatigue(b.fatigue, 'attack', p)
       note = `\u2694\ufe0f You strike for *${dealt}*${baseBonus ? ` (includes ${weaponCard.name} +${baseBonus})` : ''}.`
     } else if (action === 'heavy') {
       const equipped = await store.equippedCards(ctx.userId)
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
       b.energy = Math.max(0, Number(b.energy) - HEAVY_ATTACK_ENERGY)
-      dealt = playerHit(p, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
+      dealt = playerHit({ ...p, fatigue: b.fatigue }, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
+      b.fatigue = combatMechanics.addFatigue(b.fatigue, 'heavy', p)
       note = `💥 *HEAVY ATTACK* deals *${dealt}* damage. (-${HEAVY_ATTACK_ENERGY} Energy)`
-    } else if (action === 'guard') {
+    } else if (action === 'guard' || action === 'block') {
       b.guard = 0.6
-      note = '\ud83d\udee1\ufe0f You brace for the counter.'
+      b.fatigue = combatMechanics.addFatigue(b.fatigue, 'block', p)
+      note = '🛡️ You brace for the counter.'
+    } else if (action === 'dodge') {
+      b.evade = true
+      b.fatigue = combatMechanics.addFatigue(b.fatigue, 'dodge', p)
+      note = '🌀 You prepare to evade the enemy counter.'
     } else if (action === 'heal') {
       /*
        * FLAT 10 HP, as the implementation note specifies.
@@ -901,7 +937,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
        * the five-per-combat limit worth wildly different amounts at level 1 and
        * level 80. The note fixes the value at 10, so it is a constant now.
        */
-      const amount = SELF_HEAL_HP
+      const amount = SELF_HEAL_HP + combatMechanics.healingBonus(p, SELF_HEAL_HP)
       b.playerHp = Math.min(p.maxHp, b.playerHp + amount)
       b.healsLeft -= 1
       p.healUses += 1
@@ -928,7 +964,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       })
 
       if (dmg.damaging) {
-        dealt = dmg.final
+        const classStrengthBonus = classMove.type === 'offensive' ? Math.floor(Math.max(0, (Number(p.str) || 5) - 5) * 0.35) : 0
+        dealt = Math.max(1, Math.round(combatMechanics.applyFatiguePenalty(Number(dmg.final) + classStrengthBonus, p, b.fatigue)))
+        if (classMove.type === 'offensive') b.fatigue = combatMechanics.addFatigue(b.fatigue, 'attack', p)
         note = `\ud83e\udde0 *${classMove.name}* lands for *${dealt}*.`
         if (dmg.bonus) note += `\n> base ${dmg.scaled} + class ${classGrade.grade} bonus ${dmg.bonus}`
       } else if (classMove.type === 'defensive') {
@@ -936,7 +974,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         note = `\ud83d\udee1\ufe0f *${classMove.name}* \u2014 you brace.`
       } else if (classMove.type === 'support' && Number(classMove.heal) > 0) {
         const before = b.playerHp
-        b.playerHp = Math.min(p.maxHp, b.playerHp + Number(classMove.heal))
+        b.playerHp = Math.min(p.maxHp, b.playerHp + combatMechanics.enhancedHealing(p, Number(classMove.heal)))
         note = `\u2764\ufe0f *${classMove.name}* restores *${b.playerHp - before}* HP.`
       } else {
         note = `\u2728 *${classMove.name}* \u2014 ${classMove.desc || 'the effect takes hold.'}`
@@ -973,13 +1011,38 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const equipped = await store.equippedCards(ctx.userId)
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
-      const drainDamage = Number(items.get(selectedCombo.abilityKey)?.effect?.damage) || 0
-      const healed = Math.min(p.maxHp, b.playerHp + drainDamage) - b.playerHp
-      b.playerHp += healed
-      b.energy = Math.max(0, Number(b.energy) - selectedCombo.energyCost)
-      const heavyDamage = playerHit(p, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
-      dealt = drainDamage + heavyDamage
-      note = `🔗 *${selectedCombo.name}*\n🩸 Soul Drain: *${drainDamage}* DMG · ❤️ +${healed} HP\n💥 Heavy fusion: *${heavyDamage}* DMG\n⚡ -${selectedCombo.energyCost} Energy`
+      const powerEntry = selectedCombo.abilityKey ? items.get(selectedCombo.abilityKey) : null
+      const effect = powerEntry?.effect || {}
+      const energyCost = Math.max(0, Number(selectedCombo.energyCost) || 0)
+      b.energy = Math.max(0, Number(b.energy) - energyCost)
+      const parts = []
+      const powerDamage = effect.damage ? Math.max(0, Math.round(Number(effect.damage) * Number(selectedCombo.powerMultiplier ?? 1))) : 0
+      if (powerDamage > 0) {
+        dealt += powerDamage
+        parts.push(`${powerEntry.name} ${powerDamage}`)
+        if (effect.lifesteal) {
+          const healed = Math.min(p.maxHp, b.playerHp + combatMechanics.enhancedHealing(p, powerDamage)) - b.playerHp
+          b.playerHp += healed
+          parts.push(`+${healed} HP`)
+        }
+      }
+      if (effect.guard || selectedCombo.guard) {
+        b.guard = Math.max(Number(b.guard) || 0, Number(selectedCombo.guard) || Number(effect.guard) || 0)
+        parts.push(`${Math.round(b.guard * 100)}% block`)
+      }
+      if (selectedCombo.attackMultiplier > 0) {
+        const physicalPlayer = { ...p, fatigue: b.fatigue }
+        const strike = playerHit(physicalPlayer, b.enemy, Number(selectedCombo.attackMultiplier), baseBonus)
+        dealt += strike
+        parts.push(`${selectedCombo.attackMultiplier >= HEAVY_ATTACK_MULTIPLIER ? 'Heavy' : 'Attack'} ${strike}`)
+      }
+      if (selectedCombo.evade) {
+        b.evade = true
+        if (selectedCombo.dodgeBonus) b.dodgeBonus = Number(selectedCombo.dodgeBonus)
+        parts.push('evasion prepared')
+      }
+      b.fatigue = combatMechanics.addFatigue(b.fatigue, selectedCombo.fatigueCost || selectedCombo.effect, p)
+      note = `🔗 *${selectedCombo.name}*\n${parts.join(' · ')} · ⚡ -${energyCost} Energy`
     } else if (action === 'power') {
       const result = items.apply(selectedPower, b, p)
       if (!result.ok) return send(sock, ctx.jid, m, `❌ ${result.note}`)
@@ -991,15 +1054,36 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
     b.enemyHp -= dealt
 
+    p.fatigue = b.fatigue
+    p.fatigueUpdatedAt = new Date().toISOString()
     if (b.enemyHp <= 0) return finishBattle(sock, m, ctx, p, b, true)
 
-    const hitDetails = enemyHitDetails(b.enemy, p, b.guard)
-    const hit = hitDetails.finalDamage
+    const hitDetails = enemyHitDetails(b.enemy, { ...p, fatigue: b.fatigue }, b.guard)
+    let hit = hitDetails.finalDamage
+    let blocked = hitDetails.blocked
     b.guard = 0
+    if (b.evade) {
+      const dodgeBonus = Math.max(0, Number(b.dodgeBonus) || 0)
+      const dodge = combatMechanics.resolveDodge({ ...p, fatigue: b.fatigue }, b.fatigue, Math.random(), dodgeBonus)
+      if (dodge.result === 'perfect') {
+        blocked += hit
+        hit = 0
+        note += '\n🌀 *PERFECT DODGE* · You avoid the counter completely.'
+      } else if (dodge.result === 'partial') {
+        const before = hit
+        hit = Math.max(1, Math.round(hit * dodge.damageMultiplier))
+        blocked += Math.max(0, before - hit)
+        note += `\n🌀 *PARTIAL DODGE* · Incoming damage reduced to *${hit}*.`
+      } else {
+        note += '\n🌀 *DODGE FAILED* · The counter connects.'
+      }
+      b.evade = false
+      b.dodgeBonus = 0
+    }
     b.playerHp -= hit
     b.damageTaken = Math.max(0, Number(b.damageTaken) || 0) + hit
-    b.damageBlocked = Math.max(0, Number(b.damageBlocked) || 0) + hitDetails.blocked
-    note += `\n\ud83d\udc79 ${b.enemy.name} answers for *${hit}*.`
+    b.damageBlocked = Math.max(0, Number(b.damageBlocked) || 0) + blocked
+    if (hit > 0) note += `\n👹 ${b.enemy.name} answers for *${hit}*.`
 
     /*
      * THE NPC'S CLASS MOVE.
@@ -1030,6 +1114,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
     b.equippedCards = await store.equippedCards(ctx.userId)
     b.lastEvent = note
+    await persistFatigue(ctx.userId, p.fatigue, p.fatigueUpdatedAt, p)
     await store.setBattle(ctx.userId, b)
 
     return withVisual(sock, ctx.jid, m, b.enemy.boss ? 'boss' : 'battle', battleCard(b, p, note), battleButtons(), true)
@@ -1128,7 +1213,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const combo = comboCatalog.get(moveName)
       if (!combo) return send(sock, ctx.jid, m, `❌ Unknown combo. See *${ctx.prefix}cc shop*.`)
       if (!(await store.hasCombo(actorId, combo.key))) return send(sock, ctx.jid, m, `🔒 *COMBO LOCKED*\n\n${combo.name}\nUnlock it through training or purchase.`)
-      if ((await store.inventoryQty(actorId, combo.abilityKey)) < 1) return send(sock, ctx.jid, m, `🔒 You must own *${items.get(combo.abilityKey)?.name || combo.abilityKey}* to execute this combo.`)
+      if (combo.abilityKey && (await store.inventoryQty(actorId, combo.abilityKey)) < 1) return send(sock, ctx.jid, m, `🔒 You must own *${items.get(combo.abilityKey)?.name || combo.abilityKey}* to execute this combo.`)
       if (Number((liveState.energy || {})[actorId] ?? actor.powerEnergy) < combo.energyCost) return send(sock, ctx.jid, m, `⚡ This combo costs *${combo.energyCost} Energy*.`)
       power = combo
     }
@@ -1159,14 +1244,21 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       state.maxHp = { ...(state.maxHp || { [challengerId]: first.maxHp, [opponentId]: second.maxHp }) }
       state.energy = { ...(state.energy || { [challengerId]: first.powerEnergy, [opponentId]: second.powerEnergy }) }
       state.maxEnergy = { ...(state.maxEnergy || { [challengerId]: first.maxPowerEnergy, [opponentId]: second.maxPowerEnergy }) }
+      state.fatigue = { ...(state.fatigue || { [challengerId]: first.fatigue || 0, [opponentId]: second.fatigue || 0 }) }
       state.guards = { ...(state.guards || {}) }
+      state.evading = { ...(state.evading || {}) }
+      state.evadeBonus = { ...(state.evadeBonus || {}) }
       state.heals = { ...(state.heals || {}) }
       if (String(state.turn || challengerId) !== actorId) { waitingForTurn = true; return null }
 
       let damage = 0
       const actorHp = Math.max(0, Number(state.hp[actorId] ?? actor.hp))
       const targetHp = Math.max(0, Number(state.hp[targetId] ?? target.hp))
-      const targetStats = { def: target.def, atk: target.atk }
+      const actorFatigue = combatMechanics.fatigueValue(state.fatigue[actorId] ?? actor.fatigue)
+      const targetFatigue = combatMechanics.fatigueValue(state.fatigue[targetId] ?? target.fatigue)
+      const actorForTurn = { ...actor, fatigue: actorFatigue }
+      const targetStats = { ...target, fatigue: targetFatigue }
+      let fatigueAction = ''
       if (action === 'attack' || action === 'heavy') {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
         if (action === 'heavy' && energy < HEAVY_ATTACK_ENERGY) {
@@ -1179,17 +1271,23 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
           cardBonus = Number(weaponCard.damage) || 0
           weaponName = weaponCard.name || ''
         }
-        damage = playerHit(actor, targetStats, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, cardBonus)
+        damage = playerHit(actorForTurn, targetStats, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, cardBonus)
+        fatigueAction = action
         if (action === 'heavy') state.energy[actorId] = energy - HEAVY_ATTACK_ENERGY
         actionNote = action === 'heavy' ? `💥 Heavy Attack (-${HEAVY_ATTACK_ENERGY} Energy)` : `⚔️ Strike${weaponName ? ` · ${weaponName}` : ''}`
-      } else if (action === 'guard') {
+      } else if (action === 'guard' || action === 'block') {
         state.guards[actorId] = 0.6
+        fatigueAction = 'block'
         actionNote = '🛡️ Guard raised'
+      } else if (action === 'dodge') {
+        state.evading[actorId] = true
+        fatigueAction = 'dodge'
+        actionNote = '🌀 Evasion prepared'
       } else if (action === 'heal') {
         const used = Number(state.heals[actorId] || 0)
         const limit = Math.max(1, Number(ctx.settings.selfHealPerCombat) || 5)
         if (used >= limit) { mutationError = `You have used all ${limit} heals in this duel.`; return null }
-        const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + SELF_HEAL_HP) - actorHp
+        const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + combatMechanics.enhancedHealing(actor, SELF_HEAL_HP)) - actorHp
         if (healed <= 0) { mutationError = 'Your HP is already full.'; return null }
         state.hp[actorId] = actorHp + healed
         state.heals[actorId] = used + 1
@@ -1199,7 +1297,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         actionNote = `🎴 ${card?.ability || card?.name || 'Card ability'}`
       } else if (action === 'power') {
         const fakeBattle = { enemy: { hp: target.maxHp, atk: target.atk, def: target.def }, enemyHp: targetHp, playerHp: actorHp, guard: 0 }
-        const applied = items.apply(power, fakeBattle, actor)
+        const applied = items.apply(power, fakeBattle, actorForTurn)
         if (!applied.ok) { mutationError = applied.note; return null }
         state.hp[actorId] = applied.battle.playerHp
         state.guards[actorId] = applied.battle.guard || 0
@@ -1209,15 +1307,38 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
         const combo = power
         if (energy < combo.energyCost) { mutationError = `This combo costs ${combo.energyCost} Energy. You have ${energy}.`; return null }
-        const drain = Number(items.get(combo.abilityKey)?.effect?.damage) || 0
-        const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + drain) - actorHp
-        state.hp[actorId] = actorHp + healed
         state.energy[actorId] = energy - combo.energyCost
         let cardBonus = 0
         if (weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now())) cardBonus = Number(weaponCard.damage) || 0
-        const heavyDamage = playerHit(actor, targetStats, HEAVY_ATTACK_MULTIPLIER, cardBonus)
-        damage = drain + heavyDamage
-        actionNote = `🔗 ${combo.name} · Soul Drain ${drain} + Heavy ${heavyDamage} · +${healed} HP · -${combo.energyCost} Energy`
+        const ability = combo.abilityKey ? items.get(combo.abilityKey) : null
+        const effect = ability?.effect || {}
+        const parts = []
+        if (effect.damage) {
+          const powerDamage = Math.max(0, Math.round(Number(effect.damage) * Number(combo.powerMultiplier ?? 1)))
+          damage += powerDamage
+          parts.push(`${ability.name} ${powerDamage}`)
+          if (effect.lifesteal) {
+            const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), Number(state.hp[actorId]) + combatMechanics.enhancedHealing(actor, powerDamage)) - Number(state.hp[actorId])
+            state.hp[actorId] = Number(state.hp[actorId]) + healed
+            parts.push(`+${healed} HP`)
+          }
+        }
+        if (effect.guard || combo.guard) {
+          state.guards[actorId] = Math.max(Number(state.guards[actorId]) || 0, Number(combo.guard) || Number(effect.guard) || 0)
+          parts.push(`${Math.round(state.guards[actorId] * 100)}% block`)
+        }
+        if (combo.attackMultiplier > 0) {
+          const hit = playerHit(actorForTurn, targetStats, Number(combo.attackMultiplier), cardBonus)
+          damage += hit
+          parts.push(`${combo.attackMultiplier >= HEAVY_ATTACK_MULTIPLIER ? 'Heavy' : 'Attack'} ${hit}`)
+        }
+        if (combo.evade) {
+          state.evading[actorId] = true
+          state.evadeBonus[actorId] = Number(combo.dodgeBonus) || 0
+          parts.push('evasion prepared')
+        }
+        fatigueAction = combo.fatigueCost || combo.effect
+        actionNote = `🔗 ${combo.name} · ${parts.join(' · ')}`
       } else if (action === 'class') {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
         const cost = Math.max(0, Number(classMove.cost) || 0)
@@ -1227,13 +1348,15 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         const grade = classes.classGradeFor(classMastery)
         const effect = classes.classDamage({ move: classMove, mastery: classMastery, gradeBonus: grade.bonus })
         if (effect.damaging) {
-          damage = Math.max(1, Number(effect.final) || 1)
+          const classStrengthBonus = classMove.type === 'offensive' ? Math.floor(Math.max(0, (Number(actor.str) || 5) - 5) * 0.35) : 0
+          damage = Math.max(1, Math.round(combatMechanics.applyFatiguePenalty((Number(effect.final) || 1) + classStrengthBonus, actorForTurn, actorFatigue)))
+          if (classMove.type === 'offensive') fatigueAction = 'attack'
           actionNote = `🎭 ${classMove.name}`
         } else if (classMove.type === 'defensive') {
           state.guards[actorId] = 0.6
           actionNote = `🛡️ ${classMove.name} · Guard raised`
         } else if (classMove.type === 'support' && Number(classMove.heal) > 0) {
-          const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + Number(classMove.heal)) - actorHp
+          const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + combatMechanics.enhancedHealing(actor, Number(classMove.heal))) - actorHp
           state.hp[actorId] = actorHp + healed
           actionNote = `❤️ ${classMove.name} · +${healed} HP`
         } else actionNote = `✨ ${classMove.name}`
@@ -1242,13 +1365,27 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         return null
       }
 
+      if (fatigueAction) state.fatigue[actorId] = combatMechanics.addFatigue(actorFatigue, fatigueAction, actor)
       if (damage > 0) {
         const guard = Math.max(0, Math.min(0.9, Number(state.guards[targetId]) || 0))
-        const finalDamage = Math.max(1, Math.round(damage * (1 - guard)))
+        let finalDamage = Math.max(1, Math.round(damage * (1 - guard)))
         state.guards[targetId] = 0
+        if (state.evading[targetId]) {
+          const dodge = combatMechanics.resolveDodge(targetStats, targetFatigue, Math.random(), Number(state.evadeBonus[targetId]) || 0)
+          state.evading[targetId] = false
+          state.evadeBonus[targetId] = 0
+          if (dodge.result === 'perfect') {
+            finalDamage = 0
+            actionNote += ' · PERFECT DODGE'
+          } else if (dodge.result === 'partial') {
+            finalDamage = Math.max(1, Math.round(finalDamage * dodge.damageMultiplier))
+            actionNote += ' · PARTIAL DODGE'
+          } else actionNote += ' · DODGE FAILED'
+        }
         state.hp[targetId] = Math.max(0, targetHp - finalDamage)
-        actionNote += ` · ${finalDamage} dealt`
+        if (finalDamage) actionNote += ` · ${finalDamage} dealt`
       }
+
 
       state.round = Math.max(1, Number(state.round) || 1)
       if (Number(state.hp[targetId]) <= 0) {
@@ -1289,6 +1426,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       let winner = store.rollDay(winningPlayer)
       let loser = store.rollDay(losingPlayer)
       const finalState = resultState || updated.state || {}
+      winner.fatigue = combatMechanics.fatigueValue(finalState.fatigue?.[winnerId] ?? winner.fatigue)
+      loser.fatigue = combatMechanics.fatigueValue(finalState.fatigue?.[losingId] ?? loser.fatigue)
+      winner.fatigueUpdatedAt = new Date().toISOString()
+      loser.fatigueUpdatedAt = new Date().toISOString()
       winner.hp = Math.max(1, Math.min(winner.maxHp, Number(finalState.hp?.[winnerId] ?? winner.hp)))
       loser.hp = Math.max(1, Math.round(loser.maxHp * 0.25))
       winner.powerEnergy = Math.max(0, Math.min(winner.maxPowerEnergy, Number(finalState.energy?.[winnerId] ?? winner.powerEnergy)))
@@ -1323,6 +1464,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     }
 
     const state = resultState || updated.state || {}
+    actor.fatigue = combatMechanics.fatigueValue(state.fatigue?.[actorId] ?? actor.fatigue)
+    actor.fatigueUpdatedAt = new Date().toISOString()
+    await persistFatigue(actorId, actor.fatigue, actor.fatigueUpdatedAt, actor)
     const nextId = String(state.turn || targetId)
     const nextPlayer = nextId === challengerId ? first : second
     const nextActorHp = Number(state.hp?.[actorId] ?? actor.hp)
@@ -1412,6 +1556,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.setBattle(ctx.userId, null)
     p = store.rollDay(p)
     p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
+    p.fatigue = combatMechanics.fatigueValue(b.fatigue ?? p.fatigue)
+    p.fatigueUpdatedAt = new Date().toISOString()
     p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp) || 0))
     p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy) || 0))
     if (won) {
@@ -1525,6 +1671,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       }
     }
 
+    const nowFatigueStamp = new Date().toISOString()
+    a.fatigueUpdatedAt = nowFatigueStamp
+    b.fatigueUpdatedAt = nowFatigueStamp
+    await persistFatigue(a.userId, a.fatigue || 0, nowFatigueStamp, a)
+    await persistFatigue(b.userId, b.fatigue || 0, nowFatigueStamp, b)
     const state = {
       turn: String(a.userId),
       round: 1,
@@ -1532,7 +1683,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       maxHp: { [a.userId]: a.maxHp, [b.userId]: b.maxHp },
       energy: { [a.userId]: a.powerEnergy, [b.userId]: b.powerEnergy },
       maxEnergy: { [a.userId]: a.maxPowerEnergy, [b.userId]: b.maxPowerEnergy },
+      fatigue: { [a.userId]: a.fatigue || 0, [b.userId]: b.fatigue || 0 },
       guards: {},
+      evading: {},
       heals: {}
     }
     await store.updateDuel(d.id, { status: 'active', state, promoted })
@@ -1545,7 +1698,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       `Rank *${b.rank}* Lv.${b.level} \u2022 ${b.hp}/${b.maxHp} HP`, '',
       promoteNote, '',
       `Duel *#${d.id}* is live. *${a.name}* moves first.`,
-      `Use *${ctx.settings.prefix}attack*, *${ctx.settings.prefix}heavy*, *${ctx.settings.prefix}guard*, *${ctx.settings.prefix}heal*, *${ctx.settings.prefix}ability*, *${ctx.settings.prefix}power <name>* or *${ctx.settings.prefix}class*.`,
+      `Use *${ctx.settings.prefix}attack*, *${ctx.settings.prefix}heavy*, *${ctx.settings.prefix}dodge*, *${ctx.settings.prefix}block*, *${ctx.settings.prefix}heal*, *${ctx.settings.prefix}power <name>*, *${ctx.settings.prefix}cc* or *${ctx.settings.prefix}class*.`,
       `Use *${ctx.settings.prefix}battleinfo* for details. *${ctx.settings.prefix}retreat* gives no rewards and does not count towards rest.`
     ].filter(Boolean).join('\n'))
   }
@@ -1788,6 +1941,6 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
 module.exports = {
   createAxyon, applyProgress, buildEnemy, playerHit, enemyHit,
-  powerEnergyForRank, profileCard, battleCard, battleInfoCard,
+  powerEnergyForRank, profileCard, battleCard, battleInfoCard, combatMechanics,
   CLASSES, CLASS_MOVES, MODES, WATERMARK
 }

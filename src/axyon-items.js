@@ -1,4 +1,6 @@
 'use strict'
+
+const combatMechanics = require('./axyon-combat-mechanics')
 /*
  * ITEMS AND ABILITIES — the shop catalogue.
  *
@@ -156,7 +158,7 @@ function apply (entry, battle, player) {
   }
 
   if (e.healPct) {
-    const amount = Math.round(p.maxHp * e.healPct)
+    const amount = combatMechanics.enhancedHealing(p, Math.round(p.maxHp * e.healPct))
     if (b) {
       const before = b.playerHp
       b.playerHp = Math.min(p.maxHp, b.playerHp + amount)
@@ -185,7 +187,7 @@ function apply (entry, battle, player) {
     notes.push(`\ud83d\udca5 Dealt *${e.damage}* damage.`)
     if (e.lifesteal) {
       const before = b.playerHp
-      b.playerHp = Math.min(p.maxHp, b.playerHp + e.damage)
+      b.playerHp = Math.min(p.maxHp, b.playerHp + combatMechanics.enhancedHealing(p, e.damage))
       notes.push(`\ud83e\ude78 Drained *${b.playerHp - before}* HP.`)
     }
   }
