@@ -42,7 +42,7 @@ function harness ({ player = null, battle = null, floors = [], sendButtons } = {
   for (const k of ['player', 'group', 'getBattle', 'setBattle', 'savePlayer', 'log',
     'settings', 'axyonNumberMode', 'roleOf', 'partnerOf', 'floors', 'stage', 'stages',
     'classMastery', 'classMovesUsedToday', 'consumeClassMove', 'addClassMastery',
-    'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'modes', 'floorStory', 'saveFloorStory']) {
+    'equippedCards', 'useCardAbility', 'inventory', 'inventoryQty', 'hasCombo', 'updateFatigue', 'modes', 'floorStory', 'saveFloorStory']) {
     saved[k] = store[k]
   }
 
@@ -70,6 +70,11 @@ function harness ({ player = null, battle = null, floors = [], sendButtons } = {
   store.useCardAbility = async () => ({ ok: false, reason: 'empty_slot' })
   store.inventory = async () => []
   store.inventoryQty = async () => 0
+  store.hasCombo = async () => true
+  store.updateFatigue = async (_userId, fatigue, updatedAt) => {
+    if (state.player) { state.player.fatigue = fatigue; state.player.fatigueUpdatedAt = updatedAt }
+    return { fatigue, fatigue_updated_at: updatedAt }
+  }
   store.modes = async () => [
     { mode: 'solo', enabled: true, max_players: 1 },
     { mode: 'multiplayer', enabled: true, max_players: 8 },
@@ -313,4 +318,70 @@ test('dungeon: floor opens a chapter decision while !fight stays story-free', as
   const fightResult = await fightHarness.send('!fight')
   fightHarness.restore()
   assert.doesNotMatch(fightResult.out, /STORY|YOUR DECISION/i)
+})
+
+
+test('combat: Attack + Dodge deals reduced damage and can perfect-dodge the counter', async () => {
+  const h = harness({
+    player: basePlayer(),
+    battle: {
+      mode: 'stage', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50,
+      enemyHp: 200, playerHp: 100, damageTaken: 0, damageBlocked: 0,
+      enemy: { name: 'Outer Gate', hp: 200, atk: 12, def: 2, xp: 40, zen: 60 }
+    }
+  })
+  const originalRandom = Math.random
+  Math.random = () => 0
+  try {
+    const { out } = await h.send('!attack + !dodge')
+    assert.ok(/Slipstream Strike|Attack|DODGE/i.test(out), out.slice(0, 300))
+    assert.ok(/PERFECT DODGE/i.test(out), out.slice(0, 500))
+    assert.ok(h.state.battle.enemyHp < 200)
+    assert.equal(h.state.battle.damageTaken, 0)
+    assert.ok(h.state.battle.fatigue > 0)
+  } finally {
+    Math.random = originalRandom
+    h.restore()
+  }
+})
+
+test('combat: Heavy + Block combines a heavy strike with stronger protection', async () => {
+  const h = harness({
+    player: basePlayer(),
+    battle: {
+      mode: 'stage', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50,
+      enemyHp: 200, playerHp: 100, damageTaken: 0, damageBlocked: 0,
+      enemy: { name: 'Outer Gate', hp: 200, atk: 12, def: 2, xp: 40, zen: 60 }
+    }
+  })
+  const { out } = await h.send('!heavy + !block')
+  assert.ok(/Bulwark Breaker|Heavy|block/i.test(out), out.slice(0, 300))
+  assert.ok(h.state.battle.enemyHp < 200)
+  assert.ok(h.state.battle.damageBlocked > 0)
+  assert.ok(h.state.battle.fatigue > 0)
+  h.restore()
+})
+
+test('combat: Power + Heavy preserves Soul Drain damage and healing before the heavy strike', async () => {
+  const h = harness({
+    player: basePlayer({ hp: 50, vit: 11 }),
+    battle: {
+      mode: 'stage', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50,
+      enemyHp: 200, playerHp: 50, damageTaken: 0, damageBlocked: 0,
+      enemy: { name: 'Outer Gate', hp: 200, atk: 5, def: 2, xp: 40, zen: 60 }
+    }
+  })
+  store.inventoryQty = async (_userId, key) => key === 'ability_drain' ? 1 : 0
+  const originalRandom = Math.random
+  Math.random = () => 0
+  try {
+    const { out } = await h.send('!power ability_drain + !heavy')
+    assert.ok(/Soul Drain: Heavy Fusion/i.test(out), out.slice(0, 400))
+    assert.ok(/40/.test(out))
+    assert.ok(h.state.battle.enemyHp < 160)
+    assert.ok(h.state.battle.playerHp > 50)
+  } finally {
+    Math.random = originalRandom
+    h.restore()
+  }
 })

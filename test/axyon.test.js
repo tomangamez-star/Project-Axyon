@@ -48,7 +48,7 @@ test('global purge command and resetall alias are registered', () => {
 test('the next combat patch commands are registered', () => {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
-  for (const name of ['heavy', 'battleinfo', 'rest', 'train', 'power', 'convert']) {
+  for (const name of ['heavy', 'dodge', 'block', 'battleinfo', 'rest', 'train', 'power', 'convert']) {
     assert.ok(c.BY_NAME.has(name), `${name} should be registered`)
   }
 })
@@ -249,4 +249,14 @@ test('admin validates input before touching the database', async () => {
   assert.strictEqual((await admin.act('visual-set', { mode: 'battle', url: 'not-a-url' })).ok, false)
   assert.strictEqual((await admin.act('number-add', { userId: 'abc' })).ok, false)
   assert.strictEqual((await admin.act('mode', { mode: 'nonsense' })).ok, false)
+})
+
+
+test('profile card exposes new combat stats without replacing existing ATK, DEF or SPD', () => {
+  const card = rpg.profileCard({
+    userId: '1', name: 'Hunter', rank: 'E', level: 4, grade: 1, xp: 0, zen: 0, coins: 0,
+    hp: 100, maxHp: 100, atk: 8, def: 5, spd: 6, str: 7, per: 8, sta: 9, vit: 10, fatigue: 22,
+    powerEnergy: 50, maxPowerEnergy: 50, stage: 1, wins: 0, losses: 0, class: 'Fighter'
+  })
+  for (const value of ['ATK *8*', 'DEF *5*', 'SPD *6*', 'STR *7*', 'PER *8*', 'STA *9*', 'VIT *10*', 'Fatigue *22/100*']) assert.ok(card.includes(value), value)
 })
