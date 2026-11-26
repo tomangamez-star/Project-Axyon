@@ -117,6 +117,30 @@ function commandParts (content = {}, prefix = '!') {
   return { command: parts[0].toLowerCase().split('@')[0], args: parts.slice(1), raw }
 }
 
+
+/** Resolve the mentioned or replied-to player to AXYON's canonical phone key. */
+async function resolveTargetUserId (sock, content = {}) {
+  const ci = content?.extendedTextMessage?.contextInfo ||
+    content?.imageMessage?.contextInfo ||
+    content?.videoMessage?.contextInfo ||
+    content?.documentMessage?.contextInfo || {}
+  const raw = (ci.mentionedJid || [])[0] || ci.participantAlt || ci.participant
+  if (!raw) return null
+  const jid = String(raw).split(':')[0]
+  if (/@s\.whatsapp\.net$/i.test(jid)) return numberFromJid(jid)
+  if (/@(?:hosted\.)?lid$/i.test(jid)) {
+    const mapping = sock?.signalRepository?.lidMapping
+    if (mapping?.getPNForLID) {
+      try {
+        const pn = await mapping.getPNForLID(jid)
+        if (pn) return numberFromJid(pn)
+      } catch {}
+    }
+    return null
+  }
+  return numberFromJid(jid)
+}
+
 module.exports = {
   resolveMessageUserId,
   jidsFromKey,
@@ -128,6 +152,7 @@ module.exports = {
   quotedUserId,
   mentionedId,
   resolveMentionedId,
+  resolveTargetUserId,
   visibleText,
   commandParts
 }

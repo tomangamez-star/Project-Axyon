@@ -103,6 +103,108 @@ const CHAPTERS = [
       { id: 'captains_network', name: 'A CAPTAIN’S NETWORK', npc: 'Captain Ilyra', description: 'Build an alliance with Ilyra and the surviving hunters.', objective: 'Choose “Trust Ilyra’s plan” in Northline Refuge.', reward: { xp: 230, zen: 320 } }
     ]
   }
+  ,
+  {
+    title: 'THE SHATTERED MERIDIAN', place: 'Meridian Scar', npc: 'Tessa Vorn',
+    intro: [
+      'The road beyond Northline splits around a vast fracture in the ground. Blue light rises from its depths, carrying voices from distant gates.',
+      'Survey markers have been driven into the stone, but every marker points in a different direction.',
+      'Tessa Vorn, a gate engineer, is trying to keep a bridge stable while something climbs toward the surface.'
+    ],
+    prompt: 'Tessa needs you to choose: reinforce the bridge, descend into the fracture, or draw the creature away.',
+    choices: [
+      { label: 'Reinforce the bridge', result: 'You secure the supports. The crossing steadies, and Tessa shares a safe route through the scar.', flags: ['meridian_bridge'], quest: 'hold_the_line', enemy: { atk: -6 } },
+      { label: 'Descend into the fracture', result: 'Below the surface you find a gate fragment pulsing in time with your System. The creature senses you.', flags: ['meridian_fragment'], quest: 'below_the_meridian', enemy: { hp: 25, atk: 3 } },
+      { label: 'Lure the creature away', result: 'You draw the threat from the bridge and give Tessa time to evacuate her crew.', flags: ['meridian_lure'], quest: 'engineers_escape', enemy: { hp: -15 } },
+      { label: 'Study the markers', result: 'The markers form a map of a route that has not opened yet. Tessa copies it before the light fades.', flags: ['meridian_map'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'hold_the_line', name: 'HOLD THE LINE', npc: 'Tessa Vorn', description: 'Keep the Meridian crossing stable.', objective: 'Choose “Reinforce the bridge” at Meridian Scar.', reward: { xp: 360, zen: 420 } },
+      { id: 'below_the_meridian', name: 'BENEATH THE SCAR', npc: 'Tessa Vorn', description: 'Recover the gate fragment below the fracture.', objective: 'Choose “Descend into the fracture” at Meridian Scar.', reward: { xp: 420, zen: 380 } },
+      { id: 'engineers_escape', name: 'THE ENGINEERS’ ESCAPE', npc: 'Tessa Vorn', description: 'Draw the creature away from Tessa’s crew.', objective: 'Choose “Lure the creature away” at Meridian Scar.', reward: { xp: 390, zen: 450 } }
+    ]
+  },
+  {
+    title: 'THE CATHEDRAL OF ECHOES', place: 'Vesper Basilica', npc: 'Brother Cael',
+    intro: [
+      'A cathedral stands in the centre of an abandoned district. Its bells ring from empty towers, and every echo repeats a command in the System’s voice.',
+      'Brother Cael has sealed the doors from within. He claims the echoes are memories stolen from hunters who never returned.',
+      'A choir of shadows gathers behind the altar.'
+    ],
+    prompt: 'Cael asks you to silence the bells, follow the voices, or protect the people hiding below.',
+    choices: [
+      { label: 'Silence the bells', result: 'The echoes stop. For one quiet moment, the System cannot hear you.', flags: ['cathedral_silent'], quest: 'quiet_the_choir', enemy: { atk: -7 } },
+      { label: 'Follow the voices', result: 'The voices lead to a hidden chamber containing a record of the first gate breach.', flags: ['first_breach_record'], quest: 'first_breach', enemy: { hp: -20 } },
+      { label: 'Defend the lower hall', result: 'You hold the stairwell while Cael leads the survivors to safety.', flags: ['lower_hall_saved'], quest: 'last_congregation', enemy: { atk: -5 } },
+      { label: 'Break the altar seal', result: 'The altar cracks. Something answers from beneath the cathedral and the shadows grow stronger.', flags: ['altar_broken'], quest: null, enemy: { hp: 35, atk: 4 } }
+    ],
+    quests: [
+      { id: 'quiet_the_choir', name: 'QUIET THE CHOIR', npc: 'Brother Cael', description: 'Stop the cathedral echoes.', objective: 'Choose “Silence the bells” at Vesper Basilica.', reward: { xp: 450, zen: 520 } },
+      { id: 'first_breach', name: 'THE FIRST BREACH', npc: 'Brother Cael', description: 'Find the record of the first gate breach.', objective: 'Choose “Follow the voices” at Vesper Basilica.', reward: { xp: 520, zen: 480 } },
+      { id: 'last_congregation', name: 'THE LAST CONGREGATION', npc: 'Brother Cael', description: 'Protect the survivors in the lower hall.', objective: 'Choose “Defend the lower hall” at Vesper Basilica.', reward: { xp: 480, zen: 560 } }
+    ]
+  },
+  {
+    title: 'THE NAMELESS CITADEL', place: 'Nhal Keep', npc: 'Veyra Nox',
+    intro: [
+      'The citadel has no entrance, only a wall of black stone covered in names. Some belong to missing hunters. One is yours, written in fresh silver.',
+      'Veyra Nox, a former keeper, waits beside a gate that opens only when a name is spoken.',
+      'Inside, the corridors rearrange themselves around whoever enters.'
+    ],
+    prompt: 'Veyra offers three paths: speak your name, erase the inscription, or let her open the gate.',
+    choices: [
+      { label: 'Speak your name', result: 'The gate recognises you. A hidden passage opens, though something now knows exactly where you are.', flags: ['citadel_named'], quest: 'the_name_test', enemy: { hp: 20, atk: 2 } },
+      { label: 'Erase the inscription', result: 'Your name vanishes from the wall. The citadel loses its hold over the passage.', flags: ['name_erased'], quest: 'unwritten', enemy: { atk: -8 } },
+      { label: 'Trust Veyra', result: 'Veyra uses an old keeper’s seal to open a side entrance and gives you the remaining key.', flags: ['veyra_trusted'], quest: 'keepers_key', enemy: { hp: -20 } },
+      { label: 'Enter without answering', result: 'You force the gate. The corridors shift violently, but you reach the inner court.', flags: ['citadel_forced'], quest: null, enemy: { hp: 40, atk: 4 } }
+    ],
+    quests: [
+      { id: 'the_name_test', name: 'THE NAME TEST', npc: 'Veyra Nox', description: 'Learn why the citadel already knows your name.', objective: 'Choose “Speak your name” at Nhal Keep.', reward: { xp: 600, zen: 650 } },
+      { id: 'unwritten', name: 'THE UNWRITTEN', npc: 'Veyra Nox', description: 'Remove your name from the citadel wall.', objective: 'Choose “Erase the inscription” at Nhal Keep.', reward: { xp: 620, zen: 620 } },
+      { id: 'keepers_key', name: 'THE KEEPER’S KEY', npc: 'Veyra Nox', description: 'Earn Veyra’s trust and take the old seal.', objective: 'Choose “Trust Veyra” at Nhal Keep.', reward: { xp: 580, zen: 700 } }
+    ]
+  },
+  {
+    title: 'THRONE OF THE HOLLOW KING', place: 'Crownfall Expanse', npc: 'Marshal Edrin',
+    intro: [
+      'A dead kingdom stretches beneath a sky split by a permanent red aurora. At its centre stands a throne surrounded by empty armour.',
+      'Marshal Edrin commands the last group of gate wardens. Their reports describe a king who rules without a body.',
+      'The throne room doors open before you reach them.'
+    ],
+    prompt: 'Edrin asks you to rally the wardens, investigate the throne, or challenge the king’s unseen guard.',
+    choices: [
+      { label: 'Rally the wardens', result: 'The wardens form a line behind you. Their signal weakens the king’s influence over the arena.', flags: ['wardens_rallied'], quest: 'crownfall_line', enemy: { atk: -9 } },
+      { label: 'Investigate the throne', result: 'You find a crown-shaped imprint and a message: the king is a title passed between vessels.', flags: ['hollow_crown'], quest: 'vessel_of_kings', enemy: { hp: -15 } },
+      { label: 'Challenge the guard', result: 'The empty armour moves as one. You break through, but the throne begins to awaken.', flags: ['guard_challenged'], quest: 'empty_army', enemy: { hp: 45, atk: 5 } },
+      { label: 'Search the royal archive', result: 'The archive reveals a sealed route leading beyond the kingdom.', flags: ['royal_route'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'crownfall_line', name: 'THE CROWNFALL LINE', npc: 'Marshal Edrin', description: 'Rally the last wardens against the hollow king.', objective: 'Choose “Rally the wardens” at Crownfall Expanse.', reward: { xp: 700, zen: 800 } },
+      { id: 'vessel_of_kings', name: 'VESSEL OF KINGS', npc: 'Marshal Edrin', description: 'Discover how the hollow king survives.', objective: 'Choose “Investigate the throne” at Crownfall Expanse.', reward: { xp: 760, zen: 740 } },
+      { id: 'empty_army', name: 'THE EMPTY ARMY', npc: 'Marshal Edrin', description: 'Break the throne guard.', objective: 'Choose “Challenge the guard” at Crownfall Expanse.', reward: { xp: 820, zen: 700 } }
+    ]
+  },
+  {
+    title: 'THE GATE SOVEREIGN', place: 'The Origin Gate', npc: 'The First Witness',
+    intro: [
+      'Beyond the kingdom lies a gate larger than the horizon. Its surface carries every mark left by every hunter who has ever entered a dungeon.',
+      'The First Witness stands before it, wearing no rank and carrying no weapon. The System cannot identify them.',
+      'Behind the gate, a second world waits in complete silence.'
+    ],
+    prompt: 'The Witness gives you one final choice: open the gate, seal it, or demand the truth from the System.',
+    choices: [
+      { label: 'Open the gate', result: 'The gate unfolds into a path. The world beyond recognises your arrival, and the next chapter begins elsewhere.', flags: ['origin_opened'], quest: 'beyond_the_gate', enemy: { hp: 30, atk: 4 } },
+      { label: 'Seal the gate', result: 'You lock the passage from this side. The pressure fades, but the Witness warns that another gate will appear.', flags: ['origin_sealed'], quest: 'last_seal', enemy: { atk: -10 } },
+      { label: 'Question the System', result: 'For the first time, the System pauses before answering. A hidden record is added to your journal.', flags: ['system_questioned'], quest: 'system_answer', enemy: { hp: -25 } },
+      { label: 'Challenge the Witness', result: 'The Witness accepts. The gate lights up, and the final guardian steps forward.', flags: ['witness_challenged'], quest: null, enemy: { hp: 55, atk: 6 } }
+    ],
+    quests: [
+      { id: 'beyond_the_gate', name: 'BEYOND THE GATE', npc: 'The First Witness', description: 'Open the Origin Gate and learn what waits beyond.', objective: 'Choose “Open the gate” at the Origin Gate.', reward: { xp: 950, zen: 1100 } },
+      { id: 'last_seal', name: 'THE LAST SEAL', npc: 'The First Witness', description: 'Seal the Origin Gate.', objective: 'Choose “Seal the gate” at the Origin Gate.', reward: { xp: 900, zen: 1200 } },
+      { id: 'system_answer', name: 'THE SYSTEM’S ANSWER', npc: 'The First Witness', description: 'Force the System to reveal a hidden record.', objective: 'Choose “Question the System” at the Origin Gate.', reward: { xp: 1050, zen: 1000 } }
+    ]
+  }
+
 ]
 
 function chapterFor (ordinal) { return CHAPTERS[(Math.max(1, Number(ordinal) || 1) - 1) % CHAPTERS.length] }
@@ -173,7 +275,12 @@ function explore (ordinal, state) {
     'Dust falls from the ceiling in patterns that resemble written names.',
     'The air vibrates whenever the unseen bell rings.',
     'The glass branches repeat a footprint that has not been made yet.',
-    'The refuge walls contain a second set of evacuation marks.'
+    'The refuge walls contain a second set of evacuation marks.',
+    'The Meridian stones carry a map that changes when you look away.',
+    'The cathedral floor vibrates with echoes from a forgotten battle.',
+    'The citadel wall has a blank space shaped exactly like your shadow.',
+    'The royal archive records a king who was erased from every portrait.',
+    'The Origin Gate bears a mark matching the System interface.'
   ]
   return { ok: true, state: saved, repeated: found, chapter,
     message: found

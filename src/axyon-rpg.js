@@ -16,6 +16,7 @@ const T = require('./theme')
 const music = require('./music')
 const classes = require('./axyon-classes')
 const items = require('./axyon-items')
+const comboCatalog = require('./axyon-combos')
 const floorStory = require('./floor-story')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
@@ -612,6 +613,15 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const progressed = applyProgress(result.player, { xp: 0 })
     await store.savePlayer(progressed.player)
     const statValue = progressed.player[key]
+    let comboDiscovery = null
+    const ownedCombos = await store.combos(ctx.userId).catch(() => [])
+    const undiscovered = comboCatalog.CATALOGUE.filter(combo => !ownedCombos.some(row => row.combo_key === combo.key))
+    if (undiscovered.length) {
+      const candidate = undiscovered[Math.floor(Math.random() * undiscovered.length)]
+      if (comboCatalog.rollDiscovery(Math.random, candidate.trainingChance)) {
+        comboDiscovery = await store.unlockCombo(ctx.userId, candidate.key, 'training')
+      }
+    }
     const events = progressed.events.map(event => event.type === 'level'
       ? `⬆️ Level *${event.level}*`
       : event.type === 'grade' ? `🎖 Grade *${event.grade}*` : `🏅 Rank *${event.rank}*`).join('\n')
@@ -621,6 +631,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       `⚔️ ${labels[stat]} *${statValue}*  (+1)`,
       `💎 -${TRAINING_COST} Coins`, xpNote,
       `Training today: *${result.trainingUsesToday}/${TRAINING_USES_DAILY_CAP}* · XP: *${result.trainingXpToday}/${TRAINING_XP_DAILY_CAP}*`,
+      comboDiscovery ? `\n🔓 *NEW COMBO DISCOVERED*\n${comboCatalog.get(comboDiscovery.combo_key)?.name || comboDiscovery.combo_key}\nView it with *${ctx.prefix}cc*.` : '',
       events ? `\n${events}` : ''
     ].filter(Boolean).join('\n'))
   }
@@ -838,6 +849,20 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     }
 
     let selectedPower = null
+    let selectedCombo = null
+    if (action === 'combo') {
+      selectedCombo = comboCatalog.get(moveName)
+      if (!selectedCombo) return send(sock, ctx.jid, m, `❌ Unknown combo. See *${ctx.prefix}cc shop*.`)
+      if (!(await store.hasCombo(ctx.userId, selectedCombo.key))) {
+        return send(sock, ctx.jid, m, `🔒 *COMBO LOCKED*\n\n${selectedCombo.name}\nYou have not unlocked this combination. Discover it through training or purchase it with *${ctx.prefix}cc buy ${selectedCombo.key}*.`)
+      }
+      if ((await store.inventoryQty(ctx.userId, selectedCombo.abilityKey)) < 1) {
+        return send(sock, ctx.jid, m, `🔒 You must own *${items.get(selectedCombo.abilityKey)?.name || selectedCombo.abilityKey}* to execute this combo.`)
+      }
+      if (Number(b.energy) < selectedCombo.energyCost) {
+        return send(sock, ctx.jid, m, `⚡ This combo costs *${selectedCombo.energyCost} Energy*. You have *${Math.max(0, Number(b.energy) || 0)}*.`)
+      }
+    }
     if (action === 'power') {
       const key = String(moveName || '').trim().toLowerCase()
       selectedPower = items.get(key) || items.abilities().find(entry => entry.name.toLowerCase() === key)
@@ -944,6 +969,17 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     } else if (action === 'card') {
       dealt = playerHit(p, b.enemy, 1.0, Number(selectedAbility?.ability_damage) || 0)
       note = `\ud83c\udccf *${selectedAbility.name} · ${selectedAbility.ability}* erupts for *${dealt}*. (${selectedAbility.ability_uses}/3 today)`
+    } else if (action === 'combo') {
+      const equipped = await store.equippedCards(ctx.userId)
+      const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
+      const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
+      const drainDamage = Number(items.get(selectedCombo.abilityKey)?.effect?.damage) || 0
+      const healed = Math.min(p.maxHp, b.playerHp + drainDamage) - b.playerHp
+      b.playerHp += healed
+      b.energy = Math.max(0, Number(b.energy) - selectedCombo.energyCost)
+      const heavyDamage = playerHit(p, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
+      dealt = drainDamage + heavyDamage
+      note = `🔗 *${selectedCombo.name}*\n🩸 Soul Drain: *${drainDamage}* DMG · ❤️ +${healed} HP\n💥 Heavy fusion: *${heavyDamage}* DMG\n⚡ -${selectedCombo.energyCost} Energy`
     } else if (action === 'power') {
       const result = items.apply(selectedPower, b, p)
       if (!result.ok) return send(sock, ctx.jid, m, `❌ ${result.note}`)
@@ -1058,7 +1094,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     let classMastery = 0
     let weaponCard = null
 
-    if (action === 'attack' || action === 'heavy') {
+    if (action === 'attack' || action === 'heavy' || action === 'combo') {
       const equipped = await store.equippedCards(actorId)
       weaponCard = equipped.find(c => Number(c.equipped_slot) === 1) || null
     }
@@ -1086,6 +1122,15 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if ((await store.inventoryQty(actorId, power.key)) < 1) {
         return send(sock, ctx.jid, m, `🔒 You have not unlocked *${power.name}*. Buy it from *${ctx.prefix}shop abilities*.`)
       }
+    }
+
+    if (action === 'combo') {
+      const combo = comboCatalog.get(moveName)
+      if (!combo) return send(sock, ctx.jid, m, `❌ Unknown combo. See *${ctx.prefix}cc shop*.`)
+      if (!(await store.hasCombo(actorId, combo.key))) return send(sock, ctx.jid, m, `🔒 *COMBO LOCKED*\n\n${combo.name}\nUnlock it through training or purchase.`)
+      if ((await store.inventoryQty(actorId, combo.abilityKey)) < 1) return send(sock, ctx.jid, m, `🔒 You must own *${items.get(combo.abilityKey)?.name || combo.abilityKey}* to execute this combo.`)
+      if (Number((liveState.energy || {})[actorId] ?? actor.powerEnergy) < combo.energyCost) return send(sock, ctx.jid, m, `⚡ This combo costs *${combo.energyCost} Energy*.`)
+      power = combo
     }
 
     if (action === 'class') {
@@ -1160,6 +1205,19 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         state.guards[actorId] = applied.battle.guard || 0
         damage = targetHp - Number(applied.battle.enemyHp)
         actionNote = `✨ ${power.name}`
+      } else if (action === 'combo') {
+        const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        const combo = power
+        if (energy < combo.energyCost) { mutationError = `This combo costs ${combo.energyCost} Energy. You have ${energy}.`; return null }
+        const drain = Number(items.get(combo.abilityKey)?.effect?.damage) || 0
+        const healed = Math.min(Number(state.maxHp[actorId] || actor.maxHp), actorHp + drain) - actorHp
+        state.hp[actorId] = actorHp + healed
+        state.energy[actorId] = energy - combo.energyCost
+        let cardBonus = 0
+        if (weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now())) cardBonus = Number(weaponCard.damage) || 0
+        const heavyDamage = playerHit(actor, targetStats, HEAVY_ATTACK_MULTIPLIER, cardBonus)
+        damage = drain + heavyDamage
+        actionNote = `🔗 ${combo.name} · Soul Drain ${drain} + Heavy ${heavyDamage} · +${healed} HP · -${combo.energyCost} Energy`
       } else if (action === 'class') {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
         const cost = Math.max(0, Number(classMove.cost) || 0)

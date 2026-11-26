@@ -49,7 +49,12 @@ const DEFAULT_SETTINGS = {
 const ORIGINAL_STAGES = [
   { key: 'stage_1', name: 'Outer Gate', ordinal: 1, hp: 60, atk: 5, def: 2, xp: 40, zen: 60 },
   { key: 'stage_2', name: 'Broken Causeway', ordinal: 2, hp: 110, atk: 9, def: 4, xp: 80, zen: 120 },
-  { key: 'stage_3', name: 'Hollow Threshold', ordinal: 3, hp: 180, atk: 14, def: 7, xp: 140, zen: 220 }
+  { key: 'stage_3', name: 'Hollow Threshold', ordinal: 3, hp: 180, atk: 14, def: 7, xp: 140, zen: 220 },
+  { key: 'stage_4', name: 'Ashen Causeway', ordinal: 4, hp: 250, atk: 19, def: 9, xp: 190, zen: 300 },
+  { key: 'stage_5', name: 'Wraithbound Crossing', ordinal: 5, hp: 330, atk: 24, def: 12, xp: 260, zen: 420 },
+  { key: 'stage_6', name: 'Obsidian Watch', ordinal: 6, hp: 430, atk: 30, def: 15, xp: 340, zen: 560 },
+  { key: 'stage_7', name: 'Crownless Arena', ordinal: 7, hp: 560, atk: 37, def: 18, xp: 440, zen: 720 },
+  { key: 'stage_8', name: 'The Sovereign Gate', ordinal: 8, hp: 720, atk: 45, def: 22, xp: 580, zen: 950 }
 ]
 
 /*
@@ -69,7 +74,12 @@ const ORIGINAL_FLOORS = [
   { key: 'floor_2', name: 'Cracked Colonnade', ordinal: 2, boss: false, hp: 140, atk: 11, def: 5, xp: 100, zen: 150 },
   { key: 'floor_3', name: 'Drowned Archive', ordinal: 3, boss: false, hp: 210, atk: 16, def: 8, xp: 170, zen: 260 },
   { key: 'floor_4', name: 'The Black Stair', ordinal: 4, boss: false, hp: 300, atk: 22, def: 11, xp: 260, zen: 400 },
-  { key: 'floor_5', name: 'Warden of the Deep', ordinal: 5, boss: true, hp: 460, atk: 30, def: 15, xp: 420, zen: 700 }
+  { key: 'floor_5', name: 'Warden of the Deep', ordinal: 5, boss: true, hp: 460, atk: 30, def: 15, xp: 420, zen: 700 },
+  { key: 'floor_6', name: 'The Shattered Meridian', ordinal: 6, boss: false, hp: 590, atk: 36, def: 18, xp: 520, zen: 900 },
+  { key: 'floor_7', name: 'Cathedral of Echoes', ordinal: 7, boss: false, hp: 740, atk: 43, def: 22, xp: 650, zen: 1150 },
+  { key: 'floor_8', name: 'The Nameless Citadel', ordinal: 8, boss: false, hp: 920, atk: 51, def: 26, xp: 800, zen: 1450 },
+  { key: 'floor_9', name: 'Throne of the Hollow King', ordinal: 9, boss: false, hp: 1160, atk: 60, def: 31, xp: 1000, zen: 1800 },
+  { key: 'floor_10', name: 'The Gate Sovereign', ordinal: 10, boss: true, hp: 1500, atk: 72, def: 38, xp: 1350, zen: 2500 }
 ]
 
 let ready = false
@@ -347,6 +357,13 @@ async function ensureSchema () {
       promoted JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+
+    CREATE TABLE IF NOT EXISTS axyon_combos(
+      user_id TEXT NOT NULL,
+      combo_key TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'training',
+      unlocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY(user_id, combo_key));
 
     CREATE TABLE IF NOT EXISTS axyon_inventory(
       user_id TEXT NOT NULL,
@@ -1672,6 +1689,60 @@ async function consumeItem (userId, key) {
   return r.rows.length ? Number(r.rows[0].qty) : null
 }
 
+/* ---------------------------------------------------------- command combos */
+
+async function combos (userId) {
+  await ensureSchema()
+  return (await db().query(
+    'SELECT combo_key,source,unlocked_at FROM axyon_combos WHERE user_id=$1 ORDER BY unlocked_at',
+    [String(userId)]
+  )).rows
+}
+
+async function hasCombo (userId, comboKey) {
+  await ensureSchema()
+  const r = await db().query(
+    'SELECT 1 FROM axyon_combos WHERE user_id=$1 AND combo_key=$2',
+    [String(userId), String(comboKey)]
+  )
+  return r.rowCount > 0
+}
+
+async function unlockCombo (userId, comboKey, source = 'training') {
+  await ensureSchema()
+  const r = await db().query(
+    `INSERT INTO axyon_combos(user_id,combo_key,source) VALUES($1,$2,$3)
+     ON CONFLICT(user_id,combo_key) DO NOTHING RETURNING combo_key,source,unlocked_at`,
+    [String(userId), String(comboKey), String(source)]
+  )
+  return r.rows[0] || null
+}
+
+async function buyCombo (userId, comboKey, price, requiredLevel = 1) {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const playerResult = await client.query('SELECT * FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
+    if (!playerResult.rowCount) { await client.query('ROLLBACK'); return { ok: false, reason: 'player' } }
+    const player = norm(playerResult.rows[0])
+    if (player.level < requiredLevel) { await client.query('ROLLBACK'); return { ok: false, reason: 'level', level: player.level, requiredLevel } }
+    const exists = await client.query('SELECT 1 FROM axyon_combos WHERE user_id=$1 AND combo_key=$2', [String(userId), String(comboKey)])
+    if (exists.rowCount) { await client.query('ROLLBACK'); return { ok: false, reason: 'owned' } }
+    if (player.zen < price) { await client.query('ROLLBACK'); return { ok: false, reason: 'zen', balance: player.zen } }
+    await client.query('UPDATE axyon_players SET zen=zen-$2,updated_at=NOW() WHERE user_id=$1', [String(userId), Math.floor(Number(price))])
+    const unlocked = await client.query(
+      'INSERT INTO axyon_combos(user_id,combo_key,source) VALUES($1,$2,$3) RETURNING combo_key,source,unlocked_at',
+      [String(userId), String(comboKey), 'purchase']
+    )
+    await client.query('COMMIT')
+    return { ok: true, combo: unlocked.rows[0], balance: player.zen - price }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
+}
+
 /* ---------------------------------------------------------- floor story */
 
 async function floorStory (userId) {
@@ -2319,6 +2390,10 @@ module.exports = {
   inventoryQty,
   addItem,
   consumeItem,
+  combos,
+  hasCombo,
+  unlockCombo,
+  buyCombo,
   classMastery,
   classMasteries,
   addClassMastery,

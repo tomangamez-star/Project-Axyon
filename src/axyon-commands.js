@@ -22,11 +22,12 @@ const guild = require('./axyon-guild')
 const lyrics = require('./lyrics')
 const adventure = require('./axyon-adventure')
 const collab = require('./axyon-collab')
+const combos = require('./axyon-combos')
 
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
 const { norm, isOwner } = require('./access')
-const { displayName, mentionedId, resolveMentionedId, resolveMessageUserId } = require('./identity')
+const { displayName, mentionedId, resolveMentionedId, resolveMessageUserId, resolveTargetUserId } = require('./identity')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -42,7 +43,7 @@ function withTimeout (promise, ms) {
 }
 
 /* Commands that must work before a player has registered. */
-const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype', 'mode', 'modes', 'collab', 'purge', 'resetall'])
+const OPEN_BEFORE_ARISE = new Set(['arise', 'help', 'ping', 'register', 'group', 'unregister', 'groups', 'prefix', 'numbers', 'rhm', 'stage', 'flooradmin', 'modes', 'visual', 'economy', 'reset', 'grantcard', 'spawncard', 'cardadmin', 'classadmin', 'top', 'story', 'aura', 'feedback', 'room', 'roomtype', 'mode', 'modes', 'collab', 'purge', 'resetall', 'givezen', 'takezen', 'givecoins', 'takecoins', 'setlevel', 'setrank', 'setgrade', 'setwins', 'cc'])
 
 const MODE_LIST = {
   duel: { name: 'Duel', blurb: 'One player against another player.' },
@@ -206,6 +207,68 @@ Reason: ${lock.reason}` : ''}`)
     return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *PREFIX CHANGED*\n\nNew prefix: *${next}*\nExample: *${next}help*`)
   })
 
+
+  /* ----------------------------------------------------- owner progression */
+
+  async function resolveAdminTarget (sock, content) {
+    return resolveTargetUserId(sock, content)
+  }
+
+  async function ownerTargetCommand (sock, message, ctx, args, content, action) {
+    if (!ctx.auth.owner) return axyon.send(sock, ctx.jid, message, '🛡️ *OWNER ONLY*\n\nOnly the AXYON owner can use progression controls.')
+    const target = await resolveAdminTarget(sock, content)
+    if (!target) return axyon.send(sock, ctx.jid, message, `Reply to a player's message or mention them.\nExample: *${ctx.prefix}${action} @player 500*`)
+    const player = await store.player(target)
+    if (!player) return axyon.send(sock, ctx.jid, message, 'That player has not registered with AXYON.')
+    const values = (args || []).filter(value => !String(value).startsWith('@'))
+    const rawValue = values[0]
+    const amount = parseNum(rawValue)
+    const isZen = action.endsWith('zen')
+    const isCoins = action.endsWith('coins')
+    const isGive = action.startsWith('give')
+    if ((isZen || isCoins) && (amount == null || amount <= 0 || !Number.isSafeInteger(amount))) {
+      return axyon.send(sock, ctx.jid, message, `Usage: *${ctx.prefix}${action} @player <positive amount>* (or reply to their message).`)
+    }
+    if (isZen || isCoins) {
+      const field = isZen ? 'zen' : 'coins'
+      const before = Number(player[field]) || 0
+      if (!isGive && before < amount) return axyon.send(sock, ctx.jid, message, `❌ ${player.name || target} only has *${fmt(before)} ${isZen ? 'Zen' : 'Coins'}*.`)
+      player[field] = isGive ? before + amount : before - amount
+      if (!Number.isSafeInteger(player[field]) || player[field] < 0) return axyon.send(sock, ctx.jid, message, '❌ That balance change is outside the supported range.')
+      await store.savePlayer(player)
+      await store.log(ctx.userId, action, target, { amount, before, after: player[field] })
+      return axyon.send(sock, ctx.jid, message, `${W}\n\n✅ *${isGive ? 'CURRENCY GRANTED' : 'CURRENCY SUBTRACTED'}*\n\nPlayer: *${player.name || target}*\n${isZen ? '💰 Zen' : '💎 Coins'}: *${fmt(before)} → ${fmt(player[field])}*`)
+    }
+
+    const before = { level: player.level, rank: player.rank, grade: player.grade, wins: player.wins }
+    if (action === 'setlevel') {
+      if (amount == null || amount < 1 || amount > 999) return axyon.send(sock, ctx.jid, message, `Usage: *${ctx.prefix}setlevel @player <1-999>*`)
+      player.level = amount
+      player.xp = 0
+    } else if (action === 'setrank') {
+      const rank = store.RANKS.find(value => value.toLowerCase() === String(rawValue || '').toLowerCase())
+      if (!rank) return axyon.send(sock, ctx.jid, message, `Ranks: ${store.RANKS.join(', ')}`)
+      player.rank = rank
+      const energy = Number(store.POWER_ENERGY_BY_RANK[rank] || store.POWER_ENERGY_BASE)
+      player.maxPowerEnergy = energy
+      player.powerEnergy = Math.min(player.powerEnergy, energy)
+    } else if (action === 'setgrade') {
+      if (amount == null || amount < 1 || amount > 100) return axyon.send(sock, ctx.jid, message, `Usage: *${ctx.prefix}setgrade @player <1-100>*`)
+      player.grade = amount
+    } else if (action === 'setwins') {
+      if (amount == null || amount < 0 || amount > 1000000000) return axyon.send(sock, ctx.jid, message, `Usage: *${ctx.prefix}setwins @player <0-1000000000>*`)
+      player.wins = amount
+    }
+    await store.savePlayer(player)
+    await store.log(ctx.userId, action, target, { before, after: { level: player.level, rank: player.rank, grade: player.grade, wins: player.wins } })
+    const field = action.slice(3)
+    return axyon.send(sock, ctx.jid, message, `${W}\n\n✅ *PLAYER ${field.toUpperCase()} UPDATED*\n\nPlayer: *${player.name || target}*\nLevel *${player.level}* · Rank *${player.rank}* · Grade *${player.grade}* · Wins *${player.wins}*`)
+  }
+
+  for (const action of ['givezen', 'takezen', 'givecoins', 'takecoins', 'setlevel', 'setrank', 'setgrade', 'setwins']) {
+    cmd(action, 'management', `{p}${action} @player <value>`, 'Owner-only player progression control. Mention a player or reply to their message.', async (sock, message, ctx, args, content) => ownerTargetCommand(sock, message, ctx, args, content, action))
+  }
+
   /* ---------------------------------------------------------------- stages */
 
   cmd('stages', 'battle', '{p}stages', 'List battle stages and your position.', async (s, m, ctx) => axyon.listStages(s, m, ctx))
@@ -265,7 +328,12 @@ Reason: ${lock.reason}` : ''}`)
   }, { hidden: true })
   cmd('carduse', 'battle', '{p}carduse', 'Call on a claimed card. 3 uses per day.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
   cmd('ability', 'battle', '{p}ability', 'Use your equipped card ability in battle.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'card'), { hidden: true })
-  cmd('power', 'battle', '{p}power [owned power]', 'View purchased hunter powers or use one in battle.', async (s, m, ctx, args) => {
+  cmd('power', 'battle', '{p}power [owned power + !heavy]', 'View hunter powers, use one, or execute an unlocked command combo.', async (s, m, ctx, args) => {
+    if (args && args.includes('+')) {
+      const combo = combos.parseRecipe(args)
+      if (!combo) return axyon.send(s, ctx.jid, m, `❌ Invalid combo order. Try *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
     if (args && args.length) return axyon.battleAct(s, m, ctx, 'power', 1, args.join(' '))
     const rows = await store.inventory(ctx.userId)
     const owned = rows.map(row => ({ ...row, entry: items.get(row.key) })).filter(row => row.entry?.kind === 'ability')
@@ -276,6 +344,53 @@ Reason: ${lock.reason}` : ''}`)
       '', 'Card abilities remain under `!ability`.'
     ].join('\n'))
   })
+
+  cmd('cc', 'battle', '{p}cc [shop|buy <combo>|power <ability> + heavy]', 'View, purchase and execute personal Command Combos.', async (s, m, ctx, args) => {
+    const sub = String(args[0] || '').toLowerCase()
+    if (sub === 'shop') {
+      const owned = await store.combos(ctx.userId)
+      return axyon.send(s, ctx.jid, m, [
+        `${W}`, '', '🔗 *COMMAND COMBO CATALOGUE*', '',
+        ...combos.CATALOGUE.map(combo => {
+          const has = owned.some(row => row.combo_key === combo.key)
+          return `${has ? '✅' : '🔒'} *${combo.name}*\\n${combo.description}\\n💰 ${fmt(combo.price)} Zen · Lv.${combo.requiredLevel}+\\nKey: \`${combo.key}\``
+        }),
+        '', 'Unlock through training discovery or purchase.'
+      ].join('\\n'))
+    }
+    if (sub === 'buy') {
+      const combo = combos.get(args.slice(1).join(' '))
+      if (!combo) return axyon.send(s, ctx.jid, m, `Unknown combo. Use *${ctx.prefix}cc shop*.`)
+      const result = await store.buyCombo(ctx.userId, combo.key, combo.price, combo.requiredLevel)
+      if (!result.ok) {
+        const messages = {
+          player: 'Register with !arise first.',
+          owned: 'You already own this combo.',
+          level: `This combo requires Level ${combo.requiredLevel}. You are Level ${(await store.player(ctx.userId))?.level || 1}.`,
+          zen: `You need ${fmt(combo.price)} Zen. Your balance is ${fmt(result.balance)}.`
+        }
+        return axyon.send(s, ctx.jid, m, `🔒 ${messages[result.reason] || 'Purchase unavailable.'}`)
+      }
+      await store.log(ctx.userId, 'combo_purchase', combo.key, { price: combo.price })
+      return axyon.send(s, ctx.jid, m, `✅ *COMBO UNLOCKED*\\n\\n${combo.name}\\nBalance: *${fmt(result.balance)} Zen*\\nUse *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy* in battle.`)
+    }
+    if (sub === 'power' && args.includes('+')) {
+      const combo = combos.parseRecipe(args.slice(1))
+      if (!combo) return axyon.send(s, ctx.jid, m, `Invalid order. Use *${ctx.prefix}cc power ability_drain + heavy*.`)
+      return axyon.battleAct(s, m, ctx, 'combo', 1, combo.key)
+    }
+    const owned = await store.combos(ctx.userId)
+    if (!owned.length) return axyon.send(s, ctx.jid, m, `🔗 *COMMAND COMBOS*\\n\\nYou have no unlocked combos yet. Train for a 1-in-5 discovery chance or use *${ctx.prefix}cc shop*.`)
+    return axyon.send(s, ctx.jid, m, [
+      `${W}`, '', '🔗 *YOUR COMMAND COMBOS*', '',
+      ...owned.map(row => {
+        const combo = combos.get(row.combo_key)
+        return combo ? `✅ *${combo.name}*\\n${combo.description}\\nRecipe: *${ctx.prefix}power ability_drain + ${ctx.prefix}heavy*` : `✅ ${row.combo_key}`
+      }),
+      '', `Catalogue: *${ctx.prefix}cc shop*`
+    ].join('\\n'))
+  })
+
   cmd('retreat', 'battle', '{p}retreat', 'Leave the encounter. Retreats give no rewards and do not count towards rest.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'retreat'), { hidden: true })
 
   /* --------------------------------------------------------------- dungeon */
@@ -302,12 +417,13 @@ Reason: ${lock.reason}` : ''}`)
     if (!p) return axyon.arise(s, m, ctx)
     const floors = await store.floors()
     if (!floors.length) return axyon.send(s, ctx.jid, m, `\ud83c\udff9 No dungeon floors exist yet. AXYON can add one with *${ctx.prefix}flooradmin add <name>*`)
-    const ordinal = parseNum(args[0]) ?? 1
+    const storyState = await store.floorStory(ctx.userId)
+    const ordinal = parseNum(args[0]) ?? Math.max(1, Number(storyState.chapter) || 1)
     const f = floors.find(x => Number(x.ordinal) === ordinal)
     if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
     if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
     const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
-    const scene = floorStory.begin(ordinal, await store.floorStory(ctx.userId))
+    const scene = floorStory.begin(ordinal, storyState)
     const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, storyPending: true }
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name, chapter: scene.chapter.title })
