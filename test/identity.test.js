@@ -41,3 +41,17 @@ test('message sender prefers a WhatsApp phone JID when both phone and LID are pr
   } }
   assert.equal(await resolveMessageUserId({}, message), '2348012345678')
 })
+
+
+test('owner target resolution accepts a reply to a phone-number message', async () => {
+  const content = { extendedTextMessage: { contextInfo: { participant: '2348012345678@s.whatsapp.net' } } }
+  const { resolveTargetUserId } = require('../src/identity')
+  assert.equal(await resolveTargetUserId({}, content), '2348012345678')
+})
+
+test('owner target resolution maps a reply to a LID message', async () => {
+  const content = { extendedTextMessage: { contextInfo: { participant: '123456789012345@lid' } } }
+  const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '2348012345678@s.whatsapp.net' } } }
+  const { resolveTargetUserId } = require('../src/identity')
+  assert.equal(await resolveTargetUserId(sock, content), '2348012345678')
+})

@@ -25,6 +25,17 @@ function freshPlayer (over = {}) {
 
 /* ------------------------------------------------------------- manuscript */
 
+
+test('owner progression and command-combo commands are registered', () => {
+  const a = createAxyon({})
+  const c = createCommands({ axyon: a })
+  for (const name of ['givezen', 'takezen', 'givecoins', 'takecoins', 'setlevel', 'setrank', 'setgrade', 'setwins', 'cc']) {
+    assert.ok(c.BY_NAME.has(name), `${name} should be registered`)
+  }
+})
+
+
+
 test('global purge command and resetall alias are registered', () => {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
@@ -71,8 +82,13 @@ test('Power Energy spans 50 to 220', () => {
   assert.strictEqual(rpg.powerEnergyForRank('Monarch'), 220)
 })
 
-test('there are exactly three original stages', () => {
-  assert.strictEqual(store.ORIGINAL_STAGES.length, 3)
+test('the stage ladder preserves its first three stages and adds five new stages', () => {
+  assert.strictEqual(store.ORIGINAL_STAGES.length, 8)
+  assert.deepStrictEqual(store.ORIGINAL_STAGES.slice(0, 3).map(row => row.key), ['stage_1', 'stage_2', 'stage_3'])
+})
+test('the dungeon floor catalogue now covers floors one through ten', () => {
+  assert.strictEqual(store.ORIGINAL_FLOORS.length, 10)
+  assert.deepStrictEqual(store.ORIGINAL_FLOORS.slice(5).map(row => row.ordinal), [6, 7, 8, 9, 10])
 })
 
 test('rank ladder runs E to Monarch', () => {
