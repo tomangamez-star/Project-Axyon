@@ -296,7 +296,6 @@ const A = (() => {
     <div class="admin-grid">
       <label class="admin-field"><small>Default prefix</small><input id="setPrefix" value="${esc(s.prefix)}" maxlength="3"></label>
       <label class="admin-field"><small>Daily XP limit</small><input id="setXp" type="number" min="0" value="${s.xpDailyLimit}"></label>
-      <label class="admin-field"><small>Daily Zen limit</small><input id="setZen" type="number" min="0" value="${s.zenDailyLimit}"></label>
       <label class="admin-field"><small>Party max</small><input id="setPartyMax" type="number" min="2" value="${s.partyMax}"></label>
       <label class="admin-field"><small>Party min</small><input id="setPartyMin" type="number" min="1" value="${s.partyMin}"></label>
       <label class="admin-field"><small>Self-heals per combat</small><input id="setHeals" type="number" min="0" value="${s.selfHealPerCombat}"></label>
@@ -459,7 +458,6 @@ const A = (() => {
     if (saveSettings) saveSettings.onclick = () => act('settings', {
       prefix: host.querySelector('#setPrefix').value,
       xpDailyLimit: host.querySelector('#setXp').value,
-      zenDailyLimit: host.querySelector('#setZen').value,
       partyMax: host.querySelector('#setPartyMax').value,
       partyMin: host.querySelector('#setPartyMin').value,
       selfHealPerCombat: host.querySelector('#setHeals').value,
