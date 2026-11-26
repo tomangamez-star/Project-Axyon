@@ -26,7 +26,6 @@ const BASE_SPD = 5
 const DEFAULT_SETTINGS = {
   prefix: '!',
   xpDailyLimit: 5000,
-  zenDailyLimit: 5000,
   partyMax: 5,
   partyMin: 2,
   selfHealPerCombat: 5,
@@ -144,6 +143,8 @@ async function ensureSchema () {
       vit INT NOT NULL DEFAULT 5,
       fatigue INT NOT NULL DEFAULT 0,
       fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      mp INT NOT NULL DEFAULT 0,
+      max_mp INT NOT NULL DEFAULT 0,
       power_energy INT NOT NULL DEFAULT 50,
       max_power_energy INT NOT NULL DEFAULT 50,
       stage INT NOT NULL DEFAULT 1,
@@ -172,6 +173,14 @@ async function ensureSchema () {
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS vit INT NOT NULL DEFAULT 5;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS fatigue INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS mp INT NOT NULL DEFAULT 0;
+    ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS max_mp INT NOT NULL DEFAULT 0;
+    -- Existing characters keep all progression. Players already level 10+
+    -- receive their newly introduced MP tank once; lower levels stay locked.
+    UPDATE axyon_players
+       SET max_mp=100 + (((level - 10) / 5) * 15),
+           mp=100 + (((level - 10) / 5) * 15)
+     WHERE level >= 10 AND max_mp=0;
 
     CREATE TABLE IF NOT EXISTS axyon_stages(
       id BIGSERIAL PRIMARY KEY,
@@ -574,7 +583,7 @@ async function settings () {
     await ensureSchema()
     const rows = (await db().query('SELECT key,value FROM axyon_settings')).rows
     const out = { ...DEFAULT_SETTINGS }
-    for (const r of rows) out[r.key] = r.value
+    for (const r of rows) if (r.key !== 'zenDailyLimit') out[r.key] = r.value
     return out
   })
 }
@@ -716,6 +725,11 @@ function dayKey (d = new Date()) {
   return d.toISOString().slice(0, 10)
 }
 
+function mpCapacityForLevel (level) {
+  const n = Math.floor(Number(level) || 1)
+  return n < 10 ? 0 : 100 + Math.floor((n - 10) / 5) * 15
+}
+
 function xpNeed (level) {
   return 100 + Math.max(1, Number(level) || 1) * 50
 }
@@ -748,6 +762,8 @@ function norm (r) {
     vit: Number(r.vit ?? 5),
     fatigue: Number(r.fatigue ?? 0),
     fatigueUpdatedAt: r.fatigue_updated_at || null,
+    mp: Number(r.mp ?? 0),
+    maxMp: Number(r.max_mp ?? 0),
     powerEnergy: Number(r.power_energy),
     maxPowerEnergy: Number(r.max_power_energy),
     stage: Number(r.stage),
@@ -783,6 +799,16 @@ async function arise (userId, name = '') {
 
 async function player (userId) {
   await ensureSchema()
+  const levelRow = (await db().query('SELECT level FROM axyon_players WHERE user_id=$1', [String(userId)])).rows[0]
+  if (levelRow) {
+    const capacity = mpCapacityForLevel(levelRow.level)
+    await db().query(
+      `UPDATE axyon_players SET max_mp=$2,
+         mp=CASE WHEN max_mp=0 AND $2>0 THEN $2 WHEN $2=0 THEN 0 ELSE LEAST(mp,$2) END
+       WHERE user_id=$1 AND max_mp<>$2`,
+      [String(userId), capacity]
+    )
+  }
   const cooled = await db().query(
     `UPDATE axyon_players p
        SET fatigue=GREATEST(0, p.fatigue - FLOOR(EXTRACT(EPOCH FROM (NOW()-p.fatigue_updated_at))/900)::int),
@@ -817,14 +843,16 @@ async function savePlayer (p) {
        atk=$11,def=$12,spd=$13,power_energy=$14,max_power_energy=$15,stage=$16,wins=$17,losses=$18,
        battles_since_rest=$19,zen_today=$20,xp_today=$21,training_xp_today=$22,training_uses_today=$23,
        day_key=$24,class=$25,class_moves_used=$26,heal_uses=$27,card_uses=$28,last_daily=$29,
-       str=$30,per=$31,sta=$32,vit=$33,fatigue=$34,fatigue_updated_at=COALESCE($35::timestamptz,NOW()),updated_at=NOW()
+       str=$30,per=$31,sta=$32,vit=$33,fatigue=$34,fatigue_updated_at=COALESCE($35::timestamptz,NOW()),
+       max_mp=$36,mp=$37,updated_at=NOW()
      WHERE user_id=$1 RETURNING *`,
     [p.userId, p.name, p.rank, p.level, p.grade, p.xp, p.zen, p.coins, p.hp, p.maxHp,
       p.atk, p.def, p.spd, p.powerEnergy, p.maxPowerEnergy, p.stage, p.wins, p.losses,
       p.battlesSinceRest || 0, p.zenToday, p.xpToday, p.trainingXpToday || 0, p.trainingUsesToday || 0, p.dayKey, p.class,
       p.classMovesUsed, p.healUses, p.cardUses, p.lastDaily,
       Math.max(1, Number(p.str) || 5), Math.max(1, Number(p.per) || 5), Math.max(1, Number(p.sta) || 5), Math.max(1, Number(p.vit) || 5),
-      Math.max(0, Math.min(100, Number(p.fatigue) || 0)), p.fatigueUpdatedAt || null]
+      Math.max(0, Math.min(100, Number(p.fatigue) || 0)), p.fatigueUpdatedAt || null,
+      Math.max(0, Math.floor(Number(p.maxMp) || 0)), Math.max(0, Math.min(Math.floor(Number(p.maxMp) || 0), Math.floor(Number(p.mp) || 0)))]
   )
   return norm(r.rows[0])
 }
@@ -841,7 +869,7 @@ async function resetPlayer (userId) {
   const r = await db().query(
     `UPDATE axyon_players SET rank='E',level=1,grade=1,xp=0,zen=0,coins=0,hp=$2,max_hp=$2,atk=$3,def=$4,spd=$5,
        str=5,per=5,sta=5,vit=5,fatigue=0,fatigue_updated_at=NOW(),
-       power_energy=$6,max_power_energy=$6,stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$7,
+       mp=0,max_mp=0,power_energy=$6,max_power_energy=$6,stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$7,
        class_moves_used=0,heal_uses=0,card_uses=0,battles_since_rest=0,training_xp_today=0,training_uses_today=0,updated_at=NOW()
      WHERE user_id=$1 RETURNING *`,
     [userId, BASE_HP, BASE_ATK, BASE_DEF, BASE_SPD, POWER_ENERGY_BASE, dayKey()]
@@ -858,7 +886,7 @@ async function resetAllPlayers () {
     const result = await client.query(
       `UPDATE axyon_players SET rank='E',level=1,grade=1,xp=0,zen=0,coins=0,
          hp=$1,max_hp=$1,atk=$2,def=$3,spd=$4,power_energy=$5,max_power_energy=$5,
-         str=5,per=5,sta=5,vit=5,fatigue=0,fatigue_updated_at=NOW(),
+         mp=0,max_mp=0,str=5,per=5,sta=5,vit=5,fatigue=0,fatigue_updated_at=NOW(),
          stage=1,wins=0,losses=0,zen_today=0,xp_today=0,day_key=$6,
          class='Fighter',class_moves_used=0,heal_uses=0,card_uses=0,battles_since_rest=0,training_xp_today=0,training_uses_today=0,active_battle=NULL,updated_at=NOW()`,
       [BASE_HP, BASE_ATK, BASE_DEF, BASE_SPD, POWER_ENERGY_BASE, dayKey()]
@@ -1149,6 +1177,15 @@ async function card (ownerId, collectionNo) {
   return (await db().query('SELECT * FROM axyon_cards WHERE owner_id=$1 AND slot=$2', [ownerId, collectionNo])).rows[0] || null
 }
 
+async function studioRenderedCard (rawCode) {
+  await ensureSchema()
+  const code = String(rawCode || '').replace(/^#/, '').trim().toUpperCase()
+  if (!code) return null
+  return (await db().query(
+    'SELECT rendered_data,card_data FROM axyon_card_studio WHERE claim_code=$1', [code]
+  )).rows[0] || null
+}
+
 async function addCard (ownerId, c) {
   await ensureSchema()
   const client = await db().connect()
@@ -1203,8 +1240,8 @@ async function claimStudioCard (ownerId, rawCode) {
   const client = await db().connect()
   try {
     await client.query('BEGIN')
-    const player = await client.query('SELECT user_id FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
-    if (!player.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_registered' } }
+    const playerResult = await client.query('SELECT * FROM axyon_players WHERE user_id=$1 FOR UPDATE', [ownerId])
+    if (!playerResult.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_registered' } }
     const found = await client.query('SELECT * FROM axyon_card_studio WHERE claim_code=$1 FOR UPDATE', [code])
     const drop = found.rows[0]
     if (!drop) { await client.query('ROLLBACK'); return { ok: false, reason: 'not_found' } }
@@ -1214,6 +1251,25 @@ async function claimStudioCard (ownerId, rawCode) {
     if (Number(drop.claim_count) >= limit) { await client.query('ROLLBACK'); return { ok: false, reason: 'limit' } }
     const prior = await client.query('SELECT 1 FROM axyon_card_studio_claims WHERE card_id=$1 AND user_id=$2', [drop.id, ownerId])
     if (prior.rows[0]) { await client.query('ROLLBACK'); return { ok: false, reason: 'claimed' } }
+    const coinCost = Math.max(0, Math.floor(Number(data.coin) || 0))
+    const zenCost = Math.max(0, Math.floor(Number(data.zen) || 0))
+    const wallet = playerResult.rows[0]
+    const currentCoins = Number(wallet.coins) || 0
+    const currentZen = Number(wallet.zen) || 0
+    if (currentCoins < coinCost) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'coins', required: coinCost, balance: currentCoins }
+    }
+    if (currentZen < zenCost) {
+      await client.query('ROLLBACK')
+      return { ok: false, reason: 'zen', required: zenCost, balance: currentZen }
+    }
+    if (coinCost || zenCost) {
+      await client.query(
+        'UPDATE axyon_players SET coins=coins-$2,zen=zen-$3,updated_at=NOW() WHERE user_id=$1',
+        [String(ownerId), coinCost, zenCost]
+      )
+    }
     const slotResult = await client.query('SELECT COALESCE(MAX(slot),0)+1 AS next FROM axyon_cards WHERE owner_id=$1', [ownerId])
     const slot = Number(slotResult.rows[0].next)
     const weapon = (data.weapons || []).map(x => x.name).join(', ')
@@ -1221,11 +1277,11 @@ async function claimStudioCard (ownerId, rawCode) {
     const abilityDamage = (data.abilities || []).reduce((n, x) => n + (Number(x.damage) || 0), 0)
     await client.query('INSERT INTO axyon_card_studio_claims(card_id,user_id) VALUES($1,$2)', [drop.id, ownerId])
     const card = await client.query(`INSERT INTO axyon_cards(owner_id,slot,card_type,series,name,weapon,damage,ability,ability_damage,rating,claimed,expires_at,image_url,image_data,renderer,source_url,source_artist,drop_code)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12,$13,'old-gen',$12,'',$14) RETURNING *`,
-    [ownerId, slot, data.cardType || 'character', data.arc || data.version || '', data.name, weapon, Number(data.baseDamage) || 0, ability, abilityDamage, Math.max(1, Math.min(6, Number(data.rarity) || 1)), data.expiresAt || null, drop.artwork_url || '', drop.image_data, code])
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,$11,$12,$13,$14,$12,'',$15) RETURNING *`,
+    [ownerId, slot, data.cardType || 'character', [data.version, data.arc].filter(Boolean).join(' • '), data.name, weapon, Number(data.baseDamage) || 0, ability, abilityDamage, Math.max(1, Math.min(6, Number(data.rarity) || 1)), data.expiresAt || null, drop.artwork_url || '', drop.rendered_data, ['old-gen', 'ai-custom'].includes(String(data.renderer)) ? data.renderer : 'old-gen', code])
     const count = await client.query('UPDATE axyon_card_studio SET claim_count=claim_count+1 WHERE id=$1 RETURNING claim_count', [drop.id])
     await client.query('COMMIT')
-    return { ok: true, card: card.rows[0], slot, claimed: Number(count.rows[0].claim_count), limit }
+    return { ok: true, card: card.rows[0], slot, claimed: Number(count.rows[0].claim_count), limit, paidCoins: coinCost, paidZen: zenCost }
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error } finally { client.release() }
 }
 
@@ -1581,6 +1637,42 @@ async function updateParty (id, members, status, invited = null, ready = null, s
       state ? JSON.stringify(state) : null]
   )
   return r.rows[0] || null
+}
+
+async function partyForUser (groupJid, userId) {
+  await ensureSchema()
+  return (await db().query(
+    `SELECT * FROM axyon_parties
+       WHERE group_jid=$1 AND status IN ('open','started','battling')
+         AND members @> $2::jsonb
+       ORDER BY id DESC LIMIT 1`,
+    [String(groupJid), JSON.stringify([String(userId)])]
+  )).rows[0] || null
+}
+
+async function mutateParty (id, mutate) {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const found = await client.query('SELECT * FROM axyon_parties WHERE id=$1 FOR UPDATE', [Number(id)])
+    if (!found.rowCount) { await client.query('ROLLBACK'); return null }
+    const current = found.rows[0]
+    const next = await mutate({ ...current })
+    if (!next) { await client.query('ROLLBACK'); return null }
+    const updated = await client.query(
+      `UPDATE axyon_parties SET members=$2::jsonb,status=$3,invited=$4::jsonb,ready=$5::jsonb,state=$6::jsonb
+       WHERE id=$1 RETURNING *`,
+      [Number(id), JSON.stringify(next.members ?? current.members ?? []), String(next.status ?? current.status),
+        JSON.stringify(next.invited ?? current.invited ?? []), JSON.stringify(next.ready ?? current.ready ?? []),
+        JSON.stringify(next.state ?? current.state ?? {})]
+    )
+    await client.query('COMMIT')
+    return updated.rows[0] || null
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally { client.release() }
 }
 
 /* ------------------------------------------------------------------ rooms */
@@ -2343,6 +2435,7 @@ module.exports = {
   BASE_SPD,
   BASE_COMBAT_STATS: Object.freeze({ str: 5, per: 5, sta: 5, vit: 5 }),
   FATIGUE_RECOVERY_MINUTES: 15,
+  mpCapacityForLevel,
   DEFAULT_SETTINGS,
   ORIGINAL_STAGES,
   ORIGINAL_FLOORS,
@@ -2396,6 +2489,7 @@ module.exports = {
   removeFloor,
   cards,
   card,
+  studioRenderedCard,
   addCard,
   claimCard,
   createCardDrop,
@@ -2435,6 +2529,8 @@ module.exports = {
   createParty,
   openParty,
   updateParty,
+  partyForUser,
+  mutateParty,
   createRoom,
   room,
   roomsFor,

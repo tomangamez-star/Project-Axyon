@@ -69,6 +69,8 @@ const TRAINING_XP_DAILY_CAP = 25
 const TRAINING_USES_DAILY_CAP = 5
 const HEAVY_ATTACK_ENERGY = 15
 const HEAVY_ATTACK_MULTIPLIER = 1.65
+const PHYSICAL_ENERGY_COSTS = Object.freeze({ attack: 5, heavy: HEAVY_ATTACK_ENERGY, block: 5, guard: 5, dodge: 8 })
+const ENERGY_REGEN_PER_TURN = 4
 
 const rnd = (n) => Math.floor(Math.random() * n)
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
@@ -80,6 +82,11 @@ function powerEnergyForRank (rank) {
   if (Number.isFinite(v)) return v
   const i = Math.max(0, store.RANKS.indexOf(rank))
   return clamp(store.POWER_ENERGY_BASE + i * 20, store.POWER_ENERGY_BASE, store.POWER_ENERGY_CAP)
+}
+
+function mpCapacityForLevel (level) {
+  const n = Math.floor(Number(level) || 1)
+  return n < 10 ? 0 : 100 + Math.floor((n - 10) / 5) * 15
 }
 
 /* -------------------------------------------------------------- progression */
@@ -94,6 +101,7 @@ function applyProgress (p, { xp = 0, zen = 0, coins = 0 } = {}) {
   const events = []
   const beforeRank = p.rank
   const beforeGrade = p.grade
+  const oldMaxMp = Math.max(0, Number(p.maxMp) || 0)
 
   p.xp += Math.max(0, Math.floor(xp))
   p.zen += Math.max(0, Math.floor(zen))
@@ -105,6 +113,12 @@ function applyProgress (p, { xp = 0, zen = 0, coins = 0 } = {}) {
     p.level += 1
     events.push({ type: 'level', level: p.level })
   }
+
+  p.maxMp = mpCapacityForLevel(p.level)
+  // A player receives a full MP tank exactly when the level-10 system unlocks.
+  // Later capacity increases do not refill the tank for free.
+  if (oldMaxMp === 0 && p.maxMp > 0) p.mp = p.maxMp
+  else p.mp = clamp(Math.floor(Number(p.mp) || 0), 0, p.maxMp)
 
   // Grade advances every 10 levels: level 10 → grade 2, level 20 → grade 3.
   const newGrade = 1 + Math.floor(p.level / 10)
@@ -205,6 +219,7 @@ function profileCard (p, extra = {}) {
     `🎭 Class *${p.class || 'Fighter'}*`,
     `❤️ HP  ${compactBar(p.hp, p.maxHp)}`,
     `⚡ Energy  ${compactBar(p.powerEnergy, p.maxPowerEnergy)}`,
+    `🔮 MP  ${compactBar(p.mp, p.maxMp)}`,
     `💠 XP  ${compactBar(p.xp, need)}`,
     '',
     '┈┈┈ *COMBAT* ┈┈┈',
@@ -299,6 +314,7 @@ function battleInfoCard (b, p, note = '') {
         `Fatigue ${p.fatigue ?? b.fatigue ?? 0}/100`,
         bar(playerHp, playerMaxHp),
         `*${playerHp} / ${playerMaxHp} HP*`,
+        `🔮 MP *${Math.max(0, Number(b.mp ?? p.mp) || 0)}/${Math.max(0, Number(p.maxMp) || 0)}*`,
         `⭐ XP  ·  *${Math.max(0, Number(p.xp) || 0)} / ${xpNeed} XP*`
       ]),
     '',
@@ -376,6 +392,7 @@ function battleCard (b, p, note = '') {
     `🎭 Class *${p.class || 'Fighter'}*`,
     `❤️ HP  ${hpBar(b.playerHp ?? p.hp, p.maxHp)}`,
     `⚡ Energy  ${hpBar(energy, maxEnergy)}`,
+      `🔮 MP  ${hpBar(b.mp ?? p.mp, p.maxMp)}`,
     `💠 XP  ${hpBar(p.xp, xpNeed)}`,
     `💪 STR *${p.str ?? 5}* · 👁 PER *${p.per ?? 5}* · 🫁 STA *${p.sta ?? 5}* · 🧬 VIT *${p.vit ?? 5}*`,
     `😮‍💨 Fatigue *${Math.max(0, Number(b.fatigue ?? p.fatigue) || 0)}/100*`,
@@ -499,6 +516,31 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function profile (sock, m, ctx) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
+    const activeBattle = await store.getBattle(ctx.userId)
+    if (activeBattle) {
+      p.hp = Number(activeBattle.playerHp ?? p.hp)
+      p.powerEnergy = Number(activeBattle.energy ?? p.powerEnergy)
+      p.mp = Number(activeBattle.mp ?? p.mp)
+      p.fatigue = combatMechanics.fatigueValue(activeBattle.fatigue ?? p.fatigue)
+    } else {
+      const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+      const member = party?.status === 'battling' ? party.state?.floorBattle?.players?.[ctx.userId] : null
+      if (member) {
+        p.hp = Number(member.hp ?? p.hp)
+        p.powerEnergy = Number(member.energy ?? p.powerEnergy)
+        p.mp = Number(member.mp ?? p.mp)
+        p.fatigue = combatMechanics.fatigueValue(member.fatigue ?? p.fatigue)
+      } else {
+        const duel = await store.activeDuelForUser(ctx.userId, ctx.jid).catch(() => null)
+        const state = duel?.state || {}
+        if (duel) {
+          p.hp = Number(state.hp?.[ctx.userId] ?? p.hp)
+          p.powerEnergy = Number(state.energy?.[ctx.userId] ?? p.powerEnergy)
+          p.mp = Number(state.mp?.[ctx.userId] ?? p.mp)
+          p.fatigue = combatMechanics.fatigueValue(state.fatigue?.[ctx.userId] ?? p.fatigue)
+        }
+      }
+    }
     const partner = await store.partnerOf(ctx.userId).catch(() => null)
     let partnerName = null
     if (partner) {
@@ -530,6 +572,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function beginBattle (sock, m, ctx, ordinal) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling') return send(sock, ctx.jid, m, '⚔️ You are already participating in a shared party floor. Finish or retreat from that encounter first.')
     const stage = await store.stage(Number(ordinal) || p.stage)
     if (!stage) return send(sock, ctx.jid, m, `\u274c There is no stage *${ordinal}*. Use *${ctx.settings.prefix}stages*.`)
     if (stage.locked) return send(sock, ctx.jid, m, '\ud83d\udd12 That stage is locked.')
@@ -543,6 +587,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       enemyHp: enemy.hp,
       playerHp: p.hp,
       energy: p.powerEnergy,
+      mp: p.mp,
       fatigue: Math.max(0, Number(p.fatigue) || 0),
       turn: 1,
       healsLeft: ctx.settings.selfHealPerCombat,
@@ -562,6 +607,14 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function battleInfo (sock, m, ctx) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    const partyBattle = party?.status === 'battling' ? party.state?.floorBattle : null
+    if (partyBattle) {
+      const member = partyBattle.players?.[ctx.userId]
+      const player = member ? { ...p, hp: member.hp, maxHp: member.maxHp, powerEnergy: member.energy, maxPowerEnergy: member.maxEnergy, mp: member.mp, fatigue: member.fatigue } : p
+      const equippedCards = await store.equippedCards(ctx.userId)
+      return send(sock, ctx.jid, m, battleCard({ ...partyBattle, equippedCards, playerHp: member?.hp, energy: member?.energy, mp: member?.mp }, player, partyBattle.lastEvent || ''))
+    }
     const battle = await store.getBattle(ctx.userId)
     if (battle) return send(sock, ctx.jid, m, battleInfoCard(battle, p, battle.lastEvent || ''))
 
@@ -576,10 +629,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         `${WATERMARK}`, '', `⚔️ *DUEL DETAILS · #${duel.id}*`, '',
         `*${first?.name || duel.challenger}* · ${first?.rank || 'E'} Rank · Lv.${first?.level || 1}`,
         `❤️ HP ${Number(hp[duel.challenger] ?? first?.hp ?? 0)}/${first?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.challenger] ?? first?.powerEnergy ?? 0)}/${first?.maxPowerEnergy || 0}`,
+        `🔮 MP ${Number(state.mp?.[duel.challenger] ?? first?.mp ?? 0)}/${first?.maxMp || 0}`,
         `ATK ${first?.atk || 0} · DEF ${first?.def || 0} · SPD ${first?.spd || 0} · STR ${first?.str ?? 5} · PER ${first?.per ?? 5} · STA ${first?.sta ?? 5} · VIT ${first?.vit ?? 5} · Fatigue ${state.fatigue?.[duel.challenger] ?? first?.fatigue ?? 0}/100`,
         '',
         `*${second?.name || duel.opponent}* · ${second?.rank || 'E'} Rank · Lv.${second?.level || 1}`,
         `❤️ HP ${Number(hp[duel.opponent] ?? second?.hp ?? 0)}/${second?.maxHp || 0} · ⚡ Energy ${Number(state.energy?.[duel.opponent] ?? second?.powerEnergy ?? 0)}/${second?.maxPowerEnergy || 0}`,
+        `🔮 MP ${Number(state.mp?.[duel.opponent] ?? second?.mp ?? 0)}/${second?.maxMp || 0}`,
         `ATK ${second?.atk || 0} · DEF ${second?.def || 0} · SPD ${second?.spd || 0} · STR ${second?.str ?? 5} · PER ${second?.per ?? 5} · STA ${second?.sta ?? 5} · VIT ${second?.vit ?? 5} · Fatigue ${state.fatigue?.[duel.opponent] ?? second?.fatigue ?? 0}/100`,
         '',
         `Round: *${Number(state.round) || 1}* · Next turn: *${(nextId === String(duel.challenger) ? first?.name : second?.name) || 'Unknown'}*`,
@@ -598,22 +653,30 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (!p) return arise(sock, m, ctx)
     const battle = await store.getBattle(ctx.userId)
     const duel = await store.activeDuelForUser(ctx.userId).catch(() => null)
-    if (battle || duel) return send(sock, ctx.jid, m, '⛔ You can only rest outside a battle. Finish or leave the encounter first.')
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (battle || duel || party?.status === 'battling') return send(sock, ctx.jid, m, '⛔ You can only rest outside a battle. Finish or leave the encounter first.')
     const completed = Math.max(0, Number(p.battlesSinceRest) || 0)
     if (completed < 2) {
       const remaining = 2 - completed
       return send(sock, ctx.jid, m, `🛌 *REST UNAVAILABLE*\n\nComplete *${remaining}* more battle${remaining === 1 ? '' : 's'} to restore your HP.\nRetreating does not count.`)
     }
     p.hp = p.maxHp
+    p.fatigue = 0
+    p.fatigueUpdatedAt = new Date().toISOString()
     p.battlesSinceRest = 0
     await store.savePlayer(p)
-    await store.log(ctx.userId, 'rest', ctx.userId, { restoredHp: p.maxHp })
-    return send(sock, ctx.jid, m, `${WATERMARK}\n\n🛌 *REST COMPLETE*\n\n❤️ HP restored to *${p.hp}/${p.maxHp}*.\nYour next rest unlocks after 2 more completed battles.`)
+    await store.log(ctx.userId, 'rest', ctx.userId, { restoredHp: p.maxHp, fatigueReset: true })
+    await persistFatigue(ctx.userId, 0, p.fatigueUpdatedAt, p)
+    return send(sock, ctx.jid, m, `${WATERMARK}\n\n🛌 *REST COMPLETE*\n\n❤️ HP restored to *${p.hp}/${p.maxHp}*.\n😮‍💨 Fatigue reset to *0/100*.\nYour next rest unlocks after 2 more completed battles.`)
   }
 
   async function train (sock, m, ctx, requestedStat) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling' || await store.getBattle(ctx.userId) || await store.activeDuelForUser(ctx.userId).catch(() => null)) {
+      return send(sock, ctx.jid, m, '🏋️ Training is only available outside active battles.')
+    }
     if (await store.getBattle(ctx.userId) || await store.activeDuelForUser(ctx.userId).catch(() => null)) return send(sock, ctx.jid, m, '⛔ You cannot train during an active battle.')
     const stat = String(requestedStat || '').trim().toLowerCase()
     const labels = { atk: 'ATK', attack: 'ATK', def: 'DEF', defence: 'DEF', defense: 'DEF', spd: 'SPD', speed: 'SPD', str: 'STR', strength: 'STR', per: 'PER', perception: 'PER', sta: 'STA', stamina: 'STA', vit: 'VIT', vitality: 'VIT' }
@@ -705,10 +768,28 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function cardDetail (sock, m, ctx, collectionNo) {
     let c = await store.card(ctx.userId, Number(collectionNo))
     if (!c) return send(sock, ctx.jid, m, `No card #${collectionNo} exists in your collection.`)
+    // Studio cards were historically claimed with the original artwork bytes
+    // even though the dashboard had already saved a complete rendered card.
+    // Backfill those older claims from the matching Studio record on first view.
+    let studioBackfilled = false
+    let studioCardFound = false
+    if (c.drop_code) {
+      try {
+        const studio = await store.studioRenderedCard(c.drop_code)
+        const fullRender = studio?.rendered_data
+        studioCardFound = Buffer.isBuffer(fullRender) && fullRender.length > 0
+        if (studioCardFound &&
+            (!Buffer.isBuffer(c.image_data) || !c.image_data.equals(fullRender))) {
+          const renderer = ['old-gen', 'ai-custom'].includes(String(studio.card_data?.renderer)) ? studio.card_data.renderer : 'old-gen'
+          c = await store.editCard(ctx.userId, Number(collectionNo), { imageData: fullRender, renderer }) || c
+          studioBackfilled = true
+        }
+      } catch (error) { console.warn('[AXYON cards] Studio render backfill skipped:', error?.message || error) }
+    }
     // Re-render only AI Custom cards from their original artwork URL. Old Gen
     // is intentionally left untouched; both archive previews and manual card
     // opens now use the exact same stored rendered image bytes.
-    if (c.image_url && c.renderer === 'ai-custom') {
+    if (!studioBackfilled && !studioCardFound && c.image_url && c.renderer === 'ai-custom') {
       try {
         const upgraded = await cardSpawner.renderUpdatedArtwork(c, c.image_url)
         if (upgraded?.rendered?.buffer) {
@@ -788,15 +869,307 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return send(sock, ctx.jid, m, [WATERMARK, '', '✅ *CARD CLAIMED*', `*${c.name}*`, `Type: *${String(c.card_type || 'character').toUpperCase()}*`, `Series: *${c.series || '—'}*`, `Base damage: *${c.damage}*`, `Ability: *${c.ability || '—'}*`, `Ability damage: *${c.ability_damage}*`, `Rating: *${c.rating}/6*`, `Expiry: *${cardExpiryText(c.expires_at)}*`, '', `Equip it with *${ctx.settings.prefix}card equip ${c.slot}*`].join('\n'))
   }
 
+  async function partyBattleDisplay (sock, jid, quoted, battle, note = '') {
+    const rows = []
+    for (const id of battle.memberIds || []) {
+      const player = await store.player(id)
+      const member = battle.players?.[id] || {}
+      const suffix = (battle.retreats || []).includes(id) ? ' · RETREATED' : Number(member.hp) <= 0 ? ' · DOWN' : ''
+      rows.push(`• *${player?.name || id}* · ❤️ ${Math.max(0, Number(member.hp) || 0)}/${member.maxHp || player?.maxHp || 0} · ⚡ ${Math.max(0, Number(member.energy) || 0)}/${member.maxEnergy || player?.maxPowerEnergy || 0} · 🔮 ${Math.max(0, Number(member.mp) || 0)}/${member.maxMp || player?.maxMp || 0}${suffix}`)
+    }
+    const nextId = battle.completed ? null : battle.turnOrder?.[battle.turnIndex]
+    const next = nextId ? await store.player(nextId) : null
+    const lines = [
+      '⬡ *AXYN CORE*', '', `⚔️ *PARTY FLOOR ${battle.ordinal} · ROUND ${battle.round || 1}*`,
+      `👹 *${battle.enemy?.name || 'ENEMY'}* · ❤️ ${Math.max(0, Number(battle.enemyHp) || 0)}/${battle.enemy?.hp || 0}`,
+      '', '┈┈┈ *PARTY VITALS* ┈┈┈', ...rows, '',
+      note ? `✦ ${note}` : '', next ? `⌛ Next turn: *${next.name || nextId}*` : '',
+      '', '`!attack` · `!heavy` · `!block` · `!dodge` · `!heal`',
+      '`!power` · `!cc` · `!class` · `!ability` · `!retreat`'
+    ].filter(Boolean)
+    return send(sock, jid, quoted, lines.join('\n'))
+  }
+
+  async function partyBattleAct (sock, m, ctx, action, cardSlot = 1, moveName = null) {
+    const party = await store.partyForUser(ctx.jid, ctx.userId)
+    if (!party || party.status !== 'battling' || !party.state?.floorBattle) return send(sock, ctx.jid, m, 'There is no active party floor battle here.')
+    const battle = party.state.floorBattle
+    const actorId = String(ctx.userId)
+    if (battle.storyPending) return send(sock, ctx.jid, m, `📖 The party story decision is still pending. Party Leader *${(await store.player(party.leader))?.name || party.leader}* must choose with *${ctx.prefix}choice 1-4* before combat begins.`)
+    const order = Array.isArray(battle.turnOrder) ? battle.turnOrder : (battle.memberIds || [])
+    if (String(order[Number(battle.turnIndex) || 0] || '') !== actorId) {
+      const waitingFor = order[Number(battle.turnIndex) || 0]
+      const next = waitingFor ? await store.player(waitingFor) : null
+      return send(sock, ctx.jid, m, `⌛ It is *${next?.name || waitingFor || 'another party member'}*'s turn.`)
+    }
+    const actor = await store.player(actorId)
+    const member = battle.players?.[actorId]
+    if (!actor || !member) return send(sock, ctx.jid, m, 'Your party combat record could not be loaded.')
+    if (Number(member.hp) <= 0 || (battle.retreats || []).includes(actorId)) return send(sock, ctx.jid, m, 'You are no longer active in this party encounter.')
+
+    let card = null
+    let weaponBonus = 0
+    let weaponName = ''
+    let power = null
+    let combo = null
+    let classMove = null
+    let classMastery = 0
+    let classSpend = null
+    if (action === 'card') {
+      const use = await store.useCardAbility(actorId, Number(cardSlot) || 1)
+      if (!use.ok) return send(sock, ctx.jid, m, `❌ Card ability unavailable: *${use.reason}*.`)
+      card = use.card
+    } else if (action === 'attack' || action === 'heavy') {
+      const equipped = await store.equippedCards(actorId)
+      const weapon = equipped.find(entry => Number(entry.equipped_slot) === 1 && (!entry.expires_at || new Date(entry.expires_at).getTime() > Date.now()))
+      weaponBonus = Number(weapon?.damage) || 0
+      weaponName = weapon?.name || ''
+    } else if (action === 'power') {
+      const key = String(moveName || '').trim().toLowerCase()
+      power = items.get(key) || items.abilities().find(entry => entry.name.toLowerCase() === key)
+      if (!power || power.kind !== 'ability') return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}power <owned power>*.`)
+      if ((await store.inventoryQty(actorId, power.key)) < 1) return send(sock, ctx.jid, m, `🔒 You have not unlocked *${power.name}*.`)
+      const cost = Math.max(0, Number(power.mpCost) || 0)
+      if (Number(member.mp) < cost) return send(sock, ctx.jid, m, `🔮 ${power.name} costs *${cost} MP*. You have *${member.mp} MP*.`)
+    } else if (action === 'combo') {
+      combo = comboCatalog.get(moveName)
+      if (!combo) return send(sock, ctx.jid, m, `❌ Unknown combo. See *${ctx.prefix}cc shop*.`)
+      if (!(await store.hasCombo(actorId, combo.key))) return send(sock, ctx.jid, m, `🔒 *${combo.name}* is not unlocked for you.`)
+      if (combo.abilityKey && (await store.inventoryQty(actorId, combo.abilityKey)) < 1) return send(sock, ctx.jid, m, `🔒 You must own *${items.get(combo.abilityKey)?.name || combo.abilityKey}*.`)
+      const ability = combo.abilityKey ? items.get(combo.abilityKey) : null
+      const mpCost = ability ? Math.ceil((Number(ability.mpCost) || 0) * Number(combo.powerMultiplier ?? 1)) : 0
+      if (Number(member.energy) < Number(combo.energyCost)) return send(sock, ctx.jid, m, `⚡ This combo costs *${combo.energyCost} Energy*. You have *${member.energy}*.`)
+      if (Number(member.mp) < mpCost) return send(sock, ctx.jid, m, `🔮 This combo costs *${mpCost} MP*. You have *${member.mp} MP*.`)
+    } else if (action === 'class') {
+      const classId = classes.normalizeClassId(actor.class)
+      const moves = classId ? classes.movesForClass(classId) : []
+      classMastery = await store.classMastery(actorId, classId)
+      if (!classId || !moves.length) return send(sock, ctx.jid, m, '🎭 You do not have an available class move.')
+      classMove = moveName ? classes.moveByName(classId, moveName) : moves.filter(x => x.unlock == null || x.unlock <= classMastery).filter(x => Number(x.damage) > 0).pop()
+      if (!classMove) return send(sock, ctx.jid, m, `🔒 That class move is unavailable. Use *${ctx.prefix}class* to see your moves.`)
+      const usesToday = await store.classMovesUsedToday(actorId)
+      const check = classes.validateMoveUse({ player: actor, move: classMove, mastery: classMastery, usesToday, dailyLimit: ctx.settings.classMovesPerDay, inBattle: true, energy: Number(member.energy) })
+      if (!check.ok) return send(sock, ctx.jid, m, check.message)
+      classSpend = await store.consumeClassMove(actorId, ctx.settings.classMovesPerDay)
+      if (!classSpend.ok) return send(sock, ctx.jid, m, `🧠 You have used all ${ctx.settings.classMovesPerDay} class moves today.`)
+    }
+
+    let mutationError = ''
+    let result = null
+    const updatedParty = await store.mutateParty(party.id, current => {
+      const state = { ...(current.state || {}) }
+      const currentBattle = { ...(state.floorBattle || {}) }
+      if (current.status !== 'battling' || !currentBattle.players) { mutationError = 'The party battle has already ended.'; return null }
+      const currentOrder = currentBattle.turnOrder || currentBattle.memberIds || []
+      const currentActor = String(currentOrder[Number(currentBattle.turnIndex) || 0] || '')
+      if (currentActor !== actorId) { mutationError = 'The turn changed before your action was accepted.'; return null }
+      const playerState = { ...(currentBattle.players[actorId] || {}) }
+      if (Number(playerState.hp) <= 0 || (currentBattle.retreats || []).includes(actorId)) { mutationError = 'You are no longer active in this encounter.'; return null }
+      let dealt = 0
+      let note = ''
+      let fatigueAction = ''
+      const fighter = { ...actor, fatigue: combatMechanics.fatigueValue(playerState.fatigue) }
+      const enemy = currentBattle.enemy || {}
+      if (action === 'retreat') {
+        currentBattle.retreats = [...new Set([...(currentBattle.retreats || []), actorId])]
+        note = `${actor.name || actorId} retreated. No rest credit or rewards.`
+      } else if (action === 'attack' || action === 'heavy') {
+        const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
+        if (Number(playerState.energy) < cost) { mutationError = `${action.toUpperCase()} costs ${cost} Energy.`; return null }
+        playerState.energy -= cost
+        dealt = playerHit(fighter, enemy, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, weaponBonus)
+        fatigueAction = action
+        note = `${actor.name || actorId} ${action === 'heavy' ? 'used Heavy Attack' : 'attacked'}${weaponName ? ` with ${weaponName}` : ''} for ${dealt} damage (-${cost} Energy).`
+      } else if (action === 'block' || action === 'guard') {
+        const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
+        if (Number(playerState.energy) < cost) { mutationError = `Block costs ${cost} Energy.`; return null }
+        playerState.energy -= cost
+        playerState.guard = 0.6
+        fatigueAction = 'block'
+        note = `${actor.name || actorId} prepared a block (-${cost} Energy).`
+      } else if (action === 'dodge') {
+        const cost = Number(PHYSICAL_ENERGY_COSTS.dodge) || 0
+        if (Number(playerState.energy) < cost) { mutationError = `Dodge costs ${cost} Energy.`; return null }
+        playerState.energy -= cost
+        playerState.evading = true
+        fatigueAction = 'dodge'
+        note = `${actor.name || actorId} prepared to dodge (-${cost} Energy).`
+      } else if (action === 'heal') {
+        if (Number(playerState.healsLeft) <= 0) { mutationError = 'You have no heals left in this party battle.'; return null }
+        const healed = Math.min(Number(playerState.maxHp), Number(playerState.hp) + combatMechanics.enhancedHealing(actor, SELF_HEAL_HP)) - Number(playerState.hp)
+        if (healed <= 0) { mutationError = 'Your HP is already full.'; return null }
+        playerState.hp += healed
+        playerState.healsLeft -= 1
+        note = `${actor.name || actorId} recovered ${healed} HP.`
+      } else if (action === 'card') {
+        dealt = playerHit(fighter, enemy, 1, Number(card?.ability_damage) || 0)
+        note = `${actor.name || actorId} used ${card?.ability || card?.name || 'a card ability'} for ${dealt} damage.`
+      } else if (action === 'power') {
+        const fake = { enemy, enemyHp: currentBattle.enemyHp, playerHp: playerState.hp, guard: playerState.guard || 0, mp: playerState.mp }
+        const applied = items.apply(power, fake, { ...actor, mp: playerState.mp, maxMp: playerState.maxMp })
+        if (!applied.ok) { mutationError = applied.note; return null }
+        currentBattle.enemyHp = Number(applied.battle.enemyHp)
+        playerState.hp = Number(applied.battle.playerHp)
+        playerState.guard = Number(applied.battle.guard) || 0
+        playerState.mp = Number(applied.battle.mp) || 0
+        note = `${actor.name || actorId} used ${power.name}. ${applied.note}`
+      } else if (action === 'combo') {
+        const ability = combo.abilityKey ? items.get(combo.abilityKey) : null
+        const effect = ability?.effect || {}
+        const energyCost = Math.max(0, Number(combo.energyCost) || 0)
+        const mpCost = ability ? Math.ceil((Number(ability.mpCost) || 0) * Number(combo.powerMultiplier ?? 1)) : 0
+        if (Number(playerState.energy) < energyCost || Number(playerState.mp) < mpCost) { mutationError = 'Your Energy or MP changed before the combo could execute.'; return null }
+        playerState.energy -= energyCost
+        playerState.mp -= mpCost
+        if (effect.damage) {
+          const powerDamage = Math.max(0, Math.round(Number(effect.damage) * Number(combo.powerMultiplier ?? 1)))
+          dealt += powerDamage
+          if (effect.lifesteal) playerState.hp = Math.min(playerState.maxHp, playerState.hp + combatMechanics.enhancedHealing(actor, powerDamage))
+        }
+        if (effect.guard || combo.guard) playerState.guard = Math.max(Number(playerState.guard) || 0, Number(combo.guard) || Number(effect.guard) || 0)
+        if (combo.attackMultiplier > 0) dealt += playerHit(fighter, enemy, Number(combo.attackMultiplier), weaponBonus)
+        if (combo.evade) playerState.evading = true
+        fatigueAction = combo.fatigueCost || combo.effect
+        note = `${actor.name || actorId} executed ${combo.name} for ${dealt} damage.`
+      } else if (action === 'class') {
+        const cost = Math.max(0, Number(classMove.cost) || 0)
+        if (Number(playerState.energy) < cost) { mutationError = `This class move costs ${cost} Energy.`; return null }
+        playerState.energy -= cost
+        const grade = classes.classGradeFor(classMastery)
+        const effect = classes.classDamage({ move: classMove, mastery: classMastery, gradeBonus: grade.bonus })
+        if (effect.damaging) dealt = Math.max(0, Number(effect.final) || 0)
+        else if (effect.healing) playerState.hp = Math.min(playerState.maxHp, playerState.hp + effect.healing)
+        if (effect.guard) playerState.guard = Math.max(Number(playerState.guard) || 0, effect.guard)
+        note = `${actor.name || actorId} used ${classMove.name}${dealt ? ` for ${dealt} damage` : ''}.`
+      } else {
+        mutationError = 'That action is not available in party combat.'
+        return null
+      }
+      if (fatigueAction) playerState.fatigue = combatMechanics.addFatigue(playerState.fatigue, fatigueAction, actor)
+      if (dealt > 0) currentBattle.enemyHp = Math.max(0, Number(currentBattle.enemyHp) - dealt)
+      if (action !== 'retreat' && Number(currentBattle.enemyHp) > 0) {
+        const incoming = enemyHitDetails(enemy, { ...actor, fatigue: playerState.fatigue }, playerState.guard || 0).finalDamage
+        let hit = incoming
+        if (playerState.evading) {
+          const dodge = combatMechanics.resolveDodge({ ...actor, fatigue: playerState.fatigue }, playerState.fatigue)
+          if (dodge.result === 'perfect') hit = 0
+          else if (dodge.result === 'partial') hit = Math.max(1, Math.round(hit * dodge.damageMultiplier))
+          note += ` · ${dodge.result.toUpperCase()} DODGE`
+        }
+        playerState.hp = Math.max(0, Number(playerState.hp) - hit)
+        playerState.guard = 0
+        playerState.evading = false
+        if (hit > 0) note += ` · enemy hit ${hit}`
+      }
+      if (action !== 'retreat') playerState.energy = Math.min(Number(playerState.maxEnergy) || 0, Number(playerState.energy) + ENERGY_REGEN_PER_TURN)
+      currentBattle.players[actorId] = playerState
+      currentBattle.lastEvent = note
+      currentBattle.round = Math.max(1, Number(currentBattle.round) || 1)
+      const surviving = (currentBattle.memberIds || []).filter(id => !(currentBattle.retreats || []).includes(id) && Number(currentBattle.players?.[id]?.hp) > 0)
+      const participating = (currentBattle.memberIds || []).filter(id => !(currentBattle.retreats || []).includes(id))
+      const won = Number(currentBattle.enemyHp) <= 0
+      const aborted = participating.length === 0
+      const lost = !won && !aborted && surviving.length === 0
+      if (won || aborted || lost) {
+        currentBattle.completed = true
+        currentBattle.result = won ? 'victory' : lost ? 'defeat' : 'retreated'
+        state.floorBattle = currentBattle
+        result = { completed: true, won, lost, aborted, battle: currentBattle, note, retreatedId: action === 'retreat' ? actorId : null }
+        return { ...current, status: 'started', state }
+      }
+      const total = currentOrder.length
+      let nextIndex = 0
+      for (let offset = 1; offset <= total; offset++) {
+        const index = ((Number(currentBattle.turnIndex) || 0) + offset) % total
+        if (surviving.includes(String(currentOrder[index] || ''))) {
+          nextIndex = index
+          if (index <= (Number(currentBattle.turnIndex) || 0)) currentBattle.round += 1
+          break
+        }
+      }
+      currentBattle.turnIndex = nextIndex
+      state.floorBattle = currentBattle
+      result = { completed: false, battle: currentBattle, note, retreatedId: action === 'retreat' ? actorId : null }
+      return { ...current, state }
+    })
+
+    if (mutationError || !updatedParty) {
+      if (classSpend?.ok) await store.refundClassMove(actorId).catch(() => {})
+      return send(sock, ctx.jid, m, `❌ ${mutationError || 'The party battle could not be updated.'}`)
+    }
+    if (result?.retreatedId) {
+      const retreated = await store.player(result.retreatedId)
+      const state = result.battle.players?.[result.retreatedId]
+      if (retreated && state) {
+        retreated.hp = Math.max(0, Math.min(retreated.maxHp, Number(state.hp) || 0))
+        retreated.powerEnergy = Math.max(0, Math.min(retreated.maxPowerEnergy, Number(state.energy) || 0))
+        retreated.mp = Math.max(0, Math.min(retreated.maxMp, Number(state.mp) || 0))
+        retreated.fatigue = combatMechanics.fatigueValue(state.fatigue)
+        retreated.fatigueUpdatedAt = new Date().toISOString()
+        await store.savePlayer(retreated)
+      }
+    }
+    if (result?.completed) {
+      const completed = result.battle
+      if (result.won || result.lost) {
+        for (const id of completed.memberIds || []) {
+          if ((completed.retreats || []).includes(id)) continue
+          const player = await store.player(id)
+          const memberState = completed.players?.[id]
+          if (!player || !memberState) continue
+          const p = store.rollDay(player)
+          p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
+          p.fatigue = combatMechanics.fatigueValue(memberState.fatigue)
+          p.fatigueUpdatedAt = new Date().toISOString()
+          p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(memberState.energy) || 0))
+          p.mp = Math.max(0, Math.min(p.maxMp, Number(memberState.mp) || 0))
+          p.hp = result.won && Number(memberState.hp) > 0
+            ? Math.min(p.maxHp, Number(memberState.hp))
+            : Math.max(1, Math.round(p.maxHp * 0.25))
+          if (result.won) {
+            const xp = Math.min(Number(completed.enemy.xp) || 0, Math.max(0, Number(ctx.settings.xpDailyLimit) - p.xpToday))
+            const zen = Math.round((Number(completed.enemy.zen) || 0) * (completed.enemy.boss ? 2 : 1.5))
+            const coins = Math.max(75, Math.round((Number(completed.enemy.zen) || 0) * (completed.enemy.boss ? 6 : 4)))
+            p.xpToday += xp
+            p.zenToday += zen
+            p.wins += 1
+            const { player: rewarded } = applyProgress(p, { xp, zen, coins })
+            await store.savePlayer(rewarded)
+            await store.log(id, 'party_floor_win', String(completed.ordinal), { xp, zen, coins, partyId: party.id })
+            if (completed.storyQuestId) {
+              const story = await store.floorStory(id)
+              await store.saveFloorStory(id, floorStory.completeQuest(story, completed.storyQuestId))
+            }
+          } else {
+            p.losses += 1
+            await store.savePlayer(p)
+            await store.log(id, 'party_floor_loss', String(completed.ordinal), { partyId: party.id })
+          }
+        }
+      }
+      const heading = result.won ? '🏆 PARTY VICTORY' : result.lost ? '💀 PARTY DEFEAT' : '🏃 PARTY WITHDREW'
+      return partyBattleDisplay(sock, ctx.jid, m, completed, `${heading} · ${completed.enemy?.name || 'Floor encounter'} ended.`)
+    }
+    return partyBattleDisplay(sock, ctx.jid, m, result.battle, result.note)
+  }
+
   async function battleAct (sock, m, ctx, action, cardSlot = 1, moveName = null) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling' && party.state?.floorBattle) return partyBattleAct(sock, m, ctx, action, cardSlot, moveName)
     const b = await store.getBattle(ctx.userId)
     if (!b) return duelAct(sock, m, ctx, action, moveName, cardSlot)
     b.fatigue = combatMechanics.fatigueValue(b.fatigue ?? p.fatigue)
     p.fatigue = b.fatigue
 
     if (action === 'retreat') {
+      p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp)))
+      p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy)))
+      p.mp = Math.max(0, Math.min(p.maxMp, Number(b.mp ?? p.mp)))
+      p.fatigue = combatMechanics.fatigueValue(b.fatigue ?? p.fatigue)
+      p.fatigueUpdatedAt = new Date().toISOString()
+      await store.savePlayer(p)
       await store.setBattle(ctx.userId, null)
       const progress = Math.max(0, Number(p.battlesSinceRest) || 0)
       return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udfc3 *RETREATED*\n\nYou pull back. No rewards, no losses.\nRest progress: *${progress}/2* completed battles. Retreating does not count.`)
@@ -858,8 +1231,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       }
     }
 
-    if (action === 'heavy' && Number(b.energy) < HEAVY_ATTACK_ENERGY) {
-      return send(sock, ctx.jid, m, `⚡ Heavy Attack costs *${HEAVY_ATTACK_ENERGY} Energy*. You have *${Math.max(0, Number(b.energy) || 0)}*.`)
+    const physicalCost = Math.max(0, Number(PHYSICAL_ENERGY_COSTS[action]) || 0)
+    if (physicalCost && Number(b.energy) < physicalCost) {
+      return send(sock, ctx.jid, m, `⚡ ${action.toUpperCase()} costs *${physicalCost} Energy*. You have *${Math.max(0, Number(b.energy) || 0)}*.`)
     }
 
     let selectedAbility = null
@@ -891,6 +1265,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (Number(b.energy) < selectedCombo.energyCost) {
         return send(sock, ctx.jid, m, `⚡ This combo costs *${selectedCombo.energyCost} Energy*. You have *${Math.max(0, Number(b.energy) || 0)}*.`)
       }
+      if (selectedCombo.abilityKey) {
+        const powerEntry = items.get(selectedCombo.abilityKey)
+        const mpCost = Math.ceil((Number(powerEntry?.mpCost) || 0) * Number(selectedCombo.powerMultiplier ?? 1))
+        if (Number(b.mp ?? p.mp) < mpCost) return send(sock, ctx.jid, m, `🔮 This combo costs *${mpCost} MP*. You have *${Math.max(0, Number(b.mp ?? p.mp) || 0)} MP*.`)
+      }
     }
     if (action === 'power') {
       const key = String(moveName || '').trim().toLowerCase()
@@ -901,6 +1280,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if ((await store.inventoryQty(ctx.userId, selectedPower.key)) < 1) {
         return send(sock, ctx.jid, m, `🔒 You have not unlocked *${selectedPower.name}*. Buy it from *${ctx.settings.prefix}shop abilities*.`)
       }
+      const mpCost = Math.max(0, Number(selectedPower.mpCost) || 0)
+      if (Number(b.mp ?? p.mp) < mpCost) return send(sock, ctx.jid, m, `🔮 *${selectedPower.name}* costs *${mpCost} MP*. You have *${Math.max(0, Number(b.mp ?? p.mp) || 0)} MP*.`)
     }
 
     let note = ''
@@ -911,21 +1292,24 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
       dealt = playerHit({ ...p, fatigue: b.fatigue }, b.enemy, 1.0, baseBonus)
+      b.energy = Math.max(0, Number(b.energy) - physicalCost)
       b.fatigue = combatMechanics.addFatigue(b.fatigue, 'attack', p)
       note = `\u2694\ufe0f You strike for *${dealt}*${baseBonus ? ` (includes ${weaponCard.name} +${baseBonus})` : ''}.`
     } else if (action === 'heavy') {
       const equipped = await store.equippedCards(ctx.userId)
       const weaponCard = equipped.find(c => Number(c.equipped_slot) === 1)
       const baseBonus = weaponCard && (!weaponCard.expires_at || new Date(weaponCard.expires_at).getTime() > Date.now()) ? Number(weaponCard.damage) || 0 : 0
-      b.energy = Math.max(0, Number(b.energy) - HEAVY_ATTACK_ENERGY)
+      b.energy = Math.max(0, Number(b.energy) - physicalCost)
       dealt = playerHit({ ...p, fatigue: b.fatigue }, b.enemy, HEAVY_ATTACK_MULTIPLIER, baseBonus)
       b.fatigue = combatMechanics.addFatigue(b.fatigue, 'heavy', p)
       note = `💥 *HEAVY ATTACK* deals *${dealt}* damage. (-${HEAVY_ATTACK_ENERGY} Energy)`
     } else if (action === 'guard' || action === 'block') {
+      b.energy = Math.max(0, Number(b.energy) - physicalCost)
       b.guard = 0.6
       b.fatigue = combatMechanics.addFatigue(b.fatigue, 'block', p)
       note = '🛡️ You brace for the counter.'
     } else if (action === 'dodge') {
+      b.energy = Math.max(0, Number(b.energy) - physicalCost)
       b.evade = true
       b.fatigue = combatMechanics.addFatigue(b.fatigue, 'dodge', p)
       note = '🌀 You prepare to evade the enemy counter.'
@@ -1015,6 +1399,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const effect = powerEntry?.effect || {}
       const energyCost = Math.max(0, Number(selectedCombo.energyCost) || 0)
       b.energy = Math.max(0, Number(b.energy) - energyCost)
+      const mpCost = powerEntry ? Math.ceil((Number(powerEntry.mpCost) || 0) * Number(selectedCombo.powerMultiplier ?? 1)) : 0
+      b.mp = Math.max(0, Number(b.mp ?? p.mp) - mpCost)
       const parts = []
       const powerDamage = effect.damage ? Math.max(0, Math.round(Number(effect.damage) * Number(selectedCombo.powerMultiplier ?? 1))) : 0
       if (powerDamage > 0) {
@@ -1042,13 +1428,14 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         parts.push('evasion prepared')
       }
       b.fatigue = combatMechanics.addFatigue(b.fatigue, selectedCombo.fatigueCost || selectedCombo.effect, p)
-      note = `🔗 *${selectedCombo.name}*\n${parts.join(' · ')} · ⚡ -${energyCost} Energy`
+      note = `🔗 *${selectedCombo.name}*\n${parts.join(' · ')} · ⚡ -${energyCost} Energy${mpCost ? ` · 🔮 -${mpCost} MP` : ''}`
     } else if (action === 'power') {
-      const result = items.apply(selectedPower, b, p)
+      const result = items.apply(selectedPower, b, { ...p, mp: Number(b.mp ?? p.mp), maxMp: p.maxMp })
       if (!result.ok) return send(sock, ctx.jid, m, `❌ ${result.note}`)
       b.enemyHp = result.battle.enemyHp
       b.playerHp = result.battle.playerHp
       b.guard = result.battle.guard
+      b.mp = result.battle.mp
       note = `✨ *${selectedPower.name}*\n${result.note}`
     }
 
@@ -1111,7 +1498,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     if (b.playerHp <= 0) return finishBattle(sock, m, ctx, p, b, false)
 
     b.turn += 1
-    b.energy = Math.min(p.maxPowerEnergy, b.energy + 8)
+    b.energy = Math.min(p.maxPowerEnergy, b.energy + ENERGY_REGEN_PER_TURN)
     b.equippedCards = await store.equippedCards(ctx.userId)
     b.lastEvent = note
     await persistFatigue(ctx.userId, p.fatigue, p.fatigueUpdatedAt, p)
@@ -1207,6 +1594,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if ((await store.inventoryQty(actorId, power.key)) < 1) {
         return send(sock, ctx.jid, m, `🔒 You have not unlocked *${power.name}*. Buy it from *${ctx.prefix}shop abilities*.`)
       }
+      const mpCost = Math.max(0, Number(power.mpCost) || 0)
+      const availableMp = Number((liveState.mp || {})[actorId] ?? actor.mp) || 0
+      if (availableMp < mpCost) return send(sock, ctx.jid, m, `🔮 ${power.name} costs *${mpCost} MP*. You have *${availableMp} MP*.`)
     }
 
     if (action === 'combo') {
@@ -1215,6 +1605,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       if (!(await store.hasCombo(actorId, combo.key))) return send(sock, ctx.jid, m, `🔒 *COMBO LOCKED*\n\n${combo.name}\nUnlock it through training or purchase.`)
       if (combo.abilityKey && (await store.inventoryQty(actorId, combo.abilityKey)) < 1) return send(sock, ctx.jid, m, `🔒 You must own *${items.get(combo.abilityKey)?.name || combo.abilityKey}* to execute this combo.`)
       if (Number((liveState.energy || {})[actorId] ?? actor.powerEnergy) < combo.energyCost) return send(sock, ctx.jid, m, `⚡ This combo costs *${combo.energyCost} Energy*.`)
+      if (combo.abilityKey) {
+        const ability = items.get(combo.abilityKey)
+        const mpCost = Math.ceil((Number(ability?.mpCost) || 0) * Number(combo.powerMultiplier ?? 1))
+        const availableMp = Number((liveState.mp || {})[actorId] ?? actor.mp) || 0
+        if (availableMp < mpCost) return send(sock, ctx.jid, m, `🔮 This combo costs *${mpCost} MP*. You have *${availableMp} MP*.`)
+      }
       power = combo
     }
 
@@ -1244,6 +1640,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       state.maxHp = { ...(state.maxHp || { [challengerId]: first.maxHp, [opponentId]: second.maxHp }) }
       state.energy = { ...(state.energy || { [challengerId]: first.powerEnergy, [opponentId]: second.powerEnergy }) }
       state.maxEnergy = { ...(state.maxEnergy || { [challengerId]: first.maxPowerEnergy, [opponentId]: second.maxPowerEnergy }) }
+      state.mp = { ...(state.mp || { [challengerId]: first.mp, [opponentId]: second.mp }) }
+      state.maxMp = { ...(state.maxMp || { [challengerId]: first.maxMp, [opponentId]: second.maxMp }) }
       state.fatigue = { ...(state.fatigue || { [challengerId]: first.fatigue || 0, [opponentId]: second.fatigue || 0 }) }
       state.guards = { ...(state.guards || {}) }
       state.evading = { ...(state.evading || {}) }
@@ -1261,8 +1659,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       let fatigueAction = ''
       if (action === 'attack' || action === 'heavy') {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
-        if (action === 'heavy' && energy < HEAVY_ATTACK_ENERGY) {
-          mutationError = `Heavy Attack costs ${HEAVY_ATTACK_ENERGY} Energy. You have ${energy}.`
+        const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
+        if (energy < cost) {
+          mutationError = `${action.toUpperCase()} costs ${cost} Energy. You have ${energy}.`
           return null
         }
         let cardBonus = 0
@@ -1273,16 +1672,24 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         }
         damage = playerHit(actorForTurn, targetStats, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, cardBonus)
         fatigueAction = action
-        if (action === 'heavy') state.energy[actorId] = energy - HEAVY_ATTACK_ENERGY
-        actionNote = action === 'heavy' ? `💥 Heavy Attack (-${HEAVY_ATTACK_ENERGY} Energy)` : `⚔️ Strike${weaponName ? ` · ${weaponName}` : ''}`
+        state.energy[actorId] = energy - cost
+        actionNote = action === 'heavy' ? `💥 Heavy Attack (-${cost} Energy)` : `⚔️ Strike (-${cost} Energy)${weaponName ? ` · ${weaponName}` : ''}`
       } else if (action === 'guard' || action === 'block') {
+        const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
+        if (energy < cost) { mutationError = `Block costs ${cost} Energy. You have ${energy}.`; return null }
+        state.energy[actorId] = energy - cost
         state.guards[actorId] = 0.6
         fatigueAction = 'block'
-        actionNote = '🛡️ Guard raised'
+        actionNote = `🛡️ Guard raised (-${cost} Energy)`
       } else if (action === 'dodge') {
+        const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
+        const cost = Number(PHYSICAL_ENERGY_COSTS.dodge) || 0
+        if (energy < cost) { mutationError = `Dodge costs ${cost} Energy. You have ${energy}.`; return null }
+        state.energy[actorId] = energy - cost
         state.evading[actorId] = true
         fatigueAction = 'dodge'
-        actionNote = '🌀 Evasion prepared'
+        actionNote = `🌀 Evasion prepared (-${cost} Energy)`
       } else if (action === 'heal') {
         const used = Number(state.heals[actorId] || 0)
         const limit = Math.max(1, Number(ctx.settings.selfHealPerCombat) || 5)
@@ -1297,10 +1704,12 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         actionNote = `🎴 ${card?.ability || card?.name || 'Card ability'}`
       } else if (action === 'power') {
         const fakeBattle = { enemy: { hp: target.maxHp, atk: target.atk, def: target.def }, enemyHp: targetHp, playerHp: actorHp, guard: 0 }
-        const applied = items.apply(power, fakeBattle, actorForTurn)
+        fakeBattle.mp = Number(state.mp[actorId] ?? actor.mp)
+        const applied = items.apply(power, fakeBattle, { ...actorForTurn, mp: fakeBattle.mp, maxMp: actor.maxMp })
         if (!applied.ok) { mutationError = applied.note; return null }
         state.hp[actorId] = applied.battle.playerHp
         state.guards[actorId] = applied.battle.guard || 0
+        state.mp[actorId] = Number(applied.battle.mp) || 0
         damage = targetHp - Number(applied.battle.enemyHp)
         actionNote = `✨ ${power.name}`
       } else if (action === 'combo') {
@@ -1313,6 +1722,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         const ability = combo.abilityKey ? items.get(combo.abilityKey) : null
         const effect = ability?.effect || {}
         const parts = []
+        const mpCost = ability ? Math.ceil((Number(ability.mpCost) || 0) * Number(combo.powerMultiplier ?? 1)) : 0
+        const currentMp = Math.max(0, Number(state.mp[actorId] ?? actor.mp) || 0)
+        if (currentMp < mpCost) { mutationError = `This combo costs ${mpCost} MP. You have ${currentMp}.`; return null }
+        state.mp[actorId] = currentMp - mpCost
         if (effect.damage) {
           const powerDamage = Math.max(0, Math.round(Number(effect.damage) * Number(combo.powerMultiplier ?? 1)))
           damage += powerDamage
@@ -1338,7 +1751,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
           parts.push('evasion prepared')
         }
         fatigueAction = combo.fatigueCost || combo.effect
-        actionNote = `🔗 ${combo.name} · ${parts.join(' · ')}`
+        actionNote = `🔗 ${combo.name} · ${parts.join(' · ')}${mpCost ? ` · -${mpCost} MP` : ''}`
       } else if (action === 'class') {
         const energy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
         const cost = Math.max(0, Number(classMove.cost) || 0)
@@ -1393,7 +1806,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         state.winner = actorId
       } else {
         const currentEnergy = Math.max(0, Number(state.energy[actorId] ?? actor.powerEnergy))
-        state.energy[actorId] = Math.min(Number(state.maxEnergy[actorId] ?? actor.maxPowerEnergy), currentEnergy + 8)
+        state.energy[actorId] = Math.min(Number(state.maxEnergy[actorId] ?? actor.maxPowerEnergy), currentEnergy + ENERGY_REGEN_PER_TURN)
         state.turn = targetId
         state.round += 1
       }
@@ -1434,6 +1847,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       loser.hp = Math.max(1, Math.round(loser.maxHp * 0.25))
       winner.powerEnergy = Math.max(0, Math.min(winner.maxPowerEnergy, Number(finalState.energy?.[winnerId] ?? winner.powerEnergy)))
       loser.powerEnergy = Math.max(0, Math.min(loser.maxPowerEnergy, Number(finalState.energy?.[losingId] ?? loser.powerEnergy)))
+      winner.mp = Math.max(0, Math.min(winner.maxMp, Number(finalState.mp?.[winnerId] ?? winner.mp)))
+      loser.mp = Math.max(0, Math.min(loser.maxMp, Number(finalState.mp?.[losingId] ?? loser.mp)))
       winner.battlesSinceRest = Math.max(0, Number(winner.battlesSinceRest) || 0) + 1
       loser.battlesSinceRest = Math.max(0, Number(loser.battlesSinceRest) || 0) + 1
       winner.wins += 1
@@ -1441,7 +1856,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
       const xp = Math.min(60 + loser.level * 5, Math.max(0, ctx.settings.xpDailyLimit - winner.xpToday))
       const requestedZen = 80 + loser.level * 8
-      const zen = Math.min(requestedZen, Math.max(0, ctx.settings.zenDailyLimit - winner.zenToday))
+      const zen = requestedZen
       const coins = 300 + loser.level * 40
       winner.xpToday += xp
       winner.zenToday += zen
@@ -1560,13 +1975,13 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     p.fatigueUpdatedAt = new Date().toISOString()
     p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp) || 0))
     p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy) || 0))
+    p.mp = Math.max(0, Math.min(p.maxMp, Number(b.mp ?? p.mp) || 0))
     if (won) {
       const settings = ctx.settings
       const xpRoom = Math.max(0, settings.xpDailyLimit - p.xpToday)
-      const zenRoom = Math.max(0, settings.zenDailyLimit - p.zenToday)
       const xp = Math.min(b.enemy.xp, xpRoom)
       const requestedZen = Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 2 : 1.5))
-      const zen = Math.min(requestedZen, zenRoom)
+      const zen = requestedZen
       const coins = Math.max(75, Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 6 : 4)))
       p.wins += 1
       p.xpToday += xp
@@ -1583,7 +1998,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const notes = events.map(e => e.type === 'level' ? `\u2b06\ufe0f Level *${e.level}*`
         : e.type === 'grade' ? `\ud83c\udf1f Grade *${e.grade}* \u2014 +\u2764\ufe0f${e.hp} +\u2694\ufe0f${e.atk}`
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
-      const capped = (b.enemy.xp > xp || requestedZen > zen) ? `\n\n> Daily XP or Zen cap reached.` : ''
+      const capped = b.enemy.xp > xp ? `\n\n> Daily XP cap reached.` : ''
 
       return buttons(sock, ctx.jid, m, [
         `${WATERMARK}`, '', '\ud83c\udfc6 *VICTORY*', '',
@@ -1683,6 +2098,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       maxHp: { [a.userId]: a.maxHp, [b.userId]: b.maxHp },
       energy: { [a.userId]: a.powerEnergy, [b.userId]: b.powerEnergy },
       maxEnergy: { [a.userId]: a.maxPowerEnergy, [b.userId]: b.maxPowerEnergy },
+      mp: { [a.userId]: a.mp, [b.userId]: b.mp },
+      maxMp: { [a.userId]: a.maxMp, [b.userId]: b.maxMp },
       fatigue: { [a.userId]: a.fatigue || 0, [b.userId]: b.fatigue || 0 },
       guards: {},
       evading: {},
@@ -1714,9 +2131,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       const left = Math.ceil((86400000 - (now - new Date(p.lastDaily).getTime())) / 3600000)
       return send(sock, ctx.jid, m, `\u23f3 *DAILY ALREADY CLAIMED*\n\nCome back in about *${left}h*.`)
     }
-    const zen = 120 + rnd(180)
-    const room = Math.max(0, ctx.settings.zenDailyLimit - p.zenToday)
-    const gain = Math.min(zen, room)
+    const gain = 120 + rnd(180)
     p.zenToday += gain
     p.lastDaily = new Date().toISOString()
     p.maxPowerEnergy = Math.max(p.maxPowerEnergy, powerEnergyForRank(p.rank))
@@ -1724,20 +2139,18 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const { player: after } = applyProgress(p, { zen: gain })
     await store.savePlayer(after)
     await store.log(ctx.userId, 'daily', ctx.userId, { gain })
-    return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udf81 *DAILY*\n\n\ud83e\ude99 +${fmt(gain)} Zen\n\u26a1 Power Energy restored to *${after.maxPowerEnergy}*\n\nZen today: *${fmt(after.zenToday)}/${fmt(ctx.settings.zenDailyLimit)}*`)
+    return send(sock, ctx.jid, m, `${WATERMARK}\n\n\ud83c\udf81 *DAILY*\n\n\ud83e\ude99 +${fmt(gain)} Zen\n\u26a1 Power Energy restored to *${after.maxPowerEnergy}*`)
   }
 
   async function zenWallet (sock, m, ctx) {
     const p = await store.player(ctx.userId)
     if (!p) return arise(sock, m, ctx)
     const q = store.rollDay(p)
-    const left = Math.max(0, ctx.settings.zenDailyLimit - q.zenToday)
     const lines = [
       `${WATERMARK}`, '', '💠 *WALLET*', '',
       `💠 Zen: *${fmt(q.zen)}*`,
       `💎 Coins: *${fmt(q.coins)}*`,
-      `Earned today: *${fmt(q.zenToday)}/${fmt(ctx.settings.zenDailyLimit)} Zen*`,
-      `Remaining Zen allowance: *${fmt(left)}*`, '',
+      `Earned today: *${fmt(q.zenToday)} Zen*`, '',
       'Exchange: *1,000 Coins = 100 Zen*',
       `Convert with *${ctx.settings.prefix}convert 1000*.`
     ]

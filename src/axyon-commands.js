@@ -378,9 +378,11 @@ Use: *${ctx.prefix}power ${row.key}*`),
         `${W}`, '', '🔗 *COMMAND COMBO CATALOGUE*', '',
         ...combos.CATALOGUE.map(combo => {
           const has = owned.some(row => row.combo_key === combo.key)
+          const ability = combo.abilityKey ? items.get(combo.abilityKey) : null
+          const mpCost = ability ? Math.ceil((Number(ability.mpCost) || 0) * Number(combo.powerMultiplier ?? 1)) : 0
           return `${has ? '✅' : '🔒'} *${combo.name}* · ${combo.category}
 ${combo.description}
-💰 ${fmt(combo.price)} Zen · Lv.${combo.requiredLevel}+`
+💰 ${fmt(combo.price)} Zen · Lv.${combo.requiredLevel}+${mpCost ? ` · 🔮 ${mpCost} MP` : ''}`
         }),
         '', 'Unlock through training discovery or purchase. Recipes are shown in your personal combo list after unlocking.'
       ].join('\n'))
@@ -456,6 +458,51 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
     if (!p) return axyon.arise(s, m, ctx)
     const floors = await store.floors()
     if (!floors.length) return axyon.send(s, ctx.jid, m, `\ud83c\udff9 No dungeon floors exist yet. AXYON can add one with *${ctx.prefix}flooradmin add <name>*`)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling' && party.state?.floorBattle) {
+      const battle = party.state.floorBattle
+      const current = battle.turnOrder?.[battle.turnIndex]
+      const currentPlayer = current ? await store.player(current) : null
+      return axyon.send(s, ctx.jid, m, `⚔️ *PARTY FLOOR ${battle.ordinal} ACTIVE*\n\n👹 ${battle.enemy?.name || 'Enemy'} · ${Math.max(0, Number(battle.enemyHp) || 0)}/${battle.enemy?.hp || 0} HP\nMembers: ${(battle.memberIds || []).length}\nNext turn: *${currentPlayer?.name || current || 'Unknown'}*\n\nUse *${ctx.prefix}battleinfo* to inspect the shared encounter.`)
+    }
+    if (party?.status === 'open' && (party.members || []).length >= 2) {
+      return axyon.send(s, ctx.jid, m, `🟡 Your party is still assembling. Members must use *${ctx.prefix}party ready*, then the leader uses *${ctx.prefix}party start* before shared floors can begin.`)
+    }
+    if (party?.status === 'started' && (party.members || []).length >= 2) {
+      if (String(party.leader) !== String(ctx.userId)) {
+        return axyon.send(s, ctx.jid, m, `👑 The Party Leader starts shared floors. Ask *${(await store.player(party.leader))?.name || party.leader}* to use *${ctx.prefix}floor <number>*. Everyone in the party will participate.`)
+      }
+      const ordinal = parseNum(args[0]) ?? Math.max(1, Number((await store.floorStory(ctx.userId)).chapter) || 1)
+      const f = floors.find(x => Number(x.ordinal) === ordinal)
+      if (!f) return axyon.send(s, ctx.jid, m, `\u274c No floor *${ordinal}*.`)
+      if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
+      const memberIds = [...new Set((party.members || []).map(String))]
+      const players = {}
+      for (const id of memberIds) {
+        const member = await store.player(id)
+        if (!member) return axyon.send(s, ctx.jid, m, `Player ${id} must use *${ctx.prefix}arise* before the party can enter.`)
+        if (await store.getBattle(id)) return axyon.send(s, ctx.jid, m, `Player *${member.name || id}* already has an active battle.`)
+        if (await store.activeDuelForUser(id).catch(() => null)) return axyon.send(s, ctx.jid, m, `Player *${member.name || id}* is already in a duel.`)
+        players[id] = {
+          hp: member.hp, maxHp: member.maxHp,
+          energy: member.powerEnergy, maxEnergy: member.maxPowerEnergy,
+          mp: member.mp, maxMp: member.maxMp,
+          fatigue: member.fatigue || 0, guard: 0, evading: false, healsLeft: ctx.settings.selfHealPerCombat
+        }
+      }
+      const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
+      const storyState = await store.floorStory(ctx.userId)
+      const scene = floorStory.begin(ordinal, storyState)
+      const floorBattle = {
+        mode: 'floor', ordinal, location: f.name, enemy, enemyHp: enemy.hp,
+        memberIds, turnOrder: memberIds.slice(), turnIndex: 0, round: 1,
+        players, retreats: [], storyPending: true, storyQuestId: null,
+        lastEvent: `${party.members.length} hunters entered ${f.name}.`
+      }
+      await store.updateParty(party.id, party.members || [], 'battling', party.invited || [], party.ready || [], { ...(party.state || {}), floorBattle })
+      await store.log(ctx.userId, 'party_floor_enter', String(ordinal), { partyId: party.id, members: memberIds })
+      return axyon.send(s, ctx.jid, m, `${scene.text}\n\n⚔️ *PARTY ENCOUNTER*\n${memberIds.length} hunters share one enemy HP pool. Turns are taken in party order. The first turn belongs to *${p.name || ctx.userId}*.`)
+    }
     const storyState = await store.floorStory(ctx.userId)
     const ordinal = parseNum(args[0]) ?? Math.max(1, Number(storyState.chapter) || 1)
     const f = floors.find(x => Number(x.ordinal) === ordinal)
@@ -463,13 +510,31 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
     if (f.locked) return axyon.send(s, ctx.jid, m, '\ud83d\udd12 That floor is locked.')
     const enemy = { name: f.name, hp: f.hp, atk: f.atk, def: f.def, xp: f.xp, zen: f.zen, boss: f.boss }
     const scene = floorStory.begin(ordinal, storyState)
-    const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, storyPending: true }
+    const b = { mode: 'floor', ordinal, location: f.name, equippedCards: await store.equippedCards(ctx.userId), enemy, enemyHp: enemy.hp, playerHp: p.hp, energy: p.powerEnergy, mp: p.mp, fatigue: p.fatigue, turn: 1, healsLeft: ctx.settings.selfHealPerCombat, guard: 0, storyPending: true }
     await store.setBattle(ctx.userId, b)
     await store.log(ctx.userId, 'floor_enter', String(ordinal), { name: f.name, chapter: scene.chapter.title })
     return axyon.send(s, ctx.jid, m, scene.text)
   })
 
   cmd('choice', 'dungeon', '{p}choice <1-4>', 'Make a decision during a floor story event.', async (s, m, ctx, args) => {
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling' && party.state?.floorBattle?.storyPending) {
+      if (String(party.leader) !== String(ctx.userId)) return axyon.send(s, ctx.jid, m, '👑 Only the Party Leader can make the shared floor story decision.')
+      const battle = { ...party.state.floorBattle }
+      const result = floorStory.choose(battle.ordinal, parseNum(args[0]), await store.floorStory(party.leader))
+      if (!result.ok) return axyon.send(s, ctx.jid, m, result.message)
+      await store.saveFloorStory(party.leader, result.state)
+      const hpDelta = Number(result.choice.enemy?.hp || 0)
+      const atkDelta = Number(result.choice.enemy?.atk || 0)
+      battle.enemy = { ...battle.enemy, hp: Math.max(20, Number(battle.enemy.hp || 1) + hpDelta), atk: Math.max(1, Number(battle.enemy.atk || 1) + atkDelta) }
+      battle.enemyHp = Number(battle.enemy.hp)
+      battle.storyPending = false
+      battle.storyChoice = result.choice.label
+      battle.storyQuestId = result.choice.quest || null
+      battle.storyFlags = result.state.flags
+      await store.updateParty(party.id, party.members || [], 'battling', party.invited || [], party.ready || [], { ...(party.state || {}), floorBattle: battle })
+      return axyon.send(s, ctx.jid, m, `${result.message}\n\n⚔️ The shared party battle begins. The current turn is *${(await store.player(battle.turnOrder?.[battle.turnIndex]))?.name || battle.turnOrder?.[battle.turnIndex]}*.`)
+    }
     const b = await store.getBattle(ctx.userId)
     if (!b || b.mode !== 'floor' || !b.storyPending) return axyon.send(s, ctx.jid, m, `No pending story decision. Enter a floor with *${ctx.prefix}floor* first.`)
     const result = floorStory.choose(b.ordinal, parseNum(args[0]), await store.floorStory(ctx.userId))
@@ -498,7 +563,7 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
     await store.saveFloorStory(ctx.userId, claimed.state)
     const p = await store.player(ctx.userId)
     const xp = Math.min(claimed.reward.xp, Math.max(0, Number(ctx.settings.xpDailyLimit || 5000) - Number(p.xpToday || 0)))
-    const zen = Math.min(claimed.reward.zen, Math.max(0, Number(ctx.settings.zenDailyLimit || 5000) - Number(p.zenToday || 0)))
+    const zen = Math.max(0, Number(claimed.reward.zen) || 0)
     p.xpToday = Number(p.xpToday || 0) + xp
     p.zenToday = Number(p.zenToday || 0) + zen
     const progressed = axyon.applyProgress(p, { xp, zen })
@@ -1141,9 +1206,14 @@ Accept with *${ctx.prefix}duel accept*.`)
     const target = String(args[1] ?? args[0] ?? '').trim()
     if (/^#?[A-Z0-9]{6}$/i.test(target)) {
       const studio = await store.claimStudioCard(ctx.userId, target).catch(() => null)
-      if (studio?.ok) return axyon.send(s, ctx.jid, m, `🎴 *CARD CLAIMED*\n\n${studio.card.name} · Collection #${studio.slot}\nClaims: ${studio.claimed}/${studio.limit}`)
+      if (studio?.ok) return axyon.send(s, ctx.jid, m, `🎴 *CARD CLAIMED*\n\n${studio.card.name} · Collection #${studio.slot}\n💰 Paid: ${fmt(studio.paidCoins || 0)} Coins · ${fmt(studio.paidZen || 0)} Zen\nClaims: ${studio.claimed}/${studio.limit}`)
       if (studio && studio.reason !== 'not_found') {
-        const messages = {not_registered:'Use !arise first.',claimed:'You have already claimed this card.',expired:'This card has expired.',limit:'All copies of this card have been claimed.'}
+        const messages = {
+          not_registered:'Use !arise first.', claimed:'You have already claimed this card.',
+          expired:'This card has expired.', limit:'All copies of this card have been claimed.',
+          coins:`Not enough Coins. Required: ${fmt(studio.required)} · Available: ${fmt(studio.balance)}.`,
+          zen:`Not enough Zen. Required: ${fmt(studio.required)} · Available: ${fmt(studio.balance)}.`
+        }
         return axyon.send(s, ctx.jid, m, `❌ ${messages[studio.reason] || 'This card cannot be claimed.'}`)
       }
       return axyon.claimDrop(s, m, ctx, target)
@@ -1220,7 +1290,7 @@ Accept with *${ctx.prefix}duel accept*.`)
     return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *CONVERSION COMPLETE*\n\n💎 -${fmt(result.coins)} Coins\n💠 +${fmt(result.zen)} Zen\n\nNew balance: *${fmt(result.player.coins)} Coins* · *${fmt(result.player.zen)} Zen*`)
   })
   cmd('daily', 'economy', '{p}daily', 'Claim Zen and restore Power Energy.', async (s, m, ctx) => axyon.daily(s, m, ctx))
-  cmd('economy', 'economy', '{p}economy <xp|zen|view> [value]', 'View or set daily XP and Zen limits (AXYON only).', async (s, m, ctx, args) => {
+  cmd('economy', 'economy', '{p}economy [xp <value>]', 'View or set the daily XP cap (AXYON only). Zen has no daily earning cap.', async (s, m, ctx, args) => {
     const sub = String(args[0] || 'view').toLowerCase()
     if (sub === 'view') {
       const s2 = await store.settings()
@@ -1228,7 +1298,7 @@ Accept with *${ctx.prefix}duel accept*.`)
       return axyon.send(s, ctx.jid, m, [
         `${W}`, '', '\ud83e\ude99 *ECONOMY*', '',
         `Daily XP limit: *${s2.xpDailyLimit}*`,
-        `Daily Zen limit: *${s2.zenDailyLimit}*`,
+        `Daily Zen cap: *None*`,
         `Training cap: *5 sessions / 25 XP per day*`, '',
         `Your XP today: *${p?.xpToday ?? 0}*`,
         `Training today: *${p?.trainingUsesToday ?? 0}/5*`,
@@ -1239,9 +1309,9 @@ Accept with *${ctx.prefix}duel accept*.`)
     }
     if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*\n\nOnly AXYON can change the economy limits.')
     const value = parseNum(args[1])
-    if (!['xp', 'zen'].includes(sub)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}economy xp 5000*`)
+    if (sub !== 'xp') return axyon.send(s, ctx.jid, m, `Zen has no daily earning cap. Usage: *${ctx.prefix}economy xp 5000*`)
     if (value === null || value < 0) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}economy ${sub} <amount>*`)
-    await store.setSetting(sub === 'xp' ? 'xpDailyLimit' : 'zenDailyLimit', value)
+    await store.setSetting('xpDailyLimit', value)
     await store.log(ctx.userId, 'economy_limit', sub, { value })
     return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *LIMIT UPDATED*\n\nDaily ${sub.toUpperCase()} limit: *${value}*`)
   })
@@ -2561,6 +2631,10 @@ Start with *${ctx.prefix}guild squad start*.`)
     const p = await store.player(ctx.userId)
     if (!p) return axyon.send(s, ctx.jid, m, `\ud83c\udf00 Use *${ctx.prefix}arise* first.`)
     const battle = await store.getBattle(ctx.userId)
+    const party = await store.partyForUser(ctx.jid, ctx.userId).catch(() => null)
+    if (party?.status === 'battling') return axyon.send(s, ctx.jid, m, 'Use consumable items between party encounters. Your MP and party combat state are kept separate during a shared battle.')
+    const duel = await store.activeDuelForUser(ctx.userId, ctx.jid).catch(() => null)
+    if (duel) return axyon.send(s, ctx.jid, m, 'Use consumable items between duels. Duel MP is tracked separately during an active match.')
     if (entry.kind === 'ability') return axyon.battleAct(s, m, ctx, 'power', 1, entry.key)
 
     const r = items.apply(entry, battle, p)
@@ -2580,6 +2654,9 @@ Start with *${ctx.prefix}guild squad start*.`)
         p.losses += 1
         p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
         p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
+        p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(r.battle.energy ?? p.powerEnergy) || 0))
+        p.mp = Math.max(0, Math.min(p.maxMp, Number(r.battle.mp ?? p.mp) || 0))
+        p.fatigue = Math.max(0, Math.min(100, Number(r.battle.fatigue ?? p.fatigue) || 0))
         await store.savePlayer(p)
         await store.log(ctx.userId, 'item_use', entry.key, { died: true })
         return axyon.send(s, ctx.jid, m, [
@@ -2607,7 +2684,7 @@ Start with *${ctx.prefix}guild squad start*.`)
       r.note,
       '',
       T.rule('', 'hair'),
-      `\u2764\ufe0f HP ${T.m(`${r.player.hp}/${r.player.maxHp}`)} \u2022 \ud83d\udd0b ${T.m(`${r.player.powerEnergy}/${r.player.maxPowerEnergy}`)}`
+      `\u2764\ufe0f HP ${T.m(`${r.player.hp}/${r.player.maxHp}`)} \u2022 \u26a1 Energy ${T.m(`${r.player.powerEnergy}/${r.player.maxPowerEnergy}`)} \u2022 \ud83d\udd2e MP ${T.m(`${r.player.mp}/${r.player.maxMp}`)}`
     ].join('\n'))
   })
 

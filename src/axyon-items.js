@@ -52,6 +52,17 @@ const ITEMS = {
     battleOnly: false,
     effect: { energy: 60 }
   },
+  mp_refiller: {
+    key: 'mp_refiller',
+    name: 'MP Refiller',
+    icon: '\ud83d\udd2e',
+    kind: 'item',
+    price: 500,
+    currency: 'zen',
+    desc: 'Restores 50 MP. MP does not regenerate naturally.',
+    battleOnly: false,
+    effect: { mp: 50 }
+  },
 
   /* ------------------------------------------------------------- battle */
   bomb: {
@@ -92,7 +103,8 @@ const ITEMS = {
     icon: '\ud83d\udde1\ufe0f',
     kind: 'ability',
     price: 1200,
-    desc: 'Permanent. A 60-damage strike, usable in any battle.',
+    desc: 'Permanent. A 60-damage strike; costs 35 MP.',
+    mpCost: 35,
     battleOnly: true,
     effect: { damage: 60 }
   },
@@ -102,7 +114,8 @@ const ITEMS = {
     icon: '\ud83e\ude78',
     kind: 'ability',
     price: 1800,
-    desc: 'Permanent. 40 damage, and heals you for the same amount.',
+    desc: 'Permanent. 40 damage and 40 HP recovery; costs 50 MP.',
+    mpCost: 50,
     battleOnly: true,
     effect: { damage: 40, lifesteal: true }
   },
@@ -112,7 +125,8 @@ const ITEMS = {
     icon: '\ud83d\udee1\ufe0f',
     kind: 'ability',
     price: 1500,
-    desc: 'Permanent. Blocks 70% of the next enemy hit.',
+    desc: 'Permanent. Blocks 70% of the next enemy hit; costs 40 MP.',
+    mpCost: 40,
     battleOnly: true,
     effect: { guard: 0.7 }
   }
@@ -157,6 +171,17 @@ function apply (entry, battle, player) {
     return { ok: false, note: `*${entry.name}* only works inside a battle.` }
   }
 
+  const mpCost = Math.max(0, Math.floor(Number(entry.mpCost) || 0))
+  if (mpCost) {
+    const currentMp = Math.max(0, Number(b ? b.mp : p.mp) || 0)
+    if (currentMp < mpCost) {
+      return { ok: false, note: `*${entry.name}* costs *${mpCost} MP*. You have *${currentMp} MP*.` }
+    }
+    if (b) b.mp = currentMp - mpCost
+    else p.mp = currentMp - mpCost
+    notes.push(`\ud83d\udd2e -${mpCost} MP`)
+  }
+
   if (e.healPct) {
     const amount = combatMechanics.enhancedHealing(p, Math.round(p.maxHp * e.healPct))
     if (b) {
@@ -179,6 +204,22 @@ function apply (entry, battle, player) {
       const before = p.powerEnergy
       p.powerEnergy = Math.min(p.maxPowerEnergy, p.powerEnergy + e.energy)
       notes.push(`\ud83d\udd0b Power Energy *+${p.powerEnergy - before}*.`)
+    }
+  }
+
+  if (e.mp) {
+    const maxMp = Math.max(0, Number(p.maxMp) || 0)
+    if (maxMp <= 0) return { ok: false, note: 'Your MP tank unlocks at Level 10.' }
+    if (b) {
+      const before = Math.max(0, Number(b.mp ?? p.mp) || 0)
+      if (before >= maxMp) return { ok: false, note: 'Your MP tank is already full.' }
+      b.mp = Math.min(maxMp, before + Number(e.mp))
+      notes.push(`\ud83d\udd2e MP *+${b.mp - before}*.`)
+    } else {
+      const before = Math.max(0, Number(p.mp) || 0)
+      if (before >= maxMp) return { ok: false, note: 'Your MP tank is already full.' }
+      p.mp = Math.min(maxMp, before + Number(e.mp))
+      notes.push(`\ud83d\udd2e MP *+${p.mp - before}*.`)
     }
   }
 

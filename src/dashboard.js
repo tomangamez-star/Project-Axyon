@@ -558,8 +558,9 @@ function createDashboard ({ sessions, database, lease, logger }) {
           const caption = `${studioCaption(data, saved.claim_count || 0)}\n\nClaim with *!claim card #${code}*`
           const image = Buffer.isBuffer(saved.rendered_data) ? saved.rendered_data : Buffer.from(saved.rendered_data || [])
           if (!image.length) { json(res, 500, {ok:false,error:'Saved card image is missing. Re-render and save this card.'}); return true }
+          saved.rendered_data = image
           // Mark as spawned only after WhatsApp accepts the send request.
-          try { await live.sock.sendMessage(jid, { image, caption }) } catch (sendError) {
+          try { await live.sock.sendMessage(jid, { image: saved.rendered_data, caption }) } catch (sendError) {
             logger.error({ err: sendError, groupJid: jid, cardId: saved.id }, 'Card Studio WhatsApp send failed')
             json(res, 502, {ok:false,error:`WhatsApp rejected the card send: ${String(sendError?.message || 'unknown send error').slice(0,240)}`}); return true
           }
