@@ -65,9 +65,13 @@ function hslToHex (h, s, l) {
 function paletteFrom (dominant, tier) {
   if (!dominant || !Number.isFinite(dominant.r)) return { accent: tier.accent, accent2: tier.accent2, glow: tier.accent }
   const [h, s, l] = rgbToHsl(dominant.r, dominant.g, dominant.b)
-  const accent = hslToHex((h + 12) % 360, Math.max(.55, s), Math.max(.48, Math.min(.72, l)))
-  const complement = hslToHex((h + 165) % 360, Math.max(.6, s), .72)
-  return { accent, accent2: complement, glow: accent }
+  // Keep the card in the artwork's colour family. A near-complementary hue
+  // made purple/blue art produce red/teal frames even though those colours
+  // were not present in the character image.
+  const saturation = Math.max(.42, Math.min(.88, s * 1.04))
+  const accent = hslToHex(h, saturation, Math.max(.38, Math.min(.66, l)))
+  const secondary = hslToHex((h + 18) % 360, Math.max(.38, saturation * .92), .68)
+  return { accent, accent2: secondary, glow: accent }
 }
 function wrap (value, limit = 42, maxLines = 2) {
   const words = clean(value, 180).split(/\s+/).filter(Boolean)
@@ -158,9 +162,18 @@ async function render (card, imageBuffer) {
   const sharp = getSharp()
   if (!sharp || !Buffer.isBuffer(imageBuffer) || !imageBuffer.length) return null
   const tier = oldTier(card)
-  let dominant = null
-  try { dominant = (await sharp(imageBuffer).stats()).dominant } catch {}
-  const palette = paletteFrom(dominant, tier)
+  let palette = null
+  try {
+    // Reuse the multi-sample artwork palette from AI Custom so both renderer
+    // paths stay faithful to the actual image instead of one noisy pixel.
+    const sampled = await require('./ai-custom-card').samplePalette(sharp, imageBuffer)
+    palette = { accent: sampled.a, accent2: sampled.b, glow: sampled.a }
+  } catch {}
+  if (!palette) {
+    let dominant = null
+    try { dominant = (await sharp(imageBuffer).stats()).dominant } catch {}
+    palette = paletteFrom(dominant, tier)
+  }
   const hero = await sharp(imageBuffer).rotate().resize(604, 810, { fit: 'cover', position: 'attention' })
     .modulate({ saturation: 1.08, brightness: 0.98 }).png().toBuffer()
   const ambience = Buffer.from(`<svg width="700" height="900" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="a"><stop offset="0" stop-color="${palette.accent}" stop-opacity=".34"/><stop offset="1" stop-color="#05070C" stop-opacity=".98"/></radialGradient></defs><rect width="700" height="900" fill="#05070C"/><rect width="700" height="900" fill="url(#a)"/></svg>`)

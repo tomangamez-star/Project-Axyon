@@ -81,8 +81,19 @@ function paletteFrom (samples, tier = { tier: 1 }) {
     const [h, s, l] = rgbToHsl(...rgb)
     return hslHex(h, Math.max(.48, Math.min(.88, s * 1.12)), Math.max(.43, Math.min(.68, l)))
   }
-  const second = bins.find(x => x.weight > first.weight * .16 && x.weight > 0 && Math.min(Math.abs(x.hue - first.hue), 360 - Math.abs(x.hue - first.hue)) >= 30)
-  return { a: color(first), b: second ? color(second) : hslHex((first.hue + 22) % 360, .52, .66), source: second ? 'artwork-multi' : 'artwork-single' }
+  // Keep two genuinely artwork-derived accents, but constrain the second
+  // sample to the primary hue family. Previously the code deliberately chose
+  // a distant/complementary bin, so blue-violet art could acquire red/teal
+  // borders. Use the second sample's saturation/lightness while keeping its
+  // hue analogous to the dominant artwork hue.
+  const second = bins.find(x => x !== first && x.weight > first.weight * .03 && x.weight > 0)
+  let secondary = hslHex((first.hue + 18) % 360, .52, .66)
+  if (second) {
+    const rgb = [second.r / second.weight, second.g / second.weight, second.b / second.weight]
+    const [, s, l] = rgbToHsl(...rgb)
+    secondary = hslHex((first.hue + 18) % 360, Math.max(.42, Math.min(.86, s * 1.05)), Math.max(.43, Math.min(.68, l)))
+  }
+  return { a: color(first), b: secondary, source: second ? 'artwork-multi' : 'artwork-single' }
 }
 async function samplePalette (sharpFactory, imageBuffer) {
   try {
