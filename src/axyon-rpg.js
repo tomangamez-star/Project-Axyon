@@ -159,11 +159,16 @@ function buildEnemy (stage) {
   return npc.buildNpc(stage)
 }
 
-function playerHit (p, enemy, mult = 1, bonus = 0) {
+function playerHitDetails (p, enemy, mult = 1, bonus = 0) {
   const strengthBonus = Math.max(0, (Number(p.str) || 5) - 5) * 0.35
   const base = p.atk * 1.15 + strengthBonus + rnd(7) + bonus
-  const rawDamage = base * mult - enemy.def * 0.35
-  return Math.max(1, Math.round(combatMechanics.applyFatiguePenalty(rawDamage, p, p.fatigue)))
+  const rawDamage = Math.max(1, base * mult - enemy.def * 0.35)
+  const damage = Math.max(1, Math.round(combatMechanics.applyFatiguePenalty(rawDamage, p, p.fatigue)))
+  return { damage, rawDamage: Math.max(1, Math.round(rawDamage)), fatigueReduced: Math.max(0, Math.max(1, Math.round(rawDamage)) - damage) }
+}
+
+function playerHit (p, enemy, mult = 1, bonus = 0) {
+  return playerHitDetails(p, enemy, mult, bonus).damage
 }
 
 function enemyHitDetails (enemy, p, guardRatio = 0) {
@@ -870,23 +875,53 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   }
 
   async function partyBattleDisplay (sock, jid, quoted, battle, note = '') {
-    const rows = []
+    const hpBar = (current, maximum) => {
+      const width = 8
+      const cur = Math.max(0, Number(current) || 0)
+      const max = Math.max(0, Number(maximum) || 0)
+      const filled = max > 0 ? Math.max(0, Math.min(width, Math.round(cur / max * width))) : 0
+      return `[${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}] ${Math.round(cur)}/${Math.round(max)}`
+    }
+    const members = []
     for (const id of battle.memberIds || []) {
       const player = await store.player(id)
       const member = battle.players?.[id] || {}
       const suffix = (battle.retreats || []).includes(id) ? ' · RETREATED' : Number(member.hp) <= 0 ? ' · DOWN' : ''
-      rows.push(`• *${player?.name || id}* · ❤️ ${Math.max(0, Number(member.hp) || 0)}/${member.maxHp || player?.maxHp || 0} · ⚡ ${Math.max(0, Number(member.energy) || 0)}/${member.maxEnergy || player?.maxPowerEnergy || 0} · 🔮 ${Math.max(0, Number(member.mp) || 0)}/${member.maxMp || player?.maxMp || 0}${suffix}`)
+      members.push({
+        name: player?.name || id,
+        hp: hpBar(member.hp, member.maxHp || player?.maxHp),
+        energy: hpBar(member.energy, member.maxEnergy || player?.maxPowerEnergy),
+        mp: hpBar(member.mp, member.maxMp || player?.maxMp),
+        fatigue: Math.max(0, Number(member.fatigue) || 0),
+        suffix
+      })
     }
     const nextId = battle.completed ? null : battle.turnOrder?.[battle.turnIndex]
     const next = nextId ? await store.player(nextId) : null
+    const enemy = battle.enemy || {}
     const lines = [
-      '⬡ *AXYN CORE*', '', `⚔️ *PARTY FLOOR ${battle.ordinal} · ROUND ${battle.round || 1}*`,
-      `👹 *${battle.enemy?.name || 'ENEMY'}* · ❤️ ${Math.max(0, Number(battle.enemyHp) || 0)}/${battle.enemy?.hp || 0}`,
-      '', '┈┈┈ *PARTY VITALS* ┈┈┈', ...rows, '',
-      note ? `✦ ${note}` : '', next ? `⌛ Next turn: *${next.name || nextId}*` : '',
-      '', '`!attack` · `!heavy` · `!block` · `!dodge` · `!heal`',
-      '`!power` · `!cc` · `!class` · `!ability` · `!retreat`'
-    ].filter(Boolean)
+      '⬡ *AXYN CORE*',
+      '*亗『PARTY EXPEDITION』亗*',
+      '',
+      `┈┈┈ *DUNGEON · FLOOR ${battle.ordinal} · ROUND ${battle.round || 1}* ┈┈┈`,
+      `👹 *${enemy.name || 'ENEMY'}*`,
+      `❤️ HP ${hpBar(battle.enemyHp, enemy.hp)}`,
+      '',
+      '┈┈┈ *PARTY VITALS* ┈┈┈',
+      ...members.flatMap(member => [
+        `*${member.name}*${member.suffix}`,
+        `❤️ HP ${member.hp}`,
+        `⚡ Energy ${member.energy}`,
+        `🔮 MP ${member.mp} · 😮‍💨 Fatigue ${member.fatigue}/100`
+      ]),
+      note ? '' : null,
+      note ? `✦ ${note}` : null,
+      next ? `⌛ Next turn: *${next.name || nextId}*` : null,
+      '',
+      '`!attack` · `!heavy` · `!block` · `!dodge` · `!heal`',
+      '`!power` · `!cc` · `!class` · `!ability` · `!retreat`',
+      '`!battleinfo`'
+    ].filter(line => line !== null && line !== undefined)
     return send(sock, jid, quoted, lines.join('\n'))
   }
 
@@ -977,9 +1012,11 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
         if (Number(playerState.energy) < cost) { mutationError = `${action.toUpperCase()} costs ${cost} Energy.`; return null }
         playerState.energy -= cost
-        dealt = playerHit(fighter, enemy, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, weaponBonus)
+        const hitResult = playerHitDetails(fighter, enemy, action === 'heavy' ? HEAVY_ATTACK_MULTIPLIER : 1, weaponBonus)
+        dealt = hitResult.damage
         fatigueAction = action
         note = `${actor.name || actorId} ${action === 'heavy' ? 'used Heavy Attack' : 'attacked'}${weaponName ? ` with ${weaponName}` : ''} for ${dealt} damage (-${cost} Energy).`
+        if (hitResult.fatigueReduced > 0) note += ` Fatigue reduced damage by ${hitResult.fatigueReduced}.`
       } else if (action === 'block' || action === 'guard') {
         const cost = Number(PHYSICAL_ENERGY_COSTS[action]) || 0
         if (Number(playerState.energy) < cost) { mutationError = `Block costs ${cost} Energy.`; return null }

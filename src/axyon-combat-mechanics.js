@@ -43,7 +43,10 @@ function fatiguePenalty (player, currentFatigue = player?.fatigue) {
 }
 
 function applyFatiguePenalty (amount, player, currentFatigue = player?.fatigue) {
-  return Math.max(0, Number(amount) || 0) * (1 - fatiguePenalty(player, currentFatigue))
+  const raw = Math.max(0, Number(amount) || 0)
+  const reduced = raw * (1 - fatiguePenalty(player, currentFatigue))
+  // Fatigue can never cut a physical action below half of its fatigue-free damage.
+  return Math.max(raw * 0.5, reduced)
 }
 
 /** STA reduces how much exhaustion each physical action adds. */
