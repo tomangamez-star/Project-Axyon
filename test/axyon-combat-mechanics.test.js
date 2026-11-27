@@ -81,3 +81,10 @@ test('VIT improves Soul Drain and other lifesteal recovery', () => {
   assert.equal(result.battle.enemyHp, 60)
   assert.equal(result.battle.playerHp, 92)
 })
+
+test('fatigue never reduces an action below half of its fatigue-free damage', () => {
+  const raw = 279
+  const reduced = mechanics.applyFatiguePenalty(raw, { ...novice, sta: 5 }, 100)
+  assert.ok(reduced >= raw * 0.5)
+  assert.ok(reduced <= raw)
+})
