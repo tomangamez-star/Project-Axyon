@@ -189,7 +189,7 @@ async function main () {
     ['role-remove', { userId: '2348000000002' }],
     ['number-add', { userId: '2348000000003' }],
     ['number-remove', { userId: '2348000000003' }],
-    ['settings', { prefix: '!', xpDailyLimit: 5000, zenDailyLimit: 5000, partyMax: 5, partyMin: 2, selfHealPerCombat: 5, classMovesPerDay: 3, cardAbilitiesPerDay: 3, groupRegistrationRequired: true, duelAutoPromote: true }]
+    ['settings', { prefix: '!', zenDailyLimit: 5000, partyMax: 5, partyMin: 2, selfHealPerCombat: 5, classMovesPerDay: 3, cardAbilitiesPerDay: 3, groupRegistrationRequired: true, duelAutoPromote: true }]
   ]
 
   for (const [action, payload] of actions) {

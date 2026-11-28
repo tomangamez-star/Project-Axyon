@@ -26,6 +26,7 @@ const PLAYER = '2348022222222'
 process.env.OWNER_NUMBERS = OWNER
 
 const store = require('../src/axyon-store')
+const { database } = require('../src/auth-store')
 const { createAxyon } = require('../src/axyon-rpg')
 const { createCommands } = require('../src/axyon-commands')
 const { shouldHandleUpsert, resolveButtonId } = require('../src/message-guard')
@@ -151,10 +152,80 @@ async function main () {
 
   console.log('\n=== 3. !arise in a DM ===')
   sock.sent.length = 0
-  const dm = await deliver(msg(PLAYER, '!arise', { group: false, fromMe: true }))
-  ok('!arise works in a DM from fromMe:true', dm === true)
+  const dm = await deliver(msg(PLAYER, '!arise', { group: false, fromMe: false }))
+  ok('!arise works in an incoming DM from another player', dm === true)
   ok('DM reply produced', sock.sent.length > 0)
   ok('DM player created', !!(await store.player(PLAYER)))
+
+  console.log('\n=== 3A. Connected-account !arise in a DM uses the bot identity ===')
+  const connectedDmUser = '2348055555555'
+  const previousSockUser = sock.user
+  sock.user = { id: `${connectedDmUser}@s.whatsapp.net` }
+  sock.sent.length = 0
+  const connectedDm = await deliver(msg('2348099999999', '!arise', { group: false, fromMe: true }))
+  ok('connected-account DM !arise is handled', connectedDm === true)
+  ok('connected-account DM creates the connected account profile', !!(await store.player(connectedDmUser)))
+  ok('connected-account DM does not register the recipient as sender', !(await store.player('2348099999999')))
+  sock.user = previousSockUser
+
+  console.log('\n=== 3B. Returning hunters cannot register twice or lose progress ===')
+  await store.savePlayer({
+    ...(await store.player(PLAYER)),
+    rank: 'D',
+    level: 8,
+    xp: 321,
+    zen: 4321,
+    coins: 8765,
+    stage: 4,
+    wins: 3
+  })
+  await store.addItem(PLAYER, 'arise-regression-token', 2)
+  const countBeforeRepeat = await store.playerCount()
+  sock.sent.length = 0
+  const repeated = await deliver(msg(PLAYER, '!arise', { group: false, fromMe: false }))
+  const afterRepeat = await store.player(PLAYER)
+  ok('repeat !arise is still handled', repeated === true)
+  ok('repeat !arise shows returning-hunter greeting', /WELCOME BACK/.test(lastText(sock)))
+  ok('repeat !arise does not create another player row', (await store.playerCount()) === countBeforeRepeat)
+  ok('repeat !arise preserves rank and level', afterRepeat.rank === 'D' && afterRepeat.level === 8)
+  ok('repeat !arise preserves XP and balances', afterRepeat.xp === 321 && afterRepeat.zen === 4321 && afterRepeat.coins === 8765)
+  ok('repeat !arise preserves stage and wins', afterRepeat.stage === 4 && afterRepeat.wins === 3)
+  ok('repeat !arise preserves inventory', await store.inventoryQty(PLAYER, 'arise-regression-token') === 2)
+
+  console.log('\n=== 3C. Existing player HP is migrated and armor stays locked below level 50 ===')
+  const legacyId = '2348033333333'
+  await store.arise(legacyId, 'Legacy Hunter')
+  await database().query(
+    'UPDATE axyon_players SET level=14,rank=$2,max_hp=115,hp=100 WHERE user_id=$1',
+    [legacyId, 'C']
+  )
+  const migratedHp = await store.player(legacyId)
+  ok('existing level-14 player is recalculated to 140 max HP', migratedHp.maxHp === 140, String(migratedHp.maxHp))
+
+  const armorId = '2348044444444'
+  await store.arise(armorId, 'Armor Tester')
+  const armorPlayer = await store.player(armorId)
+  await store.savePlayer({ ...armorPlayer, level: 50, rank: 'S', zen: 100000, hp: 100 })
+  const purchased = await store.buyArmor(armorId, 1)
+  await store.equipArmor(armorId, purchased.id)
+  const lockedPlayer = await store.player(armorId)
+  await store.savePlayer({ ...lockedPlayer, level: 49, rank: 'A' })
+  const dormant = await store.armorFor(armorId)
+  ok('owned armor is preserved below level 50', dormant.length === 1 && dormant[0].equipped)
+  ok('equipped armor gives no protection below level 50', await store.equippedArmor(armorId) === null)
+  const durabilityBefore = dormant[0].durability
+  await store.wearArmor(armorId, 1)
+  const dormantAfter = await store.armorFor(armorId)
+  ok('locked armor does not lose durability in battle', dormantAfter[0].durability === durabilityBefore)
+  let buyLocked = false
+  let equipLocked = false
+  try { await store.buyArmor(armorId, 1) } catch (e) { buyLocked = /level 50/i.test(e.message) }
+  try { await store.equipArmor(armorId, purchased.id) } catch (e) { equipLocked = /level 50/i.test(e.message) }
+  ok('buying armor is rejected below level 50', buyLocked)
+  ok('equipping armor is rejected below level 50', equipLocked)
+  const reactivatedPlayer = await store.player(armorId)
+  await store.savePlayer({ ...reactivatedPlayer, level: 50, rank: 'S' })
+  ok('preserved equipped armor reactivates at level 50', (await store.equippedArmor(armorId))?.id === purchased.id)
 
   console.log('\n=== 4. Every command runs from the connected account ===')
   const cmds = [
@@ -181,7 +252,7 @@ async function main () {
   console.log('\n=== 5. Registration gate: unregistered player is told to !arise ===')
   const stranger = '2348099999999'
   sock.sent.length = 0
-  await deliver(msg(stranger, '!profile', { fromMe: true }))
+  await deliver(msg(stranger, '!profile', { fromMe: false }))
   ok('unregistered player gets the arise prompt', /arise/i.test(lastText(sock)), lastText(sock).slice(0, 60))
 
   console.log('\n=== 6. Legacy commands are dead ===')
@@ -243,7 +314,7 @@ async function main () {
   console.log('\n=== 10. Group registration gate ===')
   await store.unregisterGroup(GROUP)
   sock.sent.length = 0
-  await deliver(msg(PLAYER, '!profile', { fromMe: true }))
+  await deliver(msg(PLAYER, '!profile', { fromMe: false }))
   /*
    * CHANGED CONTRACT: an unregistered group used to be completely silent,
    * which made a working bot look dead. It now answers a COMMAND with one
@@ -256,7 +327,7 @@ async function main () {
   ok('AXYON can register the group', /REGISTERED/i.test(lastText(sock)), lastText(sock).slice(0, 60))
   ok('group row exists', !!(await store.group(GROUP)))
   sock.sent.length = 0
-  await deliver(msg(PLAYER, '!profile', { fromMe: true }))
+  await deliver(msg(PLAYER, '!profile', { fromMe: false }))
   ok('registered group now responds', sock.sent.length > 0)
 
   console.log('\n=== 11. Prefix change takes effect ===')
@@ -285,9 +356,9 @@ async function main () {
   ok('duel row is pending', !!pending)
   if (pending) {
     /* The accepter needs to be in duels mode too — the gate is per player. */
-    await deliver(msg(PLAYER, '!mode duels', { fromMe: true }))
+    await deliver(msg(PLAYER, '!mode duels', { fromMe: false }))
     sock.sent.length = 0
-    await deliver(msg(PLAYER, `!duel accept ${pending.id}`, { fromMe: true }))
+    await deliver(msg(PLAYER, `!duel accept ${pending.id}`, { fromMe: false }))
     ok('duel accepted', /DUEL BEGINS/i.test(lastText(sock)), lastText(sock).slice(0, 60))
     const promoted = sock.sent.find(x => x.content?.participantsUpdate)
     ok('temporary admin promotion was actually called', !!promoted,
@@ -429,7 +500,7 @@ async function main () {
     ['number-remove', { userId: '2348033333333' }, 'number removed'],
     ['role-add', { userId: '2348044444444', role: 'rhm' }, 'role added'],
     ['role-remove', { userId: '2348044444444' }, 'role removed'],
-    ['settings', { prefix: '!', xpDailyLimit: 5000, zenDailyLimit: 5000, partyMax: 5, partyMin: 2, selfHealPerCombat: 5, classMovesPerDay: 3, cardAbilitiesPerDay: 3, groupRegistrationRequired: true, duelAutoPromote: true }, 'settings saved']
+    ['settings', { prefix: '!', zenDailyLimit: 5000, partyMax: 5, partyMin: 2, selfHealPerCombat: 5, classMovesPerDay: 3, cardAbilitiesPerDay: 3, groupRegistrationRequired: true, duelAutoPromote: true }, 'settings saved']
   ]
   for (const [action, payload, label] of actions) {
     const r = await call('/dashboard/api/admin/action', {
