@@ -33,22 +33,29 @@ test('MP Refiller costs 500 Zen and restores 50 MP up to the tank maximum', () =
   assert.match(capped.note, /already full/i)
 })
 
-test('Soul Drain requires and consumes 50 MP while preserving lifesteal', () => {
+test('Soul Drain MP requirement is reduced by 25% and preserves lifesteal', () => {
   const drain = items.get('ability_drain')
-  const battle = { enemyHp: 100, playerHp: 50, mp: 50, guard: 0, enemy: { hp: 100, atk: 1, def: 0 } }
-  const used = items.apply(drain, battle, { hp: 50, maxHp: 100, mp: 50, maxMp: 100, vit: 5 })
+  const battle = { enemyHp: 100, playerHp: 50, mp: 38, guard: 0, enemy: { hp: 100, atk: 1, def: 0 } }
+  const used = items.apply(drain, battle, { hp: 50, maxHp: 100, mp: 38, maxMp: 100, vit: 5 })
   assert.equal(used.ok, true)
   assert.equal(used.battle.enemyHp, 60)
   assert.equal(used.battle.playerHp, 90)
   assert.equal(used.battle.mp, 0)
-  const denied = items.apply(drain, { ...battle, mp: 49 }, { hp: 50, maxHp: 100, mp: 49, maxMp: 100 })
+  const denied = items.apply(drain, { ...battle, mp: 37 }, { hp: 50, maxHp: 100, mp: 37, maxMp: 100 })
   assert.equal(denied.ok, false)
 })
 
 test('power combos consume MP as well as their configured Energy cost', () => {
   const fusion = combos.get('soul_drain_heavy')
   const ability = items.get(fusion.abilityKey)
-  assert.equal(ability.mpCost, 50)
-  assert.equal(Math.ceil(ability.mpCost * fusion.powerMultiplier), 50)
+  assert.equal(ability.mpCost, 38)
+  assert.equal(Math.ceil(ability.mpCost * fusion.powerMultiplier), 38)
   assert.ok(fusion.energyCost > 0)
+})
+
+
+test('all permanent ability MP costs are reduced by 25% with whole-MP rounding', () => {
+  assert.equal(items.get('ability_slash').mpCost, Math.ceil(35 * 0.75))
+  assert.equal(items.get('ability_drain').mpCost, Math.ceil(50 * 0.75))
+  assert.equal(items.get('ability_bulwark').mpCost, Math.ceil(40 * 0.75))
 })

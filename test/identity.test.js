@@ -114,3 +114,18 @@ test('owner target resolution maps a reply to a LID message', async () => {
   const { resolveTargetUserId } = require('../src/identity')
   assert.equal(await resolveTargetUserId(sock, content), '2348012345678')
 })
+
+
+test('target resolution returns phone and legacy LID candidates for older player records', async () => {
+  const { resolveTargetUserCandidates } = require('../src/identity')
+  const content = { extendedTextMessage: { contextInfo: { mentionedJid: ['123456789012345@lid'] } } }
+  const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '2348012345678@s.whatsapp.net' } } }
+  assert.deepEqual(await resolveTargetUserCandidates(sock, content), ['2348012345678', '123456789012345'])
+})
+
+test('message identity candidates retain the raw LID and prefer its mapped phone number', async () => {
+  const { messageUserIdCandidates } = require('../src/identity')
+  const message = { key: { remoteJid: 'group@g.us', participant: '123456789012345@lid' } }
+  const sock = { signalRepository: { lidMapping: { getPNForLID: async () => '2348012345678@s.whatsapp.net' } } }
+  assert.deepEqual(await messageUserIdCandidates(sock, message), ['2348012345678', '123456789012345'])
+})

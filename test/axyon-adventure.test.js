@@ -6,7 +6,7 @@ const adventure = require('../src/axyon-adventure')
 test('adventure directory exposes the five requested modes and participant caps', () => {
   assert.deepEqual(Object.keys(adventure.MODES), ['solo', 'multiplayer', 'guild', 'duel', 'abyss'])
   assert.equal(adventure.MODES.solo.maxPlayers, 1)
-  assert.equal(adventure.MODES.multiplayer.maxPlayers, 3)
+  assert.equal(adventure.MODES.multiplayer.maxPlayers, 5)
   assert.equal(adventure.MODES.guild.maxPlayers, 5)
   assert.equal(adventure.MODES.duel.maxPlayers, 2)
   assert.equal(adventure.MODES.abyss.maxPlayers, 5)

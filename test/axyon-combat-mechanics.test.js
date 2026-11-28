@@ -88,3 +88,25 @@ test('fatigue never reduces an action below half of its fatigue-free damage', ()
   assert.ok(reduced >= raw * 0.5)
   assert.ok(reduced <= raw)
 })
+
+
+test('enemy attack stats stored as strings do not concatenate into triple-digit damage', () => {
+  const rpg = require('../src/axyon-rpg')
+  const originalRandom = Math.random
+  Math.random = () => 0.999999
+  try {
+    const hit = rpg.enemyHit({ atk: '38' }, { def: 0, sta: 5, fatigue: 0 })
+    assert.equal(hit, 43)
+  } finally { Math.random = originalRandom }
+})
+
+test('NPC signature damage remains capped when the player class-move ceiling is raised', () => {
+  const classes = require('../src/axyon-classes')
+  const npc = require('../src/axyon-npc')
+  const previous = classes.setBalance({ ultimateTarget: 200 })
+  try {
+    const result = npc.npcMoveDamage({ mastery: 1000000, gradeBonus: 50, signatureMove: { damage: 250, ultimate: true } })
+    assert.ok(result.final <= npc.NPC_SIGNATURE_DAMAGE_CAP)
+    assert.equal(result.final, 30)
+  } finally { classes.setBalance(previous) }
+})
