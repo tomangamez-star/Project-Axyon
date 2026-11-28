@@ -33,6 +33,10 @@
 
 const classes = require('./axyon-classes')
 
+// NPC burst attacks keep the documented combat ceiling even when AXYON
+// raises the configurable class-move ceiling for player abilities.
+const NPC_SIGNATURE_DAMAGE_CAP = 30
+
 /* The rank ladder, matching the store's RANKS. */
 const NPC_RANKS = ['E', 'D', 'C', 'B', 'A', 'S', 'SS', 'SSS', 'Monarch']
 
@@ -162,11 +166,13 @@ function buildNpc (row) {
 function npcMoveDamage (npc, move = null) {
   const mv = move || npc?.signatureMove
   if (!mv) return { damaging: false, final: 0 }
-  return classes.classDamage({
+  const result = classes.classDamage({
     move: mv,
     mastery: Number(npc?.mastery) || 0,
     gradeBonus: Number(npc?.gradeBonus) || 0
   })
+  if (!result.damaging) return result
+  return { ...result, final: Math.min(NPC_SIGNATURE_DAMAGE_CAP, Number(result.final) || 0), capped: result.capped || Number(result.final) > NPC_SIGNATURE_DAMAGE_CAP }
 }
 
 /**
@@ -197,5 +203,6 @@ module.exports = {
   buildNpc,
   npcMoveDamage,
   npcBasicDamage,
+  NPC_SIGNATURE_DAMAGE_CAP,
   npcLine
 }

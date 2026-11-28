@@ -68,6 +68,39 @@ async function resolveMessageUserId (sock, message = {}) {
   return numberFromJid(jids[0])
 }
 
+
+/** Return every usable player key carried by a message, preferring phone IDs.
+ * Keeping the raw LID as a fallback lets the store attach older LID-keyed
+ * profiles to the phone key once WhatsApp exposes the mapping. */
+async function messageUserIdCandidates (sock, message = {}) {
+  const key = message.key || {}
+  const raw = key.fromMe
+    ? [sock?.user?.id, sock?.user?.jid, sock?.user?.lid].filter(Boolean)
+    : jidsFromKey(key).filter(jid => !String(jid).endsWith('@g.us'))
+  const phoneIds = []
+  const fallbackIds = []
+  const mapping = sock?.signalRepository?.lidMapping
+  for (const value of raw) {
+    const jid = String(value).split(':')[0]
+    if (isPhoneJid(jid)) {
+      phoneIds.push(numberFromJid(jid))
+      continue
+    }
+    if (isLidJid(jid)) {
+      fallbackIds.push(numberFromJid(jid))
+      if (mapping?.getPNForLID) {
+        try {
+          const pn = await mapping.getPNForLID(jid)
+          if (pn) phoneIds.push(numberFromJid(pn))
+        } catch { /* keep the raw LID for legacy player lookup */ }
+      }
+      continue
+    }
+    if (jid && !jid.endsWith('@broadcast')) fallbackIds.push(numberFromJid(jid))
+  }
+  return [...new Set([...phoneIds, ...fallbackIds].filter(Boolean))]
+}
+
 /** Synchronous best-effort id, used where no socket is available. */
 function canonicalUserId (key = {}) {
   const candidates = [key.participantAlt, key.remoteJidAlt, key.participant, key.remoteJid].filter(Boolean)
@@ -143,31 +176,49 @@ function commandParts (content = {}, prefix = '!') {
 }
 
 
-/** Resolve the mentioned or replied-to player to AXYON's canonical phone key. */
-async function resolveTargetUserId (sock, content = {}) {
+/** Resolve every plausible ID for a mentioned or quoted player. */
+async function resolveTargetUserCandidates (sock, content = {}) {
   const ci = content?.extendedTextMessage?.contextInfo ||
     content?.imageMessage?.contextInfo ||
     content?.videoMessage?.contextInfo ||
     content?.documentMessage?.contextInfo || {}
-  const raw = (ci.mentionedJid || [])[0] || ci.participantAlt || ci.participant
-  if (!raw) return null
-  const jid = String(raw).split(':')[0]
-  if (/@s\.whatsapp\.net$/i.test(jid)) return numberFromJid(jid)
-  if (/@(?:hosted\.)?lid$/i.test(jid)) {
-    const mapping = sock?.signalRepository?.lidMapping
-    if (mapping?.getPNForLID) {
-      try {
-        const pn = await mapping.getPNForLID(jid)
-        if (pn) return numberFromJid(pn)
-      } catch {}
+  const rawValues = [
+    ...(Array.isArray(ci.mentionedJid) ? ci.mentionedJid : []),
+    ci.participantAlt,
+    ci.participant
+  ].filter(Boolean)
+  const phoneIds = []
+  const fallbackIds = []
+  const mapping = sock?.signalRepository?.lidMapping
+  for (const value of rawValues) {
+    const jid = String(value).split(':')[0]
+    if (isPhoneJid(jid)) {
+      phoneIds.push(numberFromJid(jid))
+      continue
     }
-    return null
+    if (isLidJid(jid)) {
+      fallbackIds.push(numberFromJid(jid))
+      if (mapping?.getPNForLID) {
+        try {
+          const pn = await mapping.getPNForLID(jid)
+          if (pn) phoneIds.push(numberFromJid(pn))
+        } catch { /* retain the LID candidate for legacy profiles */ }
+      }
+      continue
+    }
+    fallbackIds.push(numberFromJid(jid))
   }
-  return numberFromJid(jid)
+  return [...new Set([...phoneIds, ...fallbackIds].filter(Boolean))]
+}
+
+/** Resolve the mentioned or replied-to player to AXYON's phone-key preference. */
+async function resolveTargetUserId (sock, content = {}) {
+  return (await resolveTargetUserCandidates(sock, content))[0] || null
 }
 
 module.exports = {
   resolveMessageUserId,
+  messageUserIdCandidates,
   jidsFromKey,
   numberFromJid,
   isPhoneJid,
@@ -178,6 +229,7 @@ module.exports = {
   mentionedId,
   resolveMentionedId,
   resolveTargetUserId,
+  resolveTargetUserCandidates,
   visibleText,
   commandParts
 }

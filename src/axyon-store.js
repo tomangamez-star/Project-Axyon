@@ -82,7 +82,17 @@ const ORIGINAL_FLOORS = [
   { key: 'floor_7', name: 'Cathedral of Echoes', ordinal: 7, boss: false, hp: 740, atk: 43, def: 22, xp: 650, zen: 1150 },
   { key: 'floor_8', name: 'The Nameless Citadel', ordinal: 8, boss: false, hp: 920, atk: 51, def: 26, xp: 800, zen: 1450 },
   { key: 'floor_9', name: 'Throne of the Hollow King', ordinal: 9, boss: false, hp: 1160, atk: 60, def: 31, xp: 1000, zen: 1800 },
-  { key: 'floor_10', name: 'The Gate Sovereign', ordinal: 10, boss: true, hp: 1500, atk: 72, def: 38, xp: 1350, zen: 2500 }
+  { key: 'floor_10', name: 'The Gate Sovereign', ordinal: 10, boss: true, hp: 1500, atk: 72, def: 38, xp: 1350, zen: 2500 },
+  { key: 'floor_11', name: 'The Emberglass Foundry', ordinal: 11, boss: false, hp: 1800, atk: 78, def: 42, xp: 1500, zen: 2800 },
+  { key: 'floor_12', name: 'The Veilwater Trench', ordinal: 12, boss: false, hp: 2150, atk: 82, def: 45, xp: 1650, zen: 3100 },
+  { key: 'floor_13', name: 'The Ossuary of Names', ordinal: 13, boss: false, hp: 2500, atk: 87, def: 48, xp: 1800, zen: 3450 },
+  { key: 'floor_14', name: 'The Stormbound Spire', ordinal: 14, boss: false, hp: 2900, atk: 92, def: 52, xp: 2000, zen: 3800 },
+  { key: 'floor_15', name: 'The Queen of Ashen Mirrors', ordinal: 15, boss: true, hp: 3400, atk: 98, def: 56, xp: 2400, zen: 4600 },
+  { key: 'floor_16', name: 'The Hollow Meridian', ordinal: 16, boss: false, hp: 3900, atk: 104, def: 60, xp: 2750, zen: 5200 },
+  { key: 'floor_17', name: 'The Astral Reliquary', ordinal: 17, boss: false, hp: 4500, atk: 110, def: 64, xp: 3100, zen: 5900 },
+  { key: 'floor_18', name: 'The Shattered Crown', ordinal: 18, boss: false, hp: 5200, atk: 116, def: 68, xp: 3500, zen: 6700 },
+  { key: 'floor_19', name: 'The Last Eclipse', ordinal: 19, boss: false, hp: 6000, atk: 122, def: 72, xp: 3900, zen: 7600 },
+  { key: 'floor_20', name: 'Sovereign of the Deep Gate', ordinal: 20, boss: true, hp: 7200, atk: 128, def: 78, xp: 4800, zen: 9500 }
 ]
 
 let ready = false
@@ -168,6 +178,13 @@ async function ensureSchema () {
       active_battle JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    CREATE TABLE IF NOT EXISTS axyon_player_identity_aliases(
+      alias_id TEXT PRIMARY KEY,
+      player_user_id TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS axyon_player_identity_aliases_player ON axyon_player_identity_aliases(player_user_id);
+
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS battles_since_rest INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS training_xp_today INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS training_uses_today INT NOT NULL DEFAULT 0;
@@ -813,8 +830,68 @@ function norm (r) {
   }
 }
 
+async function resolvePlayerStorageId (userId) {
+  const id = String(userId || '')
+  if (!id) return null
+  const exact = (await db().query('SELECT user_id FROM axyon_players WHERE user_id=$1', [id])).rows[0]
+  if (exact) return exact.user_id
+  const alias = (await db().query(
+    `SELECT a.player_user_id FROM axyon_player_identity_aliases a
+       JOIN axyon_players p ON p.user_id=a.player_user_id
+      WHERE a.alias_id=$1`, [id]
+  )).rows[0]
+  return alias?.player_user_id || null
+}
+
+/**
+ * Link WhatsApp phone/LID variants to the same existing player row. This is
+ * intentionally conservative: an alias that already has its own player row
+ * or an existing mapping is never reassigned to somebody else.
+ */
+async function linkPlayerAliases (candidateIds = [], preferredId = null) {
+  await ensureSchema()
+  const ids = [...new Set((candidateIds || []).map(x => String(x || '')).filter(Boolean))]
+  if (preferredId && !ids.includes(String(preferredId))) ids.unshift(String(preferredId))
+  if (!ids.length) return null
+
+  const exact = (await db().query(
+    `SELECT user_id FROM axyon_players
+      WHERE user_id=ANY($1::text[])
+      ORDER BY array_position($1::text[], user_id)
+      LIMIT 1`, [ids]
+  )).rows[0]
+  let playerId = exact?.user_id || null
+  if (!playerId) {
+    const mapped = (await db().query(
+      `SELECT a.player_user_id FROM axyon_player_identity_aliases a
+         JOIN axyon_players p ON p.user_id=a.player_user_id
+        WHERE a.alias_id=ANY($1::text[])
+        ORDER BY array_position($1::text[], a.alias_id)
+        LIMIT 1`, [ids]
+    )).rows[0]
+    playerId = mapped?.player_user_id || null
+  }
+  playerId ||= String(preferredId || ids[0])
+
+  for (const aliasId of ids) {
+    if (aliasId === playerId) continue
+    await db().query(
+      `INSERT INTO axyon_player_identity_aliases(alias_id,player_user_id)
+       SELECT $1,$2
+        WHERE NOT EXISTS (SELECT 1 FROM axyon_players WHERE user_id=$1)
+       ON CONFLICT(alias_id) DO NOTHING`, [aliasId, playerId]
+    )
+  }
+  return playerId
+}
+
 async function arise (userId, name = '') {
   await ensureSchema()
+  const storedId = await resolvePlayerStorageId(userId)
+  if (storedId) {
+    const existing = await db().query('SELECT * FROM axyon_players WHERE user_id=$1', [storedId])
+    if (existing.rows[0]) return { player: norm(existing.rows[0]), created: false }
+  }
   /*
    * Registration must be create-only. A returning hunter may run !arise again,
    * but that must never perform an UPDATE against their saved character.
@@ -847,7 +924,9 @@ async function arise (userId, name = '') {
 
 async function player (userId) {
   await ensureSchema()
-  const levelRow = (await db().query('SELECT level FROM axyon_players WHERE user_id=$1', [String(userId)])).rows[0]
+  const storedId = await resolvePlayerStorageId(userId)
+  if (!storedId) return null
+  const levelRow = (await db().query('SELECT level FROM axyon_players WHERE user_id=$1', [storedId])).rows[0]
   if (levelRow) {
     const capacity = mpCapacityForLevel(levelRow.level)
     const maxHp = maxHpForLevel(levelRow.level)
@@ -856,7 +935,7 @@ async function player (userId) {
          mp=CASE WHEN max_mp=0 AND $2>0 THEN $2 WHEN $2=0 THEN 0 ELSE LEAST(mp,$2) END,
          max_hp=$3,hp=LEAST(hp,$3)
        WHERE user_id=$1 AND (max_mp<>$2 OR max_hp<>$3 OR hp>$3)`,
-      [String(userId), capacity, maxHp]
+      [storedId, capacity, maxHp]
     )
   }
   const cooled = await db().query(
@@ -867,10 +946,10 @@ async function player (userId) {
        AND p.active_battle IS NULL
        AND NOT EXISTS (SELECT 1 FROM axyon_duels d WHERE d.status='active' AND (d.challenger=p.user_id OR d.opponent=p.user_id))
        AND p.fatigue_updated_at <= NOW()-INTERVAL '15 minutes'
-     RETURNING p.*`, [String(userId)]
+     RETURNING p.*`, [storedId]
   )
   if (cooled.rowCount) return norm(cooled.rows[0])
-  return norm((await db().query('SELECT * FROM axyon_players WHERE user_id=$1', [userId])).rows[0])
+  return norm((await db().query('SELECT * FROM axyon_players WHERE user_id=$1', [storedId])).rows[0])
 }
 
 
@@ -1867,12 +1946,18 @@ async function updateParty (id, members, status, invited = null, ready = null, s
 
 async function partyForUser (groupJid, userId) {
   await ensureSchema()
+  const requestedId = String(userId)
+  const storedId = await resolvePlayerStorageId(requestedId)
+  const aliases = storedId
+    ? (await db().query('SELECT alias_id FROM axyon_player_identity_aliases WHERE player_user_id=$1', [storedId])).rows.map(row => row.alias_id)
+    : []
+  const candidates = [...new Set([requestedId, storedId, ...aliases].filter(Boolean).map(String))]
   return (await db().query(
     `SELECT * FROM axyon_parties
        WHERE group_jid=$1 AND status IN ('open','started','battling')
-         AND members @> $2::jsonb
+         AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(members) member_id WHERE member_id=ANY($2::text[]))
        ORDER BY id DESC LIMIT 1`,
-    [String(groupJid), JSON.stringify([String(userId)])]
+    [String(groupJid), candidates]
   )).rows[0] || null
 }
 
@@ -2687,6 +2772,8 @@ module.exports = {
   norm,
   arise,
   player,
+  linkPlayerAliases,
+  resolvePlayerStorageId,
   savePlayer,
   rollDay,
   resetPlayer,

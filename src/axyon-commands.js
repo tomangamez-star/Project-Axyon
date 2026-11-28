@@ -27,7 +27,7 @@ const combos = require('./axyon-combos')
 /** Thousands separators, matching the formatter the RPG cards use. */
 const fmt = (n) => Number(n || 0).toLocaleString('en-US')
 const { norm, isOwner } = require('./access')
-const { displayName, mentionedId, resolveMentionedId, resolveMessageUserId, resolveTargetUserId } = require('./identity')
+const { displayName, mentionedId, resolveMentionedId, resolveMessageUserId, messageUserIdCandidates, resolveTargetUserId, resolveTargetUserCandidates } = require('./identity')
 
 const WATERMARK = '\u232c AXYN CORE'
 
@@ -62,6 +62,11 @@ function parseNum (v) {
 function createCommands ({ axyon, economy, logger, ai }) {
   const cmd = axyon.cmd
   const W = WATERMARK
+
+  async function safeLinkPlayerAliases (ids, preferredId) {
+    if (typeof store.linkPlayerAliases !== 'function') return preferredId || ids?.[0] || null
+    try { return await store.linkPlayerAliases(ids, preferredId) } catch { return preferredId || ids?.[0] || null }
+  }
 
   /* How many stories each player has read, so `!story` walks the anthology
    * instead of repeating. In memory on purpose: it is a reading position. */
@@ -216,10 +221,18 @@ Reason: ${lock.reason}` : ''}`)
 
   async function ownerTargetCommand (sock, message, ctx, args, content, action) {
     if (!ctx.auth.owner) return axyon.send(sock, ctx.jid, message, '🛡️ *OWNER ONLY*\n\nOnly the AXYON owner can use progression controls.')
-    const target = await resolveAdminTarget(sock, content)
-    if (!target) return axyon.send(sock, ctx.jid, message, `Reply to a player's message or mention them.\nExample: *${ctx.prefix}${action} @player 500*`)
-    const player = await store.player(target)
+    const targetCandidates = await resolveTargetUserCandidates(sock, content)
+    if (!targetCandidates.length) return axyon.send(sock, ctx.jid, message, `Reply to a player's message or mention them.\nExample: *${ctx.prefix}${action} @player 500*`)
+    const linkedTarget = await safeLinkPlayerAliases(targetCandidates, targetCandidates[0])
+    let player = linkedTarget ? await store.player(linkedTarget) : null
+    if (!player) {
+      for (const candidate of targetCandidates) {
+        player = await store.player(candidate)
+        if (player) break
+      }
+    }
     if (!player) return axyon.send(sock, ctx.jid, message, 'That player has not registered with AXYON.')
+    const target = String(player.userId)
     const values = (args || []).filter(value => !String(value).startsWith('@'))
     const rawValue = values[0]
     const amount = parseNum(rawValue)
@@ -617,7 +630,7 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
       return axyon.send(s, ctx.jid, m, `🟡 Your party is still assembling. Members must use *${ctx.prefix}party ready*, then the leader uses *${ctx.prefix}party start* before shared floors can begin.`)
     }
     if (party?.status === 'started' && (party.members || []).length >= 2) {
-      if (String(party.leader) !== String(ctx.userId)) {
+      if (![String(ctx.userId), ...(ctx.userAliases || []).map(String)].includes(String(party.leader))) {
         return axyon.send(s, ctx.jid, m, `👑 The Party Leader starts shared floors. Ask *${(await store.player(party.leader))?.name || party.leader}* to use *${ctx.prefix}floor <number>*. Everyone in the party will participate.`)
       }
       const ordinal = parseNum(args[0]) ?? Math.max(1, Number((await store.floorStory(ctx.userId)).chapter) || 1)
@@ -722,64 +735,92 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
 
   /* ----------------------------------------------------------------- party */
 
-  cmd('party', 'dungeon', '{p}party <create|invite|join|decline|members|leader|status|ready|start|leave|kick|disband|save|logout|resume|view>', 'Organise an existing party or launch a three-player Multiplayer Expedition.', async (s, m, ctx, args, content) => {
+  cmd('party', 'dungeon', '{p}party <create [open]|invite|join|privacy|open|invite-only|decline|members|leader|status|ready|start|leave|kick|disband|save|logout|resume|view>', 'Organise an open or invite-only Multiplayer Expedition.', async (s, m, ctx, args, content) => {
     const sub = String(args[0] || 'view').toLowerCase()
     const settings = ctx.settings
+    const partyCapacity = Math.max(2, Math.min(20, Math.floor(Number(settings.partyMax) || 5)))
     const open = await store.openParty(ctx.jid)
-    const isLeader = party => party && String(party.leader) === String(ctx.userId)
+    const identityIds = new Set([String(ctx.userId), ...(ctx.userAliases || []).map(String)])
+    const samePlayer = id => identityIds.has(String(id))
+    const isLeader = party => party && samePlayer(party.leader)
+    const partyPrivacy = party => String(party?.state?.privacy || ((party?.invited || []).length ? 'invite-only' : 'open'))
     if (sub === 'login') return invokeLocal('login', s, m, ctx, ['multiplayer', String(args[1] || '')], {})
     const namesFor = async ids => Promise.all((ids || []).map(async id => {
       const p = await store.player(id)
-      return `• *${p?.name || id}*${String(id) === String(ctx.userId) ? ' (you)' : ''}${String(id) === String(open?.leader) ? ' 👑' : ''}`
+      return `• *${p?.name || id}*${samePlayer(id) ? ' (you)' : ''}${open && (String(id) === String(open.leader) || samePlayer(open.leader) && samePlayer(id)) ? ' 👑' : ''}`
     }))
 
     if (sub === 'create') {
       const p = await store.player(ctx.userId)
       if (!p) return axyon.send(s, ctx.jid, m, `🌀 Use *${ctx.prefix}arise* first.`)
+      const requestedPrivacy = String(args[1] || 'invite-only').toLowerCase()
+      if (!['open', 'invite-only'].includes(requestedPrivacy)) return axyon.send(s, ctx.jid, m, `Choose *open* or *invite-only*: *${ctx.prefix}party create open*`)
       const party = await store.createParty(ctx.jid, ctx.userId, [ctx.userId])
-      await store.updateParty(party.id, [ctx.userId], 'open', [], [ctx.userId], { expedition: true })
-      await store.log(ctx.userId, 'party_create', String(party.id))
-      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *EXPEDITION PARTY FORMED*', '', `Leader: *${p.name || ctx.userId}*`, 'Members: *1/3*', 'Status: *Recruiting*', '', `Invite: *${ctx.prefix}party invite @player*`, `Ready: *${ctx.prefix}party ready*`, `Launch: *${ctx.prefix}party start*`].join('\n'))
+      await store.updateParty(party.id, [ctx.userId], 'open', [], [ctx.userId], { expedition: true, privacy: requestedPrivacy })
+      await store.log(ctx.userId, 'party_create', String(party.id), { privacy: requestedPrivacy, capacity: partyCapacity })
+      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *EXPEDITION PARTY FORMED*', '', `Leader: *${p.name || ctx.userId}*`, `Members: *1/${partyCapacity}*`, `Access: *${requestedPrivacy === 'open' ? 'OPEN' : 'INVITE-ONLY'}*`, 'Status: *Recruiting*', '', `Invite: *${ctx.prefix}party invite @player*`, `Access: *${ctx.prefix}party privacy open|invite-only*`, `Ready: *${ctx.prefix}party ready*`, `Launch: *${ctx.prefix}party start*`].join('\n'))
     }
 
     if (sub === 'invite' || sub === 'add') {
       if (!open) return axyon.send(s, ctx.jid, m, `No open party. Use *${ctx.prefix}party create* first.`)
       if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can invite players.')
-      const target = mentionedId(content)
-      if (!target || target === ctx.userId) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party invite @player*`)
-      if ((open.members || []).includes(target)) return axyon.send(s, ctx.jid, m, 'That player is already in the party.')
-      if ((open.members || []).length + (open.invited || []).length >= 3) return axyon.send(s, ctx.jid, m, 'This expedition supports a maximum of three participants, including pending invitations.')
-      if (!(await store.player(target))) return axyon.send(s, ctx.jid, m, 'That player must use !arise before joining an expedition.')
-      const invited = [...new Set([...(open.invited || []), target])]
+      const targetCandidates = await resolveTargetUserCandidates(s, content)
+      if (!targetCandidates.length) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party invite @player*`)
+      const linkedTarget = await safeLinkPlayerAliases(targetCandidates, targetCandidates[0])
+      let targetPlayer = linkedTarget ? await store.player(linkedTarget) : null
+      if (!targetPlayer) {
+        for (const candidate of targetCandidates) {
+          targetPlayer = await store.player(candidate)
+          if (targetPlayer) break
+        }
+      }
+      if (!targetPlayer) return axyon.send(s, ctx.jid, m, 'That player must use !arise before joining an expedition.')
+      const target = String(targetPlayer.userId)
+      if (samePlayer(target)) return axyon.send(s, ctx.jid, m, 'You are already the leader of this party.')
+      if ((open.members || []).map(String).includes(target)) return axyon.send(s, ctx.jid, m, 'That player is already in the party.')
+      const privacy = partyPrivacy(open)
+      const pending = privacy === 'invite-only' ? (open.invited || []).length : 0
+      if ((open.members || []).length + pending >= partyCapacity) return axyon.send(s, ctx.jid, m, `This expedition is full (maximum *${partyCapacity}* participants).`)
+      if (privacy === 'open') return axyon.send(s, ctx.jid, m, `This party is already open. @${target} can join directly with *${ctx.prefix}party join*.`)
+      const invited = [...new Set([...(open.invited || []).map(String), target])]
       await store.updateParty(open.id, open.members || [], null, invited)
-      return axyon.send(s, ctx.jid, m, `📨 Invitation added for @${target.split('@')[0]}. They can join with *${ctx.prefix}party join*.`)
+      return axyon.send(s, ctx.jid, m, `📨 Invitation added for @${target}. They can join with *${ctx.prefix}party join*.`)
+    }
+
+    if (['privacy', 'open', 'invite-only'].includes(sub)) {
+      if (!open) return axyon.send(s, ctx.jid, m, `No open party. Use *${ctx.prefix}party create [open]* first.`)
+      if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can change party access.')
+      const privacy = sub === 'privacy' ? String(args[1] || '').toLowerCase() : sub
+      if (!['open', 'invite-only'].includes(privacy)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party privacy open|invite-only*`)
+      const state = { ...(open.state || {}), expedition: true, privacy }
+      const invited = privacy === 'open' ? [] : (open.invited || [])
+      await store.updateParty(open.id, open.members || [], null, invited, open.ready || [], state)
+      await store.log(ctx.userId, 'party_privacy', String(open.id), { privacy })
+      return axyon.send(s, ctx.jid, m, `✅ Party access is now *${privacy.toUpperCase()}*. ${privacy === 'open' ? `Anyone registered can join with *${ctx.prefix}party join*.` : 'Only players on the invitation list can join.'}`)
     }
 
     if (sub === 'decline') {
-      if (!open || !(open.invited || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'You do not have a pending party invitation here.')
-      const invited = open.invited.filter(id => id !== ctx.userId)
+      if (!open || !(open.invited || []).some(samePlayer)) return axyon.send(s, ctx.jid, m, 'You do not have a pending party invitation here.')
+      const invited = open.invited.filter(id => !samePlayer(id))
       await store.updateParty(open.id, open.members || [], null, invited)
       return axyon.send(s, ctx.jid, m, 'Party invitation declined.')
     }
 
     if (sub === 'join') {
       if (!open) return axyon.send(s, ctx.jid, m, `🔥 No open party here. Start one with *${ctx.prefix}party create*.`)
-      if ((open.members || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'You are already in this party.')
-      const invited = Array.isArray(open.invited) ? open.invited : []
-      if (invited.length && !invited.includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'This party is invitation-only. Ask its leader to invite you.')
-      const members = [...new Set([...(open.members || []), ctx.userId])]
-      if (members.length > settings.partyMax) return axyon.send(s, ctx.jid, m, `❌ That party is full (max *${settings.partyMax}*).`)
-      const nextInvited = invited.filter(id => id !== ctx.userId)
-      const ready = (open.ready || []).filter(id => members.includes(id))
-      await store.updateParty(open.id, members, null, nextInvited, ready)
+      if ((open.members || []).some(samePlayer)) return axyon.send(s, ctx.jid, m, 'You are already in this party.')
+      const invited = Array.isArray(open.invited) ? open.invited.map(String) : []
+      const privacy = partyPrivacy(open)
+      if (privacy === 'invite-only' && !invited.some(samePlayer)) return axyon.send(s, ctx.jid, m, 'This party is invitation-only. Ask its leader to invite you.')
       const player = await store.player(ctx.userId)
+      if (!player) return axyon.send(s, ctx.jid, m, `You must use *${ctx.prefix}arise* before joining an expedition.`)
+      const members = [...new Set([...(open.members || []).map(String), String(ctx.userId)])]
+      if (members.length > partyCapacity) return axyon.send(s, ctx.jid, m, `❌ That party is full (max *${partyCapacity}*).`)
+      const nextInvited = invited.filter(id => !samePlayer(id))
+      const ready = (open.ready || []).map(String).filter(id => members.includes(id))
+      await store.updateParty(open.id, members, null, nextInvited, ready)
       await store.log(ctx.userId, 'party_join', String(open.id))
-      return axyon.send(s, ctx.jid, m, `${W}
-
-✅ *JOINED PARTY*
-
-*${player?.name || ctx.userId}* joined.
-Members: *${members.length}/3*`)
+      return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *JOINED PARTY*\n\n*${player.name || ctx.userId}* joined.\nMembers: *${members.length}/${partyCapacity}*`)
     }
 
     if (!open) {
@@ -806,18 +847,19 @@ Members: *${members.length}/3*`)
     if (sub === 'members' || sub === 'view' || sub === 'status' || sub === 'waiting') {
       const lines = await namesFor(open.members)
       const waiting = (open.invited || []).map(id => `◌ @${id.split('@')[0]} — invited`)
-      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *MULTIPLAYER EXPEDITION*', '', ...lines, ...waiting, '', `Ready: *${(open.ready || []).length}/${(open.members || []).length}*`, `Capacity: *${(open.members || []).length}/3*`, `Status: *${open.status}*`, '', `Use *${ctx.prefix}party ready* when prepared.`].join('\n'))
+      return axyon.send(s, ctx.jid, m, [W, '', '⚔️ *MULTIPLAYER EXPEDITION*', '', ...lines, ...waiting, '', `Ready: *${(open.ready || []).length}/${(open.members || []).length}*`, `Capacity: *${(open.members || []).length}/${partyCapacity}*`, `Access: *${partyPrivacy(open).toUpperCase()}*`, `Status: *${open.status}*`, '', `Use *${ctx.prefix}party ready* when prepared.`].join('\n'))
     }
     if (sub === 'ready') {
-      if (!(open.members || []).includes(ctx.userId)) return axyon.send(s, ctx.jid, m, 'Join the party before marking yourself ready.')
-      const ready = [...new Set([...(open.ready || []), ctx.userId])]
+      const memberId = (open.members || []).map(String).find(samePlayer)
+      if (!memberId) return axyon.send(s, ctx.jid, m, 'Join the party before marking yourself ready.')
+      const ready = [...new Set([...(open.ready || []).map(String), memberId])]
       await store.updateParty(open.id, open.members || [], null, open.invited || [], ready)
       return axyon.send(s, ctx.jid, m, `✅ You are ready. *${ready.length}/${(open.members || []).length}* party members ready.`)
     }
     if (sub === 'start') {
       if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can start the expedition.')
       if ((open.members || []).length < 2) return axyon.send(s, ctx.jid, m, 'An expedition needs at least two players.')
-      if ((open.members || []).length > 3) return axyon.send(s, ctx.jid, m, 'Multiplayer Expeditions are limited to three players. Your legacy party remains unchanged.')
+      if ((open.members || []).length > partyCapacity) return axyon.send(s, ctx.jid, m, `This party exceeds the configured capacity of ${partyCapacity}. Increase partyMax before launching it.`)
       const notReady = (open.members || []).filter(id => !(open.ready || []).includes(id))
       if (notReady.length) return axyon.send(s, ctx.jid, m, `Waiting for ${notReady.length} member(s) to use *${ctx.prefix}party ready*.`)
       const existingSession = await activeRoomFor(ctx)
@@ -829,7 +871,7 @@ Members: *${members.length}/3*`)
         if (!(await store.player(id))) return axyon.send(s, ctx.jid, m, `Player ${id} must use *${ctx.prefix}arise* before the expedition starts.`)
         participants.push({ userId: id, role: id === open.leader ? 'leader' : 'member' })
       }
-      const room = await store.createRoom({ name: `MULTIPLAYER EXPEDITION — ${String(Date.now()).slice(-4)}`, groupJid: ctx.jid, ownerId: open.leader, modeId: 'dungeon', participation: 'multiplayer', privacy: 'public', capacity: 3, entryRequirements: { adventureMode: 'multiplayer', partyId: Number(open.id) } })
+      const room = await store.createRoom({ name: `MULTIPLAYER EXPEDITION — ${String(Date.now()).slice(-4)}`, groupJid: ctx.jid, ownerId: open.leader, modeId: 'dungeon', participation: 'multiplayer', privacy: 'public', capacity: partyCapacity, entryRequirements: { adventureMode: 'multiplayer', partyId: Number(open.id) } })
       await store.updateRoom(room.room_key, { participants, status: 'ready' })
       await store.updateParty(open.id, open.members || [], 'started', open.invited || [], open.ready || [], { ...(open.state || {}), roomKey: room.room_key })
       await store.log(ctx.userId, 'party_expedition_start', room.room_key, { partyId: open.id })
@@ -838,17 +880,21 @@ Members: *${members.length}/3*`)
 🟢 *EXPEDITION PARTY READY*
 
 ${room.name}
-Players: *${participants.length}/3*
+Players: *${participants.length}/${partyCapacity}*
 Room: \`${room.room_key}\`
 
 The shared session is open. Use *${ctx.prefix}session* to inspect it.`)
     }
     if (sub === 'kick') {
       if (!isLeader(open)) return axyon.send(s, ctx.jid, m, 'Only the Party Leader can remove a member.')
-      const target = mentionedId(content)
-      if (!target || target === open.leader || !(open.members || []).includes(target)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party kick @member*`)
-      const members = open.members.filter(id => id !== target)
-      const ready = (open.ready || []).filter(id => id !== target)
+      const targetCandidates = await resolveTargetUserCandidates(s, content)
+      const targetPlayerId = targetCandidates.length ? await safeLinkPlayerAliases(targetCandidates, targetCandidates[0]) : null
+      const targetPlayer = targetPlayerId ? await store.player(targetPlayerId) : null
+      const target = targetPlayer?.userId || targetPlayerId
+      const memberId = (open.members || []).map(String).find(id => id === String(target) || targetCandidates.includes(id))
+      if (!memberId || memberId === open.leader || memberId === String(ctx.userId)) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}party kick @member*`)
+      const members = open.members.filter(id => String(id) !== memberId)
+      const ready = (open.ready || []).filter(id => String(id) !== memberId)
       await store.updateParty(open.id, members, null, open.invited || [], ready)
       return axyon.send(s, ctx.jid, m, `Removed @${target.split('@')[0]} from the party.`)
     }
@@ -866,7 +912,7 @@ The shared session is open. Use *${ctx.prefix}session* to inspect it.`)
     if (sub === 'logout') return invokeLocal('logout', s, m, ctx, ['multiplayer'], {})
     if (sub === 'resume' || sub === 'rejoin') return invokeLocal('session', s, m, ctx, ['resume'], {})
     if (sub === 'leave') {
-      const members = (open.members || []).filter(x => x !== ctx.userId)
+      const members = (open.members || []).filter(x => !samePlayer(x))
       if (members.length === (open.members || []).length) return axyon.send(s, ctx.jid, m, 'You are not in this party.')
       const ready = (open.ready || []).filter(id => members.includes(id))
       await store.updateParty(open.id, members, members.length ? null : 'closed', open.invited || [], ready)
@@ -874,7 +920,8 @@ The shared session is open. Use *${ctx.prefix}session* to inspect it.`)
     }
     return axyon.send(s, ctx.jid, m, `⌘ *PARTY COMMANDS*
 
-${ctx.prefix}party create
+${ctx.prefix}party create [open|invite-only]
+${ctx.prefix}party privacy open|invite-only
 ${ctx.prefix}party invite @player
 ${ctx.prefix}party join
 ${ctx.prefix}party members
@@ -2787,7 +2834,8 @@ Start with *${ctx.prefix}guild squad start*.`)
     if (r.battle) {
       /* In a battle the effect lands on the battle state, and the enemy still
        * gets its turn — using an item is an action, not a free move. */
-      const hit = Math.max(1, Math.round(r.battle.enemy.atk + Math.floor(Math.random() * 6) - p.def * 0.3))
+      const enemyAttack = Number(r.battle.enemy?.atk)
+      const hit = Math.max(1, Math.round((Number.isFinite(enemyAttack) && enemyAttack > 0 ? enemyAttack : 5) + Math.floor(Math.random() * 6) - Number(p.def || 0) * 0.3))
       r.battle.playerHp -= hit
       r.battle.turn += 1
       if (r.battle.playerHp <= 0) {
@@ -3592,16 +3640,23 @@ Start with *${ctx.prefix}guild squad start*.`)
     // Resolve LID-only WhatsApp identities to their phone-number player key.
     // canonicalUserId() is synchronous and can return a LID in newer groups,
     // which made an already-registered opponent look unregistered.
-    const userId = await resolveMessageUserId(sock, m)
+    const resolvedUserId = await resolveMessageUserId(sock, m)
+    const userCandidates = await messageUserIdCandidates(sock, m)
+    const userId = store.linkPlayerAliases && userCandidates.length
+      ? (await safeLinkPlayerAliases(userCandidates, resolvedUserId)) || resolvedUserId
+      : resolvedUserId
     const jid = m.key.remoteJid
     const settings = await store.settings()
     let group = null
     if (jid.endsWith('@g.us')) group = await store.group(jid)
-    const auth = await authority(userId)
+    // Authority is always evaluated against WhatsApp's resolved phone ID,
+    // even when an older player row is retained under its original LID key.
+    const auth = await authority(resolvedUserId)
     const prefix = group?.prefix || settings.prefix
 
     const ctx = {
       userId,
+      userAliases: userCandidates,
       jid,
       name: displayName(m),
       settings,

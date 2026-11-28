@@ -103,8 +103,8 @@ const ITEMS = {
     icon: '\ud83d\udde1\ufe0f',
     kind: 'ability',
     price: 1200,
-    desc: 'Permanent. A 60-damage strike; costs 35 MP.',
-    mpCost: 35,
+    desc: 'Permanent. A 60-damage strike; costs 27 MP.',
+    mpCost: 27,
     battleOnly: true,
     effect: { damage: 60 }
   },
@@ -114,8 +114,8 @@ const ITEMS = {
     icon: '\ud83e\ude78',
     kind: 'ability',
     price: 1800,
-    desc: 'Permanent. 40 damage and 40 HP recovery; costs 50 MP.',
-    mpCost: 50,
+    desc: 'Permanent. 40 damage and 40 HP recovery; costs 38 MP.',
+    mpCost: 38,
     battleOnly: true,
     effect: { damage: 40, lifesteal: true }
   },
@@ -125,8 +125,8 @@ const ITEMS = {
     icon: '\ud83d\udee1\ufe0f',
     kind: 'ability',
     price: 1500,
-    desc: 'Permanent. Blocks 70% of the next enemy hit; costs 40 MP.',
-    mpCost: 40,
+    desc: 'Permanent. Blocks 70% of the next enemy hit; costs 30 MP.',
+    mpCost: 30,
     battleOnly: true,
     effect: { guard: 0.7 }
   }

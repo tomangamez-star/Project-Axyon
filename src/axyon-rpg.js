@@ -177,8 +177,13 @@ function playerHit (p, enemy, mult = 1, bonus = 0) {
 function enemyHitDetails (enemy, p, guardRatio = 0) {
   const defencePenalty = combatMechanics.fatiguePenalty(p, p.fatigue) * 0.5
   const effectiveDef = Math.max(0, Number(p.def) * (1 - defencePenalty))
-  const incoming = Math.max(1, Math.round(enemy.atk + rnd(6) - effectiveDef * 0.3))
-  const finalDamage = guardRatio ? Math.max(1, Math.round(incoming * (1 - guardRatio))) : incoming
+  // Database JSON can contain numeric strings. Coerce before addition:
+  // '38' + 5 becomes '385' in JavaScript and was then treated as 385 damage.
+  const attack = Number(enemy?.atk)
+  const baseAttack = Number.isFinite(attack) && attack > 0 ? attack : 5
+  const incoming = Math.max(1, Math.round(baseAttack + rnd(6) - effectiveDef * 0.3))
+  const ratio = Math.max(0, Math.min(0.9, Number(guardRatio) || 0))
+  const finalDamage = ratio ? Math.max(1, Math.round(incoming * (1 - ratio))) : incoming
   return { incoming, finalDamage, blocked: Math.max(0, incoming - finalDamage) }
 }
 

@@ -10,7 +10,7 @@ const { database } = require('./auth-store')
 
 const MODES = Object.freeze({
   solo: { id: 'solo', name: 'Solo Chronicles', maxPlayers: 1 },
-  multiplayer: { id: 'multiplayer', name: 'Multiplayer Expedition', maxPlayers: 3 },
+  multiplayer: { id: 'multiplayer', name: 'Multiplayer Expedition', maxPlayers: 5 },
   guild: { id: 'guild', name: 'Guild Campaign', maxPlayers: 5 },
   duel: { id: 'duel', name: 'Duel Chronicles', maxPlayers: 2 },
   abyss: { id: 'abyss', name: 'Abyssal Frontier', maxPlayers: 5 }

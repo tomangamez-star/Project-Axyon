@@ -203,6 +203,206 @@ const CHAPTERS = [
       { id: 'last_seal', name: 'THE LAST SEAL', npc: 'The First Witness', description: 'Seal the Origin Gate.', objective: 'Choose “Seal the gate” at the Origin Gate.', reward: { xp: 900, zen: 1200 } },
       { id: 'system_answer', name: 'THE SYSTEM’S ANSWER', npc: 'The First Witness', description: 'Force the System to reveal a hidden record.', objective: 'Choose “Question the System” at the Origin Gate.', reward: { xp: 1050, zen: 1000 } }
     ]
+  },
+  {
+    title: 'THE EMBERGLASS FOUNDRY', place: 'Cinderwake Foundry', npc: 'Foreman Kael Voss',
+    intro: [
+      'The passage opens above a foundry suspended over a river of molten glass. Machinery keeps moving although every furnace has been extinguished.',
+      'Foreman Kael Voss points to a cracked control core. Something below the furnace floor is sending commands through the old machines.',
+      'A line of forged guardians turns toward the gate as the foundry wakes.'
+    ],
+    prompt: 'Kael asks you to stabilise the core, trace the signal, or stop the machines before the whole foundry collapses.',
+    choices: [
+      { label: 'Stabilise the control core', result: 'You reset the core and the foundry settles. Kael marks a safe route through the lower works.', flags: ['foundry_core_stable'], quest: 'foundry_anchor', enemy: { atk: -6 } },
+      { label: 'Trace the hidden signal', result: 'The signal leads to an old gate relay bearing the same mark as the Origin Gate.', flags: ['foundry_signal_traced'], quest: 'silent_relay', enemy: { hp: -20 } },
+      { label: 'Free the forged guardians', result: 'You break the command seal. The guardians stop fighting, but the foundry releases its warden.', flags: ['guardians_freed'], quest: 'forged_release', enemy: { hp: 35, atk: 3 } },
+      { label: 'Shut down the furnaces', result: 'The machines fall silent. A sealed lift opens beneath the central furnace.', flags: ['foundry_silenced'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'foundry_anchor', name: 'THE FOUNDRY ANCHOR', npc: 'Kael Voss', description: 'Secure the foundry control core.', objective: 'Choose “Stabilise the control core” at Cinderwake Foundry.', reward: { xp: 1050, zen: 1250 } },
+      { id: 'silent_relay', name: 'THE SILENT RELAY', npc: 'Kael Voss', description: 'Trace the signal beneath the foundry.', objective: 'Choose “Trace the hidden signal” at Cinderwake Foundry.', reward: { xp: 1150, zen: 1200 } },
+      { id: 'forged_release', name: 'THE FORGED RELEASE', npc: 'Kael Voss', description: 'Free the guardians from the command seal.', objective: 'Choose “Free the forged guardians” at Cinderwake Foundry.', reward: { xp: 1200, zen: 1150 } }
+    ]
+  },
+  {
+    title: 'THE VEILWATER TRENCH', place: 'Veilwater Deep', npc: 'Diver Sera Nym',
+    intro: [
+      'A flooded gate opens into a trench where the water hangs in suspended sheets. Lanterns drift through it, each carrying a memory from a missing hunter.',
+      'Diver Sera Nym has found a pressure door but cannot open it while the trench current keeps changing direction.',
+      'A shape moves beneath the glassy surface.'
+    ],
+    prompt: 'Sera needs you to redirect the current, recover the lantern records, or force the pressure door.',
+    choices: [
+      { label: 'Redirect the current', result: 'The water settles into a single stream and the pressure door unlocks.', flags: ['trench_current'], quest: 'safe_depths', enemy: { atk: -7 } },
+      { label: 'Recover the lantern records', result: 'The records reveal a route used by hunters who entered the trench long before the first ten floors were mapped.', flags: ['lantern_records'], quest: 'lost_divers', enemy: { hp: -25 } },
+      { label: 'Force the pressure door', result: 'The door gives way, sending a shock through the trench and waking its guardian.', flags: ['pressure_door_forced'], quest: 'deep_pressure', enemy: { hp: 40, atk: 4 } },
+      { label: 'Follow the shadow below', result: 'You follow the movement to a forgotten airlock. Something has been using it from the other side.', flags: ['trench_shadow'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'safe_depths', name: 'SAFE DEPTHS', npc: 'Sera Nym', description: 'Make a stable route through Veilwater.', objective: 'Choose “Redirect the current” at Veilwater Deep.', reward: { xp: 1250, zen: 1400 } },
+      { id: 'lost_divers', name: 'THE LOST DIVERS', npc: 'Sera Nym', description: 'Recover the old lantern records.', objective: 'Choose “Recover the lantern records” at Veilwater Deep.', reward: { xp: 1300, zen: 1350 } },
+      { id: 'deep_pressure', name: 'DEEP PRESSURE', npc: 'Sera Nym', description: 'Open the pressure door and face what answers.', objective: 'Choose “Force the pressure door” at Veilwater Deep.', reward: { xp: 1400, zen: 1300 } }
+    ]
+  },
+  {
+    title: 'THE OSSUARY OF NAMES', place: 'Pale Reliquary', npc: 'Archivist Neral',
+    intro: [
+      'The trench gives way to a chamber built from pale stone and sealed nameplates. Every wall records a hunter who entered the gate system and never returned.',
+      'Archivist Neral is searching for a name that has been removed from every record, including his own notes.',
+      'The empty nameplate begins to glow.'
+    ],
+    prompt: 'Neral asks you to restore the missing name, examine the sealed shelves, or destroy the plate.',
+    choices: [
+      { label: 'Restore the missing name', result: 'The name returns to the wall. A hidden record identifies the keeper of the reliquary.', flags: ['name_restored'], quest: 'name_returned', enemy: { hp: -25 } },
+      { label: 'Examine the sealed shelves', result: 'You uncover records proving that the reliquary was built to contain a living memory.', flags: ['sealed_shelves'], quest: 'living_record', enemy: {} },
+      { label: 'Destroy the nameplate', result: 'The plate breaks and the room answers with a wave of cold light.', flags: ['plate_destroyed'], quest: 'broken_record', enemy: { hp: 45, atk: 4 } },
+      { label: 'Ask Neral to read it aloud', result: 'Neral speaks the erased name. A distant gate unlocks, then something answers in his voice.', flags: ['name_spoken'], quest: null, enemy: { atk: -5 } }
+    ],
+    quests: [
+      { id: 'name_returned', name: 'A NAME RETURNED', npc: 'Archivist Neral', description: 'Restore the missing name in the reliquary.', objective: 'Choose “Restore the missing name” at Pale Reliquary.', reward: { xp: 1450, zen: 1500 } },
+      { id: 'living_record', name: 'THE LIVING RECORD', npc: 'Archivist Neral', description: 'Discover what the sealed shelves contain.', objective: 'Choose “Examine the sealed shelves” at Pale Reliquary.', reward: { xp: 1500, zen: 1450 } },
+      { id: 'broken_record', name: 'THE BROKEN RECORD', npc: 'Archivist Neral', description: 'Break the plate and survive its response.', objective: 'Choose “Destroy the nameplate” at Pale Reliquary.', reward: { xp: 1600, zen: 1400 } }
+    ]
+  },
+  {
+    title: 'THE STORMBOUND SPIRE', place: 'Tempest Crown', npc: 'Warden Ivara',
+    intro: [
+      'A narrow tower rises through a permanent storm. Lightning travels down its outer walls without ever striking the ground.',
+      'Warden Ivara guards a lift that leads to the upper levels. The storm is being held in place by four failing conductors.',
+      'The tower rings like a bell as the next surge gathers.'
+    ],
+    prompt: 'Ivara asks you to repair the conductors, climb through the storm, or draw the surge away from the lift.',
+    choices: [
+      { label: 'Repair the conductors', result: 'The storm loses strength and the lift becomes safe to use.', flags: ['spire_conductors'], quest: 'steady_the_spire', enemy: { atk: -8 } },
+      { label: 'Climb through the storm', result: 'You reach the upper platform and find a map etched into the lightning rods.', flags: ['storm_climb'], quest: 'lightning_map', enemy: { hp: -20 } },
+      { label: 'Draw the surge away', result: 'The current follows you across the platform, exposing the guardian hidden inside the tower.', flags: ['surge_drawn'], quest: 'storm_lure', enemy: { hp: 50, atk: 4 } },
+      { label: 'Take the warden’s route', result: 'Ivara opens a maintenance passage that avoids the strongest part of the storm.', flags: ['warden_route'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'steady_the_spire', name: 'STEADY THE SPIRE', npc: 'Warden Ivara', description: 'Repair the tower conductors.', objective: 'Choose “Repair the conductors” at Tempest Crown.', reward: { xp: 1650, zen: 1700 } },
+      { id: 'lightning_map', name: 'THE LIGHTNING MAP', npc: 'Warden Ivara', description: 'Recover the map etched into the rods.', objective: 'Choose “Climb through the storm” at Tempest Crown.', reward: { xp: 1700, zen: 1650 } },
+      { id: 'storm_lure', name: 'THE STORM LURE', npc: 'Warden Ivara', description: 'Reveal the guardian inside the tower.', objective: 'Choose “Draw the surge away” at Tempest Crown.', reward: { xp: 1800, zen: 1600 } }
+    ]
+  },
+  {
+    title: 'THE QUEEN OF ASHEN MIRRORS', place: 'Mirrorfall Court', npc: 'Knight Elowen',
+    intro: [
+      'The spire opens onto a court of black mirrors. Each pane shows a different version of the same battlefield, and one reflection moves before its owner does.',
+      'Knight Elowen has been guarding the throne room while the mirror queen gathers the reflections into a single army.',
+      'The throne lights up as you approach.'
+    ],
+    prompt: 'Elowen offers three ways forward: shatter the mirrors, challenge the queen, or turn the reflections against her.',
+    choices: [
+      { label: 'Shatter the outer mirrors', result: 'The reflected army loses its formation. The queen retreats behind the throne seal.', flags: ['mirror_ring_broken'], quest: 'shards_of_truth', enemy: { atk: -8 } },
+      { label: 'Challenge the mirror queen', result: 'The queen accepts the challenge and steps out of the throne reflection.', flags: ['queen_challenged'], quest: 'court_of_ash', enemy: { hp: 65, atk: 6 } },
+      { label: 'Turn the reflections against her', result: 'You redirect the mirror light. The reflected army turns on its source.', flags: ['reflections_reversed'], quest: 'reversed_court', enemy: { hp: -30 } },
+      { label: 'Follow Elowen’s signal', result: 'Elowen leads you through a hidden passage beneath the court.', flags: ['elowen_signal'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'shards_of_truth', name: 'SHARDS OF TRUTH', npc: 'Knight Elowen', description: 'Break the outer mirrors protecting the throne.', objective: 'Choose “Shatter the outer mirrors” at Mirrorfall Court.', reward: { xp: 1950, zen: 1900 } },
+      { id: 'court_of_ash', name: 'THE COURT OF ASH', npc: 'Knight Elowen', description: 'Challenge the Queen of Ashen Mirrors.', objective: 'Choose “Challenge the mirror queen” at Mirrorfall Court.', reward: { xp: 2200, zen: 1850 } },
+      { id: 'reversed_court', name: 'THE REVERSED COURT', npc: 'Knight Elowen', description: 'Turn the mirror army against its queen.', objective: 'Choose “Turn the reflections against her” at Mirrorfall Court.', reward: { xp: 2050, zen: 2000 } }
+    ]
+  },
+  {
+    title: 'THE HOLLOW MERIDIAN', place: 'Meridian Engine', npc: 'Engineer Tal Ren',
+    intro: [
+      'A vast machine spans the chamber, its gears turning around an empty centre. The Meridian markings match the fracture you crossed on the earlier floors.',
+      'Engineer Tal Ren believes the engine is pulling gates toward one another, compressing distant dungeons into the same space.',
+      'The central gear begins to rotate in reverse.'
+    ],
+    prompt: 'Tal asks you to stop the reverse gear, isolate the power source, or let the engine complete one cycle.',
+    choices: [
+      { label: 'Stop the reverse gear', result: 'The machine slows and the chamber stabilises long enough to reach the next passage.', flags: ['meridian_stopped'], quest: 'gear_of_return', enemy: { atk: -9 } },
+      { label: 'Isolate the power source', result: 'You disconnect a hidden source marked with the signature of the First Witness.', flags: ['meridian_source'], quest: 'witness_power', enemy: { hp: -30 } },
+      { label: 'Allow one full cycle', result: 'The engine completes its turn and reveals a sealed chamber inside its centre.', flags: ['meridian_cycle'], quest: 'full_rotation', enemy: { hp: 55, atk: 5 } },
+      { label: 'Break the outer controls', result: 'The controls collapse. Tal secures the route before the machine can restart.', flags: ['meridian_controls'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'gear_of_return', name: 'THE GEAR OF RETURN', npc: 'Tal Ren', description: 'Stop the Meridian Engine from reversing.', objective: 'Choose “Stop the reverse gear” at Meridian Engine.', reward: { xp: 2300, zen: 2200 } },
+      { id: 'witness_power', name: 'THE WITNESS’ POWER', npc: 'Tal Ren', description: 'Find the engine’s hidden power source.', objective: 'Choose “Isolate the power source” at Meridian Engine.', reward: { xp: 2400, zen: 2100 } },
+      { id: 'full_rotation', name: 'FULL ROTATION', npc: 'Tal Ren', description: 'Open the chamber within the engine.', objective: 'Choose “Allow one full cycle” at Meridian Engine.', reward: { xp: 2500, zen: 2050 } }
+    ]
+  },
+  {
+    title: 'THE ASTRAL RELIQUARY', place: 'Starfall Repository', npc: 'Seer Anwen',
+    intro: [
+      'The next gate reveals a repository floating above a field of stars. Shelves drift between islands of stone, each holding a memory from a different world.',
+      'Seer Anwen has found a relic that records possible futures, but its pages are filling with events that have not happened.',
+      'A constellation folds into the shape of a doorway.'
+    ],
+    prompt: 'Anwen asks you to seal the relic, read its newest page, or move the repository before the doorway opens.',
+    choices: [
+      { label: 'Seal the astral relic', result: 'The pages stop changing. Anwen records the seal sequence in your journal.', flags: ['astral_sealed'], quest: 'quiet_stars', enemy: { atk: -8 } },
+      { label: 'Read the newest page', result: 'The page describes your arrival on the next floor and names the guardian waiting there.', flags: ['future_page'], quest: 'page_unwritten', enemy: { hp: -25 } },
+      { label: 'Move the repository', result: 'You shift the star shelves away from the doorway, but the keeper follows the moving light.', flags: ['repository_moved'], quest: 'moving_archive', enemy: { hp: 60, atk: 5 } },
+      { label: 'Ask Anwen to guide you', result: 'Anwen aligns the constellations and opens a safe route through the repository.', flags: ['anwen_guided'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'quiet_stars', name: 'QUIET THE STARS', npc: 'Seer Anwen', description: 'Seal the relic that records possible futures.', objective: 'Choose “Seal the astral relic” at Starfall Repository.', reward: { xp: 2600, zen: 2450 } },
+      { id: 'page_unwritten', name: 'THE UNWRITTEN PAGE', npc: 'Seer Anwen', description: 'Read the newest future record.', objective: 'Choose “Read the newest page” at Starfall Repository.', reward: { xp: 2750, zen: 2350 } },
+      { id: 'moving_archive', name: 'THE MOVING ARCHIVE', npc: 'Seer Anwen', description: 'Move the repository before its keeper arrives.', objective: 'Choose “Move the repository” at Starfall Repository.', reward: { xp: 2850, zen: 2300 } }
+    ]
+  },
+  {
+    title: 'THE SHATTERED CROWN', place: 'Crown of Fragments', npc: 'Commander Vael',
+    intro: [
+      'A crown hangs in pieces above a circular arena. Each fragment projects a different ruler over the same ruined kingdom.',
+      'Commander Vael says the crown belonged to the first gate sovereign, and every fragment is trying to claim a different bearer.',
+      'The arena floor divides into four shifting paths.'
+    ],
+    prompt: 'Vael asks you to gather the fragments, reject the crown, or choose one projection and confront it.',
+    choices: [
+      { label: 'Gather the crown fragments', result: 'The pieces stop fighting for control. Their combined light reveals a route beneath the arena.', flags: ['crown_gathered'], quest: 'broken_legacy', enemy: { hp: -30 } },
+      { label: 'Reject the crown', result: 'The projections fade. The crown remains suspended, unable to bind itself to another hunter.', flags: ['crown_rejected'], quest: 'no_throne', enemy: { atk: -10 } },
+      { label: 'Confront the strongest projection', result: 'The projection takes physical form and challenges you for the arena.', flags: ['projection_faced'], quest: 'false_sovereign', enemy: { hp: 70, atk: 6 } },
+      { label: 'Let Vael choose the path', result: 'Vael marks a concealed passage that avoids the crown’s influence.', flags: ['vael_path'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'broken_legacy', name: 'A BROKEN LEGACY', npc: 'Commander Vael', description: 'Recover the crown fragments’ shared memory.', objective: 'Choose “Gather the crown fragments” at Crown of Fragments.', reward: { xp: 3000, zen: 2800 } },
+      { id: 'no_throne', name: 'NO THRONE', npc: 'Commander Vael', description: 'Reject the crown and its projections.', objective: 'Choose “Reject the crown” at Crown of Fragments.', reward: { xp: 2950, zen: 2900 } },
+      { id: 'false_sovereign', name: 'THE FALSE SOVEREIGN', npc: 'Commander Vael', description: 'Defeat the strongest crown projection.', objective: 'Choose “Confront the strongest projection” at Crown of Fragments.', reward: { xp: 3150, zen: 2750 } }
+    ]
+  },
+  {
+    title: 'THE LAST ECLIPSE', place: 'Eclipse Verge', npc: 'Keeper Solenne',
+    intro: [
+      'The light disappears at the edge of a silent plain. A dark eclipse hangs over the horizon, although no sun is visible.',
+      'Keeper Solenne guards a final beacon that is keeping the eclipse from spreading into the lower floors.',
+      'The beacon dims as a presence approaches from the dark.'
+    ],
+    prompt: 'Solenne asks you to relight the beacon, enter the eclipse, or protect the lower gate while she works.',
+    choices: [
+      { label: 'Relight the beacon', result: 'The beacon returns to full strength and the plain becomes visible again.', flags: ['eclipse_beacon'], quest: 'light_returned', enemy: { atk: -10 } },
+      { label: 'Enter the eclipse', result: 'You cross the dark boundary and find a map of the final gate written in starlight.', flags: ['eclipse_entered'], quest: 'dark_map', enemy: { hp: -35 } },
+      { label: 'Protect the lower gate', result: 'You hold the approach while Solenne restores the beacon. The eclipse guardian reveals itself.', flags: ['lower_gate_held'], quest: 'last_watch', enemy: { hp: 75, atk: 6 } },
+      { label: 'Follow the fading light', result: 'The trail leads to a sealed stair beneath the plain. The final gate is below.', flags: ['fading_light'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'light_returned', name: 'LIGHT RETURNED', npc: 'Keeper Solenne', description: 'Restore the eclipse beacon.', objective: 'Choose “Relight the beacon” at Eclipse Verge.', reward: { xp: 3300, zen: 3150 } },
+      { id: 'dark_map', name: 'THE DARK MAP', npc: 'Keeper Solenne', description: 'Recover the map hidden inside the eclipse.', objective: 'Choose “Enter the eclipse” at Eclipse Verge.', reward: { xp: 3450, zen: 3000 } },
+      { id: 'last_watch', name: 'THE LAST WATCH', npc: 'Keeper Solenne', description: 'Protect the lower gate from the guardian.', objective: 'Choose “Protect the lower gate” at Eclipse Verge.', reward: { xp: 3550, zen: 2950 } }
+    ]
+  },
+  {
+    title: 'SOVEREIGN OF THE DEEP GATE', place: 'The Deep Gate', npc: 'The First Witness',
+    intro: [
+      'A final stair descends into a gate chamber larger than the citadel above. Its walls carry the marks of every floor, including the ones you have just crossed.',
+      'The First Witness waits at the centre. The records you recovered have formed a complete map, and the gate is ready to open.',
+      'A sovereign shape rises behind the sealed threshold.'
+    ],
+    prompt: 'The Witness offers a final decision: seal the gate, free the worlds beyond it, or challenge the sovereign guarding the threshold.',
+    choices: [
+      { label: 'Seal the deep gate', result: 'The threshold closes and the pressure across the lower floors fades. The Witness entrusts you with the seal record.', flags: ['deep_gate_sealed'], quest: 'final_seal', enemy: { atk: -12 } },
+      { label: 'Free the worlds beyond', result: 'The gate opens without breaking. Light moves through the chamber and the trapped worlds begin to recover.', flags: ['worlds_freed'], quest: 'beyond_release', enemy: { hp: -40 } },
+      { label: 'Challenge the deep sovereign', result: 'The guardian steps through the threshold. The final battle begins beneath the marks of all twenty floors.', flags: ['deep_sovereign_challenged'], quest: 'sovereign_fall', enemy: { hp: 90, atk: 8 } },
+      { label: 'Ask the Witness for the truth', result: 'The Witness reveals that the gate was built to test whether its keeper would choose power or protection.', flags: ['witness_truth'], quest: null, enemy: {} }
+    ],
+    quests: [
+      { id: 'final_seal', name: 'THE FINAL SEAL', npc: 'The First Witness', description: 'Close the Deep Gate permanently.', objective: 'Choose “Seal the deep gate” at The Deep Gate.', reward: { xp: 3900, zen: 3800 } },
+      { id: 'beyond_release', name: 'BEYOND RELEASE', npc: 'The First Witness', description: 'Free the worlds held beyond the threshold.', objective: 'Choose “Free the worlds beyond” at The Deep Gate.', reward: { xp: 4050, zen: 3650 } },
+      { id: 'sovereign_fall', name: 'THE SOVEREIGN’S FALL', npc: 'The First Witness', description: 'Defeat the guardian of the Deep Gate.', objective: 'Choose “Challenge the deep sovereign” at The Deep Gate.', reward: { xp: 4300, zen: 3500 } }
+    ]
   }
 
 ]
@@ -280,7 +480,17 @@ function explore (ordinal, state) {
     'The cathedral floor vibrates with echoes from a forgotten battle.',
     'The citadel wall has a blank space shaped exactly like your shadow.',
     'The royal archive records a king who was erased from every portrait.',
-    'The Origin Gate bears a mark matching the System interface.'
+    'The Origin Gate bears a mark matching the System interface.',
+    'The foundry control core contains a second command sequence beneath the ash.',
+    'A lantern in the trench glows only when someone speaks a missing hunter’s name.',
+    'The pale reliquary has one empty shelf with fresh dust beneath it.',
+    'Lightning on the spire forms a map when the storm briefly pauses.',
+    'The mirror court reflects a doorway that does not exist in the room.',
+    'The Meridian Engine carries a gear stamped with the First Witness’s mark.',
+    'A star chart in the repository changes when you record a new discovery.',
+    'One crown fragment casts a shadow pointing toward the next gate.',
+    'The eclipse plain holds footprints leading away from the beacon.',
+    'The Deep Gate records the choices made on every floor before it.'
   ]
   return { ok: true, state: saved, repeated: found, chapter,
     message: found
@@ -299,7 +509,17 @@ function investigate (ordinal, target, state) {
     'The ledger ink is newer than the paper. Someone has been editing the Archive in real time.',
     'The bell-metal carries a second vibration beneath the audible ring.',
     'The badge coordinates shift when viewed through the glass branches.',
-    'The evacuation list includes names that are not present in the refuge.'
+    'The evacuation list includes names that are not present in the refuge.',
+    'The foundry relay was activated from beneath the floor, not from its control room.',
+    'The trench lantern records contain one entry timestamped after its owner vanished.',
+    'Neral’s missing name appears faintly on the back of the sealed shelf.',
+    'The spire conductors were deliberately arranged to amplify the storm.',
+    'Elowen’s notes identify the queen’s reflection as the original, not the copy.',
+    'The Meridian Engine has a maintenance record signed by someone who was never born.',
+    'Anwen’s newest page contains a blank line reserved for a choice not yet made.',
+    'The crown fragments each contain a different version of the same royal oath.',
+    'Solenne’s beacon log reports a signal from below the eclipse plain.',
+    'The Deep Gate has a second seal hidden beneath the first witness mark.'
   ]
   return { ok: true, state: saved, repeated: found,
     message: found ? `You have already examined *${subject}*. No new clue appears.`
