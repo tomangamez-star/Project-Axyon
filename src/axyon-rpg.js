@@ -96,7 +96,7 @@ function mpCapacityForLevel (level) {
  * Applies xp and zen to a player object, handling level-ups, rank-ups and
  * grade-ups. Returns the mutated player plus a list of events for the reply.
  *
- * Grade-up grants +15 HP and +4 ATK.  A rank-up restores Power Energy.
+ * Grade-up grants +4 ATK. Maximum HP is derived only from player level.
  */
 function applyProgress (p, { xp = 0, zen = 0, coins = 0 } = {}) {
   const events = []
@@ -126,11 +126,13 @@ function applyProgress (p, { xp = 0, zen = 0, coins = 0 } = {}) {
   if (newGrade > beforeGrade) {
     const steps = newGrade - beforeGrade
     p.grade = newGrade
-    p.maxHp += store.GRADE_HP * steps
-    p.hp = p.maxHp
     p.atk += store.GRADE_ATK * steps
-    events.push({ type: 'grade', grade: p.grade, hp: store.GRADE_HP * steps, atk: store.GRADE_ATK * steps })
+    events.push({ type: 'grade', grade: p.grade, atk: store.GRADE_ATK * steps })
   }
+
+  // HP follows the manuscript's exact level formula; a level-up does not
+  // automatically heal the player's current HP.
+  p.maxHp = store.maxHpForLevel(p.level)
 
   const newRank = store.rankForLevel(p.level)
   if (newRank !== beforeRank) {
@@ -529,7 +531,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
   async function arise (sock, m, ctx) {
     const { userId, jid, name, settings } = ctx
     const r = await store.arise(userId, name)
-    await store.log(userId, 'arise', userId, { created: r.created })
+    await store.log(userId, r.created ? 'arise' : 'arise_return', userId, { created: r.created })
     const p = r.player
     const caption = r.created
       ? greetings.firstGreeting(p, settings.prefix, settings)
@@ -705,14 +707,13 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const stat = String(requestedStat || '').trim().toLowerCase()
     const labels = { atk: 'ATK', attack: 'ATK', def: 'DEF', defence: 'DEF', defense: 'DEF', spd: 'SPD', speed: 'SPD', str: 'STR', strength: 'STR', per: 'PER', perception: 'PER', sta: 'STA', stamina: 'STA', vit: 'VIT', vitality: 'VIT' }
     const key = ({ ATK: 'atk', DEF: 'def', SPD: 'spd', STR: 'str', PER: 'per', STA: 'sta', VIT: 'vit' })[labels[stat]]
-    if (!key) return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}train <atk|def|spd|str|per|sta|vit>*\nSTR boosts physical force · PER and SPD improve dodging · STA reduces fatigue gain · VIT increases HP and recovery.\nCost: *${TRAINING_COST} Coins* · Reward: *${TRAINING_XP_PER_USE} XP* (up to *${TRAINING_USES_DAILY_CAP} trainings / ${TRAINING_XP_DAILY_CAP} training XP per day).`)
+    if (!key) return send(sock, ctx.jid, m, `Usage: *${ctx.prefix}train <atk|def|spd|str|per|sta|vit>*\nSTR boosts physical force · PER and SPD improve dodging · STA reduces fatigue gain · VIT improves recovery.\nCost: *${TRAINING_COST} Coins* · Reward: *${TRAINING_XP_PER_USE} XP* (up to *${TRAINING_USES_DAILY_CAP} trainings / ${TRAINING_XP_DAILY_CAP} training XP per day).`)
 
     const result = await store.trainPlayer(ctx.userId, key, {
       cost: TRAINING_COST,
       xp: TRAINING_XP_PER_USE,
       trainingXpCap: TRAINING_XP_DAILY_CAP,
-      trainingUsesCap: TRAINING_USES_DAILY_CAP,
-      xpDailyLimit: ctx.settings.xpDailyLimit
+      trainingUsesCap: TRAINING_USES_DAILY_CAP
     })
     if (!result.ok) {
       if (result.reason === 'coins') return send(sock, ctx.jid, m, `💎 *NOT ENOUGH COINS*\n\nTraining costs *${TRAINING_COST} Coins*. You have *${fmt(result.coins)}*.`)
@@ -738,11 +739,10 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     const events = progressed.events.map(event => event.type === 'level'
       ? `⬆️ Level *${event.level}*`
       : event.type === 'grade' ? `🎖 Grade *${event.grade}*` : `🏅 Rank *${event.rank}*`).join('\n')
-    const xpNote = result.xp ? `✨ +${result.xp} XP` : `✨ +0 XP · ${result.xpReason === 'training_cap' ? 'Training XP cap reached' : 'Daily XP cap reached'}`
+    const xpNote = result.xp ? `✨ +${result.xp} XP` : '✨ +0 XP · Training XP cap reached'
     return send(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '🏋️ *TRAINING COMPLETE*', '',
       `⚔️ ${labels[stat]} *${statValue}*  (+1)`,
-      result.hpBonus ? `❤️ Maximum HP +${result.hpBonus} · Current HP +${result.hpBonus}` : '',
       `💎 -${TRAINING_COST} Coins`, xpNote,
       `Training today: *${result.trainingUsesToday}/${TRAINING_USES_DAILY_CAP}* · XP: *${result.trainingXpToday}/${TRAINING_XP_DAILY_CAP}*`,
       comboDiscovery ? `\n🔓 *NEW COMBO DISCOVERED*\n${comboCatalog.get(comboDiscovery.combo_key)?.name || comboDiscovery.combo_key}\nView it with *${ctx.prefix}cc*.` : '',
@@ -1195,7 +1195,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
             ? Math.min(p.maxHp, Number(memberState.hp))
             : Math.max(1, Math.round(p.maxHp * 0.25))
           if (result.won) {
-            const xp = Math.min(Number(completed.enemy.xp) || 0, Math.max(0, Number(ctx.settings.xpDailyLimit) - p.xpToday))
+            const xp = Math.max(0, Math.floor(Number(completed.enemy.xp) || 0))
             const zen = Math.round((Number(completed.enemy.zen) || 0) * (completed.enemy.boss ? 2 : 1.5))
             const coins = Math.max(75, Math.round((Number(completed.enemy.zen) || 0) * (completed.enemy.boss ? 6 : 4)))
             p.xpToday += xp
@@ -1947,7 +1947,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       winner.wins += 1
       loser.losses += 1
 
-      const xp = Math.min(60 + loser.level * 5, Math.max(0, ctx.settings.xpDailyLimit - winner.xpToday))
+      const xp = Math.max(0, Math.floor(60 + loser.level * 5))
       const requestedZen = 80 + loser.level * 8
       const zen = requestedZen
       const coins = 300 + loser.level * 40
@@ -2073,9 +2073,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy) || 0))
     p.mp = Math.max(0, Math.min(p.maxMp, Number(b.mp ?? p.mp) || 0))
     if (won) {
-      const settings = ctx.settings
-      const xpRoom = Math.max(0, settings.xpDailyLimit - p.xpToday)
-      const xp = Math.min(b.enemy.xp, xpRoom)
+      const xp = Math.max(0, Math.floor(Number(b.enemy.xp) || 0))
       const requestedZen = Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 2 : 1.5))
       const zen = requestedZen
       const coins = Math.max(75, Math.round((Number(b.enemy.zen) || 0) * (b.enemy.boss ? 6 : 4)))
@@ -2092,9 +2090,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       await store.log(ctx.userId, 'battle_win', b.enemy.name, { xp, zen, coins, ordinal: b.ordinal })
 
       const notes = events.map(e => e.type === 'level' ? `\u2b06\ufe0f Level *${e.level}*`
-        : e.type === 'grade' ? `\ud83c\udf1f Grade *${e.grade}* \u2014 +\u2764\ufe0f${e.hp} +\u2694\ufe0f${e.atk}`
+        : e.type === 'grade' ? `\ud83c\udf1f Grade *${e.grade}* \u2014 +\u2694\ufe0f${e.atk}`
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
-      const capped = b.enemy.xp > xp ? `\n\n> Daily XP cap reached.` : ''
 
       const wearNote = wornAfter ? (wornAfter.broken ? '\n\ud83d\udc80 *Armor broke* \u2014 protection lost until repaired.' : `\n\ud83d\udee1\ufe0f Armor *${wornAfter.durability}/${wornAfter.maxDurability}* durability`) : ''
 
@@ -2103,7 +2100,7 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         `*${b.enemy.name}* falls.`, '',
         `\u2728 +${fmt(xp)} XP \u2022 \ud83e\ude99 +${fmt(zen)} Zen \u2022 \ud83d\udcb0 +${fmt(coins)} Coins`,
         notes.length ? `\n${notes.join('\n')}` : '',
-        capped, '',
+        '',
         `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`,
         wearNote
       ].filter(Boolean).join('\n'), WATERMARK, [['\u2694\ufe0f Next Stage', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])

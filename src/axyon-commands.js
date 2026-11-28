@@ -347,17 +347,21 @@ Reason: ${lock.reason}` : ''}`)
     if (sub === 'shop' || sub === 'list' || sub === 'tiers') {
       const rows = store.ARMOR_TIERS.map(t =>
         `*TIER ${t.tier}*\n  Protection ${T.b(String(t.protection))} · ${t.zen.toLocaleString('en-US')} Zen · ${t.durability} durability`)
-      return send([W, '', '🛡️ *ARMOR SHOP*', '', ...rows, '', `Buy with *${ctx.prefix}armor buy <tier>*`].join('\n'))
+      return send([W, '', '🛡️ *ARMOR SHOP*', '', '🔒 Armor unlocks at *Level 50*. Owned armor is preserved while locked.', '', ...rows, '', `Buy with *${ctx.prefix}armor buy <tier>*`].join('\n'))
     }
 
     if (sub === 'status' || sub === 'info') {
+      const player = await store.player(ctx.userId)
+      const locked = Number(player?.level || 1) < 50
       const suit = await store.equippedArmor(ctx.userId)
       const all = await store.armorFor(ctx.userId)
-      if (!all.length) return send(`🛡️ You own no armor. Browse *${ctx.prefix}armor shop* and buy a tier with *${ctx.prefix}armor buy <tier>*.`)
-      const worn = suit
-        ? `*WORN* — Tier ${suit.tier} · Protection ${T.b(String(suit.protection))}\nDurability ${suit.durability}/${suit.maxDurability}`
-        : '*WORN* — nothing equipped'
-      const owned = all.map(a => `• #${a.id} Tier ${a.tier} — ${a.durability}/${a.maxDurability} · ${a.broken ? '💀 broken' : a.equipped ? '✅ worn' : 'stored'}`)
+      if (!all.length) return send(`🛡️ You own no armor. Browse *${ctx.prefix}armor shop* and buy a tier after reaching Level 50.`)
+      const worn = locked
+        ? '*LOCKED* — Armor is inactive until Level 50. Any equipped suit is preserved and will reactivate when you reach Level 50.'
+        : suit
+          ? `*WORN* — Tier ${suit.tier} · Protection ${T.b(String(suit.protection))}\nDurability ${suit.durability}/${suit.maxDurability}`
+          : '*WORN* — nothing equipped'
+      const owned = all.map(a => `• #${a.id} Tier ${a.tier} — ${a.durability}/${a.maxDurability} · ${a.broken ? '💀 broken' : a.equipped ? (locked ? '🔒 equipped, inactive' : '✅ worn') : 'stored'}`)
       return send([W, '', '🛡️ *ARMOR STATUS*', '', worn, '', '*OWNED*', ...owned].join('\n'))
     }
 
@@ -706,7 +710,7 @@ Recipe: *${combos.formatRecipe(combo, ctx.prefix)}*` : `✅ ${row.combo_key}`
     if (!claimed.ok) return axyon.send(s, ctx.jid, m, claimed.message)
     await store.saveFloorStory(ctx.userId, claimed.state)
     const p = await store.player(ctx.userId)
-    const xp = Math.min(claimed.reward.xp, Math.max(0, Number(ctx.settings.xpDailyLimit || 5000) - Number(p.xpToday || 0)))
+    const xp = Math.max(0, Math.floor(Number(claimed.reward.xp) || 0))
     const zen = Math.max(0, Number(claimed.reward.zen) || 0)
     p.xpToday = Number(p.xpToday || 0) + xp
     p.zenToday = Number(p.zenToday || 0) + zen
@@ -1434,14 +1438,13 @@ Accept with *${ctx.prefix}duel accept*.`)
     return axyon.send(s, ctx.jid, m, `${W}\n\n✅ *CONVERSION COMPLETE*\n\n💎 -${fmt(result.coins)} Coins\n💠 +${fmt(result.zen)} Zen\n\nNew balance: *${fmt(result.player.coins)} Coins* · *${fmt(result.player.zen)} Zen*`)
   })
   cmd('daily', 'economy', '{p}daily', 'Claim Zen and restore Power Energy.', async (s, m, ctx) => axyon.daily(s, m, ctx))
-  cmd('economy', 'economy', '{p}economy [xp <value>]', 'View or set the daily XP cap (AXYON only). Zen has no daily earning cap.', async (s, m, ctx, args) => {
+  cmd('economy', 'economy', '{p}economy', 'View uncapped XP earnings and the separate daily training limit.', async (s, m, ctx, args) => {
     const sub = String(args[0] || 'view').toLowerCase()
     if (sub === 'view') {
-      const s2 = await store.settings()
       const p = await store.player(ctx.userId)
       return axyon.send(s, ctx.jid, m, [
         `${W}`, '', '\ud83e\ude99 *ECONOMY*', '',
-        `Daily XP limit: *${s2.xpDailyLimit}*`,
+        `Battle and quest XP: *No daily cap*`,
         `Daily Zen cap: *None*`,
         `Training cap: *5 sessions / 25 XP per day*`, '',
         `Your XP today: *${p?.xpToday ?? 0}*`,
@@ -1451,13 +1454,7 @@ Accept with *${ctx.prefix}duel accept*.`)
         `Your Coins: *${fmt(p?.coins ?? 0)}*`
       ].join('\n'))
     }
-    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '\ud83d\udee1\ufe0f *AXYON ONLY*\n\nOnly AXYON can change the economy limits.')
-    const value = parseNum(args[1])
-    if (sub !== 'xp') return axyon.send(s, ctx.jid, m, `Zen has no daily earning cap. Usage: *${ctx.prefix}economy xp 5000*`)
-    if (value === null || value < 0) return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}economy ${sub} <amount>*`)
-    await store.setSetting('xpDailyLimit', value)
-    await store.log(ctx.userId, 'economy_limit', sub, { value })
-    return axyon.send(s, ctx.jid, m, `${W}\n\n\u2705 *LIMIT UPDATED*\n\nDaily ${sub.toUpperCase()} limit: *${value}*`)
+    return axyon.send(s, ctx.jid, m, `Battle and quest XP are uncapped. Training remains limited to *${TRAINING_USES_DAILY_CAP} sessions / ${TRAINING_XP_DAILY_CAP} XP per UTC day*.`)
   })
 
   /* ----------------------------------------------------------------- media */

@@ -197,7 +197,7 @@ function createAxyonAdmin ({ logger }) {
           if (!prefix || prefix.length > 3) return { ok: false, message: 'Prefix must be 1–3 characters.' }
           patch.prefix = prefix
         }
-        for (const key of ['xpDailyLimit', 'partyMax', 'partyMin', 'selfHealPerCombat', 'classMovesPerDay', 'cardAbilitiesPerDay']) {
+        for (const key of ['partyMax', 'partyMin', 'selfHealPerCombat', 'classMovesPerDay', 'cardAbilitiesPerDay']) {
           if (input[key] !== undefined) {
             const n = num(input[key])
             if (n === null || n < 0) return { ok: false, message: `${key} must be a non-negative number.` }

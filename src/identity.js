@@ -12,7 +12,7 @@ function jidsFromKey (key = {}) {
   return [...new Set([key.participantAlt, key.remoteJidAlt, key.participant, key.remoteJid].filter(Boolean).map(String))]
 }
 
-function numberFromJid (jid) { return norm(String(jid || '').split('@')[0]) }
+function numberFromJid (jid) { return norm(String(jid || '').split(':')[0].split('@')[0]) }
 function isPhoneJid (jid) { return /@(s\.whatsapp\.net|hosted)$/i.test(String(jid || '')) }
 function isLidJid (jid) { return /@(lid|hosted\.lid)$/i.test(String(jid || '')) }
 
@@ -25,10 +25,35 @@ function isLidJid (jid) { return /@(lid|hosted\.lid)$/i.test(String(jid || '')) 
  */
 async function resolveMessageUserId (sock, message = {}) {
   const key = message.key || {}
+  const mapping = sock?.signalRepository?.lidMapping
+
+  /*
+   * A fromMe message is authored by the connected WhatsApp account, not by
+   * key.remoteJid. In a DM remoteJid is the recipient; in a group it is the
+   * group itself. Treating either as the sender can create a player under the
+   * wrong ID and makes !arise appear to do nothing for the real account.
+   */
+  if (key.fromMe) {
+    const selfJids = [sock?.user?.id, sock?.user?.jid, sock?.user?.lid]
+      .filter(Boolean).map(String)
+    const selfPhone = selfJids.find(isPhoneJid)
+    if (selfPhone) return numberFromJid(selfPhone)
+
+    const selfLids = selfJids.filter(isLidJid)
+    if (mapping?.getPNForLID) {
+      for (const lid of selfLids) {
+        try {
+          const pn = await mapping.getPNForLID(lid)
+          if (pn) return numberFromJid(pn)
+        } catch { /* retain the LID fallback below */ }
+      }
+    }
+    if (selfLids.length) return numberFromJid(selfLids[0])
+  }
+
   const jids = jidsFromKey(key)
   const phone = jids.find(isPhoneJid)
   if (phone) return numberFromJid(phone)
-  const mapping = sock?.signalRepository?.lidMapping
   if (mapping?.getPNForLID) {
     for (const lid of jids.filter(isLidJid)) {
       try {

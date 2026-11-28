@@ -16,16 +16,20 @@ const RANK_LEVEL = { E: 1, D: 10, C: 20, B: 30, A: 40, S: 50, SS: 60, SSS: 70, M
 const POWER_ENERGY_BY_RANK = { E: 50, D: 70, C: 90, B: 110, A: 130, S: 150, SS: 170, SSS: 190, Monarch: 220 }
 const POWER_ENERGY_BASE = 50
 const POWER_ENERGY_CAP = 220
-const GRADE_HP = 15
 const GRADE_ATK = 4
 const BASE_ATK = 6
 const BASE_HP = 100
 const BASE_DEF = 4
+
+/** HP is fixed at 100 through level 10, then 10 HP per level. */
+function maxHpForLevel (level) {
+  const n = Math.max(1, Math.floor(Number(level) || 1))
+  return n <= 10 ? BASE_HP : n * 10
+}
 const BASE_SPD = 5
 
 const DEFAULT_SETTINGS = {
   prefix: '!',
-  xpDailyLimit: 5000,
   partyMax: 5,
   partyMin: 2,
   selfHealPerCombat: 5,
@@ -175,6 +179,13 @@ async function ensureSchema () {
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS mp INT NOT NULL DEFAULT 0;
     ALTER TABLE axyon_players ADD COLUMN IF NOT EXISTS max_mp INT NOT NULL DEFAULT 0;
+    -- HP is level-derived: levels 1-10 have 100 HP; level 11+ have level*10.
+    -- Keep current HP where possible; only clamp it if the new maximum is lower.
+    UPDATE axyon_players
+       SET max_hp=CASE WHEN level<=10 THEN 100 ELSE level*10 END,
+           hp=LEAST(hp, CASE WHEN level<=10 THEN 100 ELSE level*10 END)
+     WHERE max_hp<>CASE WHEN level<=10 THEN 100 ELSE level*10 END
+        OR hp>CASE WHEN level<=10 THEN 100 ELSE level*10 END;
     -- Existing characters keep all progression. Players already level 10+
     -- receive their newly introduced MP tank once; lower levels stay locked.
     UPDATE axyon_players
@@ -804,15 +815,34 @@ function norm (r) {
 
 async function arise (userId, name = '') {
   await ensureSchema()
-  const r = await db().query(
-    `INSERT INTO axyon_players(user_id,name,day_key) VALUES($1,$2,$3)
-     ON CONFLICT(user_id) DO UPDATE SET
-       name=CASE WHEN $2<>'' THEN $2 ELSE axyon_players.name END,
-       updated_at=NOW()
-     RETURNING *, (xmax=0) AS created`,
-    [userId, name, dayKey()]
+  /*
+   * Registration must be create-only. A returning hunter may run !arise again,
+   * but that must never perform an UPDATE against their saved character.
+   *
+   * The former ON CONFLICT DO UPDATE path touched the existing row on every
+   * repeat invocation and relied on PostgreSQL's xmax system column to decide
+   * whether it was new. DO NOTHING + a follow-up SELECT makes the distinction
+   * explicit and guarantees that level, XP, currency, equipment references,
+   * stats and timestamps are not rewritten by a repeat !arise.
+   */
+  const inserted = await db().query(
+    `INSERT INTO axyon_players(user_id,name,day_key)
+     VALUES($1,$2,$3)
+     ON CONFLICT(user_id) DO NOTHING
+     RETURNING *`,
+    [String(userId), String(name || ''), dayKey()]
   )
-  return { player: norm(r.rows[0]), created: r.rows[0].created === true }
+  if (inserted.rows[0]) return { player: norm(inserted.rows[0]), created: true }
+
+  const existing = await db().query(
+    'SELECT * FROM axyon_players WHERE user_id=$1',
+    [String(userId)]
+  )
+  if (!existing.rows[0]) {
+    // Defensive retry for an unusual concurrent delete between conflict and read.
+    return arise(userId, name)
+  }
+  return { player: norm(existing.rows[0]), created: false }
 }
 
 async function player (userId) {
@@ -820,11 +850,13 @@ async function player (userId) {
   const levelRow = (await db().query('SELECT level FROM axyon_players WHERE user_id=$1', [String(userId)])).rows[0]
   if (levelRow) {
     const capacity = mpCapacityForLevel(levelRow.level)
+    const maxHp = maxHpForLevel(levelRow.level)
     await db().query(
       `UPDATE axyon_players SET max_mp=$2,
-         mp=CASE WHEN max_mp=0 AND $2>0 THEN $2 WHEN $2=0 THEN 0 ELSE LEAST(mp,$2) END
-       WHERE user_id=$1 AND max_mp<>$2`,
-      [String(userId), capacity]
+         mp=CASE WHEN max_mp=0 AND $2>0 THEN $2 WHEN $2=0 THEN 0 ELSE LEAST(mp,$2) END,
+         max_hp=$3,hp=LEAST(hp,$3)
+       WHERE user_id=$1 AND (max_mp<>$2 OR max_hp<>$3 OR hp>$3)`,
+      [String(userId), capacity, maxHp]
     )
   }
   const cooled = await db().query(
@@ -864,7 +896,9 @@ async function savePlayer (p) {
        str=$30,per=$31,sta=$32,vit=$33,fatigue=$34,fatigue_updated_at=COALESCE($35::timestamptz,NOW()),
        max_mp=$36,mp=$37,updated_at=NOW()
      WHERE user_id=$1 RETURNING *`,
-    [p.userId, p.name, p.rank, p.level, p.grade, p.xp, p.zen, p.coins, p.hp, p.maxHp,
+    [p.userId, p.name, p.rank, p.level, p.grade, p.xp, p.zen, p.coins,
+      Math.max(0, Math.min(maxHpForLevel(p.level), Math.floor(Number(p.hp) || 0))),
+      maxHpForLevel(p.level),
       p.atk, p.def, p.spd, p.powerEnergy, p.maxPowerEnergy, p.stage, p.wins, p.losses,
       p.battlesSinceRest || 0, p.zenToday, p.xpToday, p.trainingXpToday || 0, p.trainingUsesToday || 0, p.dayKey, p.class,
       p.classMovesUsed, p.healUses, p.cardUses, p.lastDaily,
@@ -943,8 +977,8 @@ async function getBattle (userId) {
   return (await db().query('SELECT active_battle FROM axyon_players WHERE user_id=$1', [userId])).rows[0]?.active_battle || null
 }
 
-/** Spend Coins for one permanent +1 training upgrade and award capped XP. */
-async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 25, trainingUsesCap = 5, xpDailyLimit = 5000 } = {}) {
+/** Spend Coins for one permanent +1 training upgrade and award separately capped training XP. */
+async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 25, trainingUsesCap = 5 } = {}) {
   const columns = { atk: 'atk', def: 'def', spd: 'spd', str: 'str', per: 'per', sta: 'sta', vit: 'vit' }
   const column = columns[String(stat || '').toLowerCase()]
   if (!column) return { ok: false, reason: 'stat' }
@@ -972,15 +1006,13 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
       await client.query('ROLLBACK')
       return { ok: false, reason: 'stat_cap', stat: column, value: currentStat }
     }
-    const hpBonus = column === 'vit' ? 5 : 0
     const previousTrainingXp = sameDay ? Number(row.training_xp_today) || 0 : 0
     const previousXpToday = sameDay ? Number(row.xp_today) || 0 : 0
     const trainingRoom = Math.max(0, Math.floor(Number(trainingXpCap) || 0) - previousTrainingXp)
-    const dailyXpRoom = Math.max(0, Math.floor(Number(xpDailyLimit) || 0) - previousXpToday)
-    const awardedXp = Math.max(0, Math.min(Math.floor(Number(xp) || 0), trainingRoom, dailyXpRoom))
+    const awardedXp = Math.max(0, Math.min(Math.floor(Number(xp) || 0), trainingRoom))
     const update = await client.query(
       `UPDATE axyon_players SET ${column}=${column}+1,coins=coins-$2,xp=xp+$6,xp_today=$3,
-         max_hp=max_hp+$8,hp=LEAST(max_hp+$8,hp+$8),fatigue_updated_at=NOW(),
+         fatigue_updated_at=NOW(),
          training_xp_today=$4,training_uses_today=$7,day_key=$5,
          zen_today=CASE WHEN day_key=$5 THEN zen_today ELSE 0 END,
          class_moves_used=CASE WHEN day_key=$5 THEN class_moves_used ELSE 0 END,
@@ -988,19 +1020,18 @@ async function trainPlayer (userId, stat, { cost = 250, xp = 5, trainingXpCap = 
          updated_at=NOW()
        WHERE user_id=$1 RETURNING *`,
       [String(userId), Math.floor(Number(cost) || 0), previousXpToday + awardedXp,
-        previousTrainingXp + awardedXp, today, awardedXp, usesToday + 1, hpBonus]
+        previousTrainingXp + awardedXp, today, awardedXp, usesToday + 1]
     )
     await client.query('COMMIT')
     return {
       ok: true,
       player: norm(update.rows[0]),
       xp: awardedXp,
-      xpReason: awardedXp > 0 ? '' : trainingRoom <= 0 ? 'training_cap' : 'daily_xp_cap',
+      xpReason: awardedXp > 0 ? '' : 'training_cap',
       trainingXpToday: previousTrainingXp + awardedXp,
       trainingXpCap,
       trainingUsesToday: usesToday + 1,
       trainingUsesCap,
-      hpBonus
     }
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
@@ -1656,7 +1687,16 @@ async function armorFor (userId) {
 /** The suit currently worn, or null. */
 async function equippedArmor (userId) {
   await ensureSchema()
-  const r = await db().query('SELECT * FROM axyon_armor WHERE user_id=$1 AND equipped=TRUE AND broken=FALSE LIMIT 1', [String(userId)])
+  // Owned/equipped records are retained below level 50, but are dormant:
+  // they cannot absorb damage until the player reaches the unlock level.
+  const r = await db().query(
+    `SELECT a.* FROM axyon_armor a
+       JOIN axyon_players p ON p.user_id=a.user_id
+      WHERE a.user_id=$1 AND a.equipped=TRUE AND a.broken=FALSE
+        AND p.level>=50
+      LIMIT 1`,
+    [String(userId)]
+  )
   return mapArmor(r.rows[0])
 }
 
@@ -1671,8 +1711,9 @@ async function buyArmor (userId, tier) {
   const client = await db().connect()
   try {
     await client.query('BEGIN')
-    const p = await client.query('SELECT zen FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
+    const p = await client.query('SELECT level,zen FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
     if (!p.rows.length) throw new Error('Player not found.')
+    if (Number(p.rows[0].level) < 50) throw new Error('Armor unlocks at level 50. Your owned armor will be preserved until then.')
     const zen = Number(p.rows[0].zen || 0)
     if (zen < spec.zen) throw new Error(`Not enough Zen. Tier ${spec.tier} costs ${spec.zen.toLocaleString('en-US')} Zen.`)
     await client.query('UPDATE axyon_players SET zen=zen-$2, updated_at=NOW() WHERE user_id=$1', [String(userId), spec.zen])
@@ -1697,6 +1738,9 @@ async function equipArmor (userId, armorId) {
   const client = await db().connect()
   try {
     await client.query('BEGIN')
+    const player = await client.query('SELECT level FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
+    if (!player.rows.length) throw new Error('Player not found.')
+    if (Number(player.rows[0].level) < 50) throw new Error('Armor unlocks at level 50. Your owned armor is preserved and will become usable when you reach level 50.')
     const r = await client.query('SELECT * FROM axyon_armor WHERE id=$1 AND user_id=$2 FOR UPDATE', [Number(armorId), String(userId)])
     const suit = r.rows[0]
     if (!suit) throw new Error('You do not own that armor.')
@@ -1766,6 +1810,7 @@ async function wearArmor (userId, points = 1) {
             equipped=(GREATEST(0, durability-$2) > 0),
             updated_at=NOW()
       WHERE user_id=$1 AND equipped=TRUE AND broken=FALSE
+        AND EXISTS (SELECT 1 FROM axyon_players p WHERE p.user_id=$1 AND p.level>=50)
       RETURNING *`,
     [String(userId), Math.max(1, Number(points) || 1)]
   )
@@ -2608,7 +2653,6 @@ module.exports = {
   POWER_ENERGY_BY_RANK,
   POWER_ENERGY_BASE,
   POWER_ENERGY_CAP,
-  GRADE_HP,
   GRADE_ATK,
   BASE_ATK,
   BASE_HP,
@@ -2617,6 +2661,7 @@ module.exports = {
   BASE_COMBAT_STATS: Object.freeze({ str: 5, per: 5, sta: 5, vit: 5 }),
   FATIGUE_RECOVERY_MINUTES: 15,
   mpCapacityForLevel,
+  maxHpForLevel,
   DEFAULT_SETTINGS,
   ORIGINAL_STAGES,
   ORIGINAL_FLOORS,
