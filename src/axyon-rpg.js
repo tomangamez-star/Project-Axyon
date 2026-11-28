@@ -21,6 +21,7 @@ const combatMechanics = require('./axyon-combat-mechanics')
 const floorStory = require('./floor-story')
 const npc = require('./axyon-npc')
 const display = require('./axyon-combat-display')
+const armorLib = require('./axyon-armor')
 const fs = require('fs/promises')
 
 const WATERMARK = '\u232c AXYN CORE'
@@ -432,7 +433,25 @@ function liveClassMoves (p) {
 /* ------------------------------------------------------------------ engine */
 
 function createAxyon ({ economy, logger, sendButtons } = {}) {
-  const send = (s, j, m, t) => s.sendMessage(j, { text: t }, { quoted: m })
+  /*
+   * Live send instrumentation, read by the owner's !system health snapshot.
+   * `inFlight` is the queue depth (sends awaiting WhatsApp right now) and
+   * `lastLatencyMs` is the duration of the most recent successful send. Both
+   * start empty and report null until something is actually sent, so the
+   * health card never claims a measurement it does not have.
+   */
+  let inFlight = 0
+  let lastLatencyMs = null
+  const send = async (s, j, m, t) => {
+    inFlight++
+    const started = Date.now()
+    try {
+      return await s.sendMessage(j, { text: t }, { quoted: m })
+    } finally {
+      lastLatencyMs = Date.now() - started
+      inFlight--
+    }
+  }
   const persistFatigue = async (userId, fatigue, updatedAt, playerState) => {
     if (typeof store.updateFatigue === 'function') return store.updateFatigue(userId, fatigue, updatedAt)
     // Keep lightweight test adapters and older injected stores compatible.
@@ -991,6 +1010,8 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
 
     let mutationError = ''
     let result = null
+    /* Armor is loaded before the synchronous mutation callback. */
+    const partySuit = await store.equippedArmor(actorId).catch(() => null)
     const updatedParty = await store.mutateParty(party.id, current => {
       const state = { ...(current.state || {}) }
       const currentBattle = { ...(state.floorBattle || {}) }
@@ -1097,6 +1118,16 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         playerState.guard = 0
         playerState.evading = false
         if (hit > 0) note += ` · enemy hit ${hit}`
+      }
+      /* Party members wear armor too — same formula as solo. */
+      if (partySuit) {
+        const beforeHp = Number(playerState.hp)
+        const rawHit = Math.max(0, Number(playerState.maxHp) - beforeHp)
+        const soaked = armorLib.absorb(rawHit, partySuit)
+        if (soaked.absorbed > 0) {
+          playerState.hp = Math.min(Number(playerState.maxHp), beforeHp + soaked.absorbed)
+          note += ` · armor ${soaked.absorbed} absorbed`
+        }
       }
       if (action !== 'retreat') playerState.energy = Math.min(Number(playerState.maxEnergy) || 0, Number(playerState.energy) + ENERGY_REGEN_PER_TURN)
       currentBattle.players[actorId] = playerState
@@ -1504,11 +1535,20 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       b.evade = false
       b.dodgeBonus = 0
     }
+    /* A worn suit absorbs a flat slice of the hit that just landed. */
+    const wornSuit = await store.equippedArmor(ctx.userId).catch(() => null)
+    if (wornSuit) {
+      const soaked = armorLib.absorb(hit, wornSuit)
+      if (soaked.absorbed > 0) {
+        hit = soaked.damage
+        blocked += soaked.absorbed
+        note += `\n\ud83d\udee1\ufe0f Armor absorbed *${soaked.absorbed}*.`
+      }
+    }
     b.playerHp -= hit
     b.damageTaken = Math.max(0, Number(b.damageTaken) || 0) + hit
     b.damageBlocked = Math.max(0, Number(b.damageBlocked) || 0) + blocked
-    if (hit > 0) note += `\n👹 ${b.enemy.name} answers for *${hit}*.`
-
+    if (hit > 0) note += `\n\ud83d\udc79 ${b.enemy.name} answers for *${hit}*.`
     /*
      * THE NPC'S CLASS MOVE.
      *
@@ -1670,6 +1710,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     let resultState = null
     let winnerId = null
     let actionNote = ''
+    /* Armor is loaded BEFORE the mutation callback: that callback is
+     * synchronous, so it cannot await a query mid-turn. */
+    const duelArmor = await armorLib.wornBy([challengerId, opponentId])
     const updated = await store.mutateDuel(d.id, current => {
       if (current.status !== 'active') { mutationError = 'ended'; return null }
       const state = { ...(current.state || {}) }
@@ -1836,6 +1879,16 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
         if (finalDamage) actionNote += ` · ${finalDamage} dealt`
       }
 
+      /* The defender's worn suit soaks part of whatever landed. */
+      const defenderSuit = duelArmor.get(String(targetId))
+      if (defenderSuit) {
+        const before = Math.max(0, Number(state.hp[targetId]) || 0)
+        const soaked = armorLib.absorb(Math.max(0, targetHp - before), defenderSuit)
+        if (soaked.absorbed > 0) {
+          state.hp[targetId] = Math.min(Number(state.maxHp[targetId] || target.maxHp), before + soaked.absorbed)
+          actionNote += ` · ARMOR ${soaked.absorbed} absorbed`
+        }
+      }
 
       state.round = Math.max(1, Number(state.round) || 1)
       if (Number(state.hp[targetId]) <= 0) {
@@ -1888,6 +1941,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
       loser.mp = Math.max(0, Math.min(loser.maxMp, Number(finalState.mp?.[losingId] ?? loser.mp)))
       winner.battlesSinceRest = Math.max(0, Number(winner.battlesSinceRest) || 0) + 1
       loser.battlesSinceRest = Math.max(0, Number(loser.battlesSinceRest) || 0) + 1
+      /* Both fighters' suits take one point of wear for the completed duel. */
+      await armorLib.wearAfterBattle(winnerId).catch(() => null)
+      await armorLib.wearAfterBattle(losingId).catch(() => null)
       winner.wins += 1
       loser.losses += 1
 
@@ -2008,6 +2064,9 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     await store.setBattle(ctx.userId, null)
     p = store.rollDay(p)
     p.battlesSinceRest = Math.max(0, Number(p.battlesSinceRest) || 0) + 1
+    /* One durability point per COMPLETED battle — win or loss, but never per
+     * hit, so a long fight cannot drain a suit faster than a short one. */
+    const wornAfter = await armorLib.wearAfterBattle(ctx.userId)
     p.fatigue = combatMechanics.fatigueValue(b.fatigue ?? p.fatigue)
     p.fatigueUpdatedAt = new Date().toISOString()
     p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp) || 0))
@@ -2037,13 +2096,16 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
           : `\ud83d\udc51 Rank up \u2192 *${e.rank}* \u2022 Power Energy restored to *${e.powerEnergy}*`)
       const capped = b.enemy.xp > xp ? `\n\n> Daily XP cap reached.` : ''
 
+      const wearNote = wornAfter ? (wornAfter.broken ? '\n\ud83d\udc80 *Armor broke* \u2014 protection lost until repaired.' : `\n\ud83d\udee1\ufe0f Armor *${wornAfter.durability}/${wornAfter.maxDurability}* durability`) : ''
+
       return buttons(sock, ctx.jid, m, [
         `${WATERMARK}`, '', '\ud83c\udfc6 *VICTORY*', '',
         `*${b.enemy.name}* falls.`, '',
         `\u2728 +${fmt(xp)} XP \u2022 \ud83e\ude99 +${fmt(zen)} Zen \u2022 \ud83d\udcb0 +${fmt(coins)} Coins`,
         notes.length ? `\n${notes.join('\n')}` : '',
         capped, '',
-        `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`
+        `\ud83c\udf96\ufe0f Rank *${after.rank}* \u2022 Lv. *${after.level}*`,
+        wearNote
       ].filter(Boolean).join('\n'), WATERMARK, [['\u2694\ufe0f Next Stage', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
     }
 
@@ -2051,11 +2113,13 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     p.hp = Math.max(1, Math.round(p.maxHp * 0.25))
     await store.savePlayer(p)
     await store.log(ctx.userId, 'battle_loss', b.enemy.name, { ordinal: b.ordinal })
+    const wearNote = wornAfter ? (wornAfter.broken ? '\n\ud83d\udc80 *Armor broke* \u2014 protection lost until repaired.' : `\n\ud83d\udee1\ufe0f Armor *${wornAfter.durability}/${wornAfter.maxDurability}* durability`) : ''
     return buttons(sock, ctx.jid, m, [
       `${WATERMARK}`, '', '\ud83d\udc80 *DEFEAT*', '',
       `*${b.enemy.name}* overwhelms you.`, '',
       `\u2764\ufe0f You wake with *${p.hp}/${p.maxHp}* HP.`,
-      'No Zen was lost \u2014 only time.'
+      'No Zen was lost \u2014 only time.',
+      wearNote
     ].join('\n'), WATERMARK, [['\ud83d\udd04 Try Again', 'ax_stages'], ['\ud83d\udc64 Profile', 'ax_profile']])
   }
 
@@ -2378,8 +2442,35 @@ function createAxyon ({ economy, logger, sendButtons } = {}) {
     return Object.entries(SECTIONS).map(([k, v]) => [`${v.icon} ${v.name}`, `ax_help_${k}`])
   }
 
+  /*
+   * Live instrumentation for the owner's !system health snapshot.
+   *
+   * `queueDepth` and `sendLatency` are real measurements, not placeholders:
+   * `send()` above increments/decrements the in-flight counter around every
+   * WhatsApp send and records its duration.
+   */
+  function queueDepth () {
+    return inFlight
+  }
+
+  function sendLatency () {
+    return lastLatencyMs
+  }
+
+  /**
+   * Drop the temporary caches this module holds.
+   *
+   * There is no cross-command cache map here any more, so this reports 0 and
+   * touches nothing. It deliberately does NOT clear battles, players or
+   * sessions — `!system clean` must never cost anyone progress.
+   */
+  function cleanCaches () {
+    return 0
+  }
+
   return {
     WATERMARK, CLASSES, CLASS_MOVES, MODES, COMMANDS, SECTIONS,
+    queueDepth, sendLatency, cleanCaches,
     cmd, send, buttons, tapButtons, withVisual,
     arise, profile, listStages, beginBattle, battleAct, battleInfo, rest, train, finishBattle, battleButtons,
     classSheet,

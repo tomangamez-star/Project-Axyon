@@ -181,3 +181,25 @@ AI Custom cards use a rounded, dynamically palette-coloured code-drawn frame, a 
 ## Adventure modes and collaborations
 
 The additive adventure directory (`!mode`) exposes Solo, Multiplayer, Guild, Duel Chronicles and Abyssal Frontier while routing into existing floor, party, guild and duel systems wherever possible. Shared room campaigns keep their own story state. Cross-group `!collab` campaigns use PostgreSQL and verified registered groups. See [AXYON-ADVENTURE-COLLAB-UPDATE.md](AXYON-ADVENTURE-COLLAB-UPDATE.md) for supported commands, compatibility boundaries and current limitations.
+
+## Armor
+
+`!armor shop` lists the five tiers; `!armor buy <tier>` charges Zen, `!armor equip [id]` wears a suit, `!armor unequip` takes it off, `!armor repair [id]` restores durability and `!armor status` shows what you own and wear.
+
+| Tier | Protection | Zen | Durability |
+|---|---|---|---|
+| 1 | 100 | 10,000 | 10 |
+| 2 | 200 | 20,000 | 15 |
+| 3 | 300 | 30,000 | 20 |
+| 4 | 400 | 40,000 | 25 |
+| 5 | 500 | 50,000 | 30 |
+
+A worn suit absorbs its protection from every incoming hit in solo, party and duel combat. Durability is spent **once per completed battle**, not per hit, so a long fight cannot drain a suit faster than a short one. At zero durability the suit breaks permanently and stops absorbing; it is kept in the list so the player can see what they lost. Repair cost is proportional to the missing points (tier price ÷ tier durability, per point). State lives in `axyon_armor`, with a partial-unique index guaranteeing one worn suit per player.
+
+## Ending an encounter
+
+`!end` asks for confirmation; `!end confirm` abandons your own solo encounter. It grants no XP, no Zen and no Coins, and it does **not** advance the `!rest` counter — it exists so a player stuck in an unwinnable or accidental fight is not forced to walk away from the bot.
+
+## Owner diagnostics
+
+`!system health` (AXYON only) reports uptime, RSS and heap memory, Node version, in-flight send queue depth, the last send latency and the AI context cache size. `!system clean` drops temporary caches only — it never touches player progress, battles, sessions or saved adventure records.

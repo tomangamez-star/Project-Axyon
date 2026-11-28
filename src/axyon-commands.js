@@ -333,6 +333,150 @@ Reason: ${lock.reason}` : ''}`)
   cmd('battleinfo', 'battle', '{p}battleinfo', 'Show the full detailed report for your current battle or duel.', async (s, m, ctx) => axyon.battleInfo(s, m, ctx))
   cmd('rest', 'battle', '{p}rest', 'Restore full HP after two completed battles. Retreats do not count.', async (s, m, ctx) => axyon.rest(s, m, ctx))
   cmd('train', 'battle', '{p}train <atk|def|spd|str|per|sta|vit>', 'Train a combat attribute. Training XP has a daily cap.', async (s, m, ctx, args) => axyon.train(s, m, ctx, args[0]))
+  /* ---------------------------------------------------------------- armor */
+  /*
+   * Armor is bought with Zen, worn one suit at a time, soaks a flat amount of
+   * every incoming hit, and loses one durability point per COMPLETED battle
+   * (retreats and losses still count as completed — only a battle the player
+   * abandoned mid-turn does not). Zero durability breaks the suit for good.
+   */
+  cmd('armor', 'shop', '{p}armor <shop|status|buy|equip|unequip|repair>', 'Buy, wear, repair and inspect armor.', async (s, m, ctx, args = []) => {
+    const sub = String(args[0] || 'status').toLowerCase()
+    const send = txt => axyon.send(s, ctx.jid, m, txt)
+
+    if (sub === 'shop' || sub === 'list' || sub === 'tiers') {
+      const rows = store.ARMOR_TIERS.map(t =>
+        `*TIER ${t.tier}*\n  Protection ${T.b(String(t.protection))} · ${t.zen.toLocaleString('en-US')} Zen · ${t.durability} durability`)
+      return send([W, '', '🛡️ *ARMOR SHOP*', '', ...rows, '', `Buy with *${ctx.prefix}armor buy <tier>*`].join('\n'))
+    }
+
+    if (sub === 'status' || sub === 'info') {
+      const suit = await store.equippedArmor(ctx.userId)
+      const all = await store.armorFor(ctx.userId)
+      if (!all.length) return send(`🛡️ You own no armor. Browse *${ctx.prefix}armor shop* and buy a tier with *${ctx.prefix}armor buy <tier>*.`)
+      const worn = suit
+        ? `*WORN* — Tier ${suit.tier} · Protection ${T.b(String(suit.protection))}\nDurability ${suit.durability}/${suit.maxDurability}`
+        : '*WORN* — nothing equipped'
+      const owned = all.map(a => `• #${a.id} Tier ${a.tier} — ${a.durability}/${a.maxDurability} · ${a.broken ? '💀 broken' : a.equipped ? '✅ worn' : 'stored'}`)
+      return send([W, '', '🛡️ *ARMOR STATUS*', '', worn, '', '*OWNED*', ...owned].join('\n'))
+    }
+
+    if (sub === 'buy' || sub === 'purchase') {
+      const tier = parseNum(args[1])
+      if (!tier) return send(`Usage: *${ctx.prefix}armor buy <1-5>* — see *${ctx.prefix}armor shop* for prices.`)
+      try {
+        const suit = await store.buyArmor(ctx.userId, tier)
+        return send(`🛡️ *ARMOR ACQUIRED*\n\nTier ${suit.tier} · Protection ${T.b(String(suit.protection))}\nDurability ${suit.durability}/${suit.maxDurability}\n\nWear it with *${ctx.prefix}armor equip ${suit.id}*.`)
+      } catch (e) { return send(`❌ ${e.message}`) }
+    }
+
+    if (sub === 'equip' || sub === 'wear') {
+      const id = parseNum(args[1])
+      let suit
+      try {
+        if (id) suit = await store.equipArmor(ctx.userId, id)
+        else {
+          /* No id given: wear the best unbroken suit the player owns. */
+          const all = (await store.armorFor(ctx.userId)).filter(a => !a.broken && !a.equipped)
+          if (!all.length) return send(`You have no unbroken armor to switch to. Check *${ctx.prefix}armor status*.`)
+          suit = await store.equipArmor(ctx.userId, all[0].id)
+        }
+      } catch (e) { return send(`❌ ${e.message}`) }
+      return send(`✅ Wearing *Tier ${suit.tier}* armor — Protection ${T.b(String(suit.protection))}, durability ${suit.durability}/${suit.maxDurability}.`)
+    }
+
+    if (sub === 'unequip' || sub === 'remove') {
+      const suit = await store.unequipArmor(ctx.userId)
+      if (!suit) return send('You are not wearing any armor.')
+      return send(`Tier ${suit.tier} armor removed. You are now unprotected in battle.`)
+    }
+
+    if (sub === 'repair' || sub === 'fix') {
+      const id = parseNum(args[1])
+      const target = id ? { id } : (await store.armorFor(ctx.userId)).find(a => !a.broken)
+      if (!target) return send(`You have no armor to repair.`)
+      try {
+        const out = await store.repairArmor(ctx.userId, target.id)
+        return send(`🔧 *ARMOR REPAIRED*\n\nTier ${out.armor.tier} restored to ${out.armor.durability}/${out.armor.maxDurability} durability.\nCost: ${out.cost.toLocaleString('en-US')} Zen.`)
+      } catch (e) { return send(`❌ ${e.message}`) }
+    }
+
+    return send([`Usage: *${ctx.prefix}armor <shop|status|buy|equip|unequip|repair>*`, '', `• *shop* — tiers and prices`, `• *status* — what you own and wear`, `• *buy <tier>* — purchase`, `• *equip [id]* — wear a suit`, `• *unequip* — take it off`, `• *repair [id]* — restore durability`].join('\n'))
+  })
+
+  /*
+   * !end confirm — abandon your OWN solo encounter.
+   *
+   * Deliberately reward-free: it clears the battle row, restores the HP the
+   * player already had, and does NOT increment the rest counter. It exists so
+   * a player stuck in a battle they cannot win (or started by accident) is not
+   * forced to walk away from the bot.
+   */
+  cmd('end', 'battle', '{p}end confirm', 'Abandon your own solo encounter. No rewards, no penalties.', async (s, m, ctx, args = []) => {
+    const phrase = String(args[0] || '').toLowerCase()
+    const b = await store.getBattle(ctx.userId)
+    if (!b) return axyon.send(s, ctx.jid, m, `You have no active solo encounter to end.`)
+    if (phrase !== 'confirm') {
+      return axyon.send(s, ctx.jid, m, `⚠️ *END ENCOUNTER?*\n\nThis abandons your current solo encounter against *${b.enemy?.name || 'the enemy'}*.\nNo rewards. No XP. No penalty.\n\nType *${ctx.prefix}end confirm* to go through with it.`)
+    }
+    const p = await store.player(ctx.userId)
+    if (p) {
+      p.hp = Math.max(0, Math.min(p.maxHp, Number(b.playerHp ?? p.hp)))
+      p.powerEnergy = Math.max(0, Math.min(p.maxPowerEnergy, Number(b.energy ?? p.powerEnergy)))
+      await store.savePlayer(p)
+    }
+    await store.setBattle(ctx.userId, null)
+    await store.log(ctx.userId, 'end_encounter', String(b.enemy?.name || ''), {})
+    const progress = Math.max(0, Number(p?.battlesSinceRest) || 0)
+    return axyon.send(s, ctx.jid, m, `${W}\n\n🏳️ *ENCOUNTER ENDED*\n\nYou walk away from *${b.enemy?.name || 'the enemy'}*.\nNo rewards were granted.\nRest progress: *${progress}/2* completed battles — ending an encounter does not count.`)
+  })
+
+  /* --------------------------------------------------------------- system */
+  /*
+   * !system — owner-only diagnostics.
+   *
+   * `health` reports live process state only: nothing here touches player
+   * data. `clean` drops temporary caches; it never deletes progression,
+   * battles, sessions or saved adventure records.
+   */
+  cmd('system', 'management', '{p}system <health|clean>', 'Owner diagnostics: health snapshot or safe cache clean.', async (s, m, ctx, args = []) => {
+    if (!ctx.auth.axyon) return axyon.send(s, ctx.jid, m, '🛡️ *AXYON ONLY*\n\nOnly AXYON can inspect or clean the system.')
+    const sub = String(args[0] || 'health').toLowerCase()
+
+    if (sub === 'health' || sub === 'status') {
+      const mem = process.memoryUsage()
+      const mb = n => `${Math.round(n / 1024 / 1024)} MB`
+      const uptime = process.uptime()
+      const days = Math.floor(uptime / 86400)
+      const hours = Math.floor((uptime % 86400) / 3600)
+      const mins = Math.floor((uptime % 3600) / 60)
+      const aiStats = typeof ai?.stats === 'function' ? ai.stats() : null
+      const queue = typeof axyon.queueDepth === 'function' ? axyon.queueDepth() : null
+      const latency = typeof axyon.sendLatency === 'function' ? axyon.sendLatency() : null
+      return axyon.send(s, ctx.jid, m, [
+        W, '', '🩺 *SYSTEM HEALTH*', '',
+        `*Uptime* — ${days}d ${hours}h ${mins}m`,
+        `*Memory* — RSS ${mb(mem.rss)} · Heap ${mb(mem.heapUsed)}/${mb(mem.heapTotal)}`,
+        `*Node* — ${process.version}`,
+        `*Queue depth* — ${queue == null ? 'not instrumented' : queue}`,
+        `*Send latency* — ${latency == null ? 'not instrumented' : `${latency} ms`}`,
+        `*AI contexts* — ${aiStats?.contexts == null ? 'not instrumented' : aiStats.contexts}`,
+        `*Load* — ${(process.cpuUsage().user / 1e6).toFixed(1)}s CPU`
+      ].join('\n'))
+    }
+
+    if (sub === 'clean' || sub === 'clear') {
+      const cleaned = []
+      if (typeof axyon.cleanCaches === 'function') { const n = axyon.cleanCaches(); cleaned.push(`command caches (${n})`) }
+      if (typeof ai?.clean === 'function') { const n = ai.clean(); cleaned.push(`AI contexts (${n})`) }
+      if (!cleaned.length) return axyon.send(s, ctx.jid, m, '🧹 Nothing to clean — no temporary caches are held right now.')
+      await store.log(ctx.userId, 'system_clean', cleaned.join(', '), {})
+      return axyon.send(s, ctx.jid, m, `🧹 *CACHES CLEARED*\n\n${cleaned.map(x => `• ${x}`).join('\n')}\n\nPlayer progress, battles and sessions were not touched.`)
+    }
+
+    return axyon.send(s, ctx.jid, m, `Usage: *${ctx.prefix}system <health|clean>*`)
+  })
+
   cmd('guard', 'battle', '{p}guard', 'Reduce the next hit by 60%.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('defend', 'battle', '{p}defend', 'Alias for guard.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'guard'), { hidden: true })
   cmd('heal', 'battle', '{p}heal', 'Recover HP. Limited uses per combat; VIT improves recovery.', async (s, m, ctx) => axyon.battleAct(s, m, ctx, 'heal'), { hidden: true })

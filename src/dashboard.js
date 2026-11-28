@@ -68,6 +68,81 @@ async function body (req, max = 16384) {
   if (!chunks.length) return {}
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { throw Object.assign(Error('Invalid JSON'), { status: 400 }) }
 }
+/*
+ * IMAGE UPLOADS
+ * -------------
+ * The phone form posts multipart/form-data, which `body()` cannot read (it
+ * expects JSON). These helpers parse it by hand so the dashboard keeps no
+ * extra dependency, and they identify the image by its FILE SIGNATURE rather
+ * than by the filename or the Content-Type header the browser claims — a
+ * renamed .exe must not become a "PNG".
+ */
+const IMAGE_SIGNATURES = [
+  { mime: 'image/jpeg', test: b => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { mime: 'image/png', test: b => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 && b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a },
+  { mime: 'image/gif', test: b => b.length >= 6 && b.slice(0, 6).toString('latin1').match(/^GIF8[79]a$/) },
+  { mime: 'image/webp', test: b => b.length >= 12 && b.slice(0, 4).toString('latin1') === 'RIFF' && b.slice(8, 12).toString('latin1') === 'WEBP' }
+]
+
+/** The real MIME type of an image buffer, or '' when it is not one we accept. */
+function imageMime (buffer) {
+  const b = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || [])
+  for (const sig of IMAGE_SIGNATURES) if (sig.test(b)) return sig.mime
+  return ''
+}
+
+/** Read a whole request body as a Buffer, refusing anything over `max`. */
+async function rawBody (req, max) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > max) throw Object.assign(Error('Image must be 8 MB or smaller.'), { status: 413 })
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Parse multipart/form-data into { field: string, file: { filename, data } }.
+ *
+ * Only the parts this dashboard actually posts are supported: plain text
+ * fields and one file part. Anything malformed is reported as a 400 with a
+ * message the phone UI can show, never as a silent empty result.
+ */
+async function multipart (req, max = 8 * 1024 * 1024) {
+  const contentType = String(req.headers['content-type'] || '')
+  const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  if (!/multipart\/form-data/i.test(contentType) || !match) {
+    throw Object.assign(Error('Upload must be sent as multipart form data.'), { status: 400 })
+  }
+  const boundary = `--${(match[1] || match[2]).trim()}`
+  const raw = await rawBody(req, max)
+  const out = {}
+
+  /* Split on the boundary. The leading CRLF of each delimiter is part of the
+   * separator, so the first part starts after the opening boundary line. */
+  const segments = raw.toString('latin1').split(boundary)
+  for (const segment of segments) {
+    if (!segment || segment === '--\r\n' || segment === '--') continue
+    const trimmed = segment.replace(/^\r\n/, '')
+    const split = trimmed.indexOf('\r\n\r\n')
+    if (split === -1) continue
+    const head = trimmed.slice(0, split)
+    const value = trimmed.slice(split + 4).replace(/\r\n$/, '')
+    const nameMatch = head.match(/name="([^"]*)"/i)
+    if (!nameMatch) continue
+    const name = nameMatch[1]
+    const filenameMatch = head.match(/filename="([^"]*)"/i)
+    if (filenameMatch) {
+      out[name] = { filename: filenameMatch[1], data: Buffer.from(value, 'latin1') }
+    } else {
+      out[name] = Buffer.from(value, 'latin1').toString('utf8')
+    }
+  }
+  return out
+}
+
 function maskPhone (value) {
   const x = String(value || '').split(':')[0].split('@')[0].replace(/\D/g, '')
   return x.length > 7 ? `+${x.slice(0, 3)} ••• ••${x.slice(-4)}` : x ? 'Connected account' : 'Not available'
@@ -450,6 +525,24 @@ function createDashboard ({ sessions, database, lease, logger }) {
         return true
       }
 
+      /* ---------------------------------------------------- visual upload */
+      if (req.method === 'POST' && url.pathname === '/dashboard/api/visual-upload') {
+        const s = await requireAuth(req, res, 'visuals.write', true)
+        if (!s) return true
+        const fields = await multipart(req, 8 * 1024 * 1024)
+        const mode = String(fields.mode || '').trim().toLowerCase()
+        const caption = String(fields.caption || '').trim().slice(0, 200)
+        const file = fields.image
+        if (!mode) { json(res, 400, { ok: false, error: 'Choose which visual this image belongs to.' }); return true }
+        if (!file || !file.data || !file.data.length) { json(res, 400, { ok: false, error: 'Choose an image from your phone first.' }); return true }
+        const mime = imageMime(file.data)
+        if (!mime) { json(res, 400, { ok: false, error: 'That file is not a JPG, PNG, WEBP or GIF image.' }); return true }
+        const row = await cardStore.setVisualImage(mode, file.data, mime, caption)
+        await cardStore.log(s.userId, 'visual-upload', mode, { mime, bytes: file.data.length })
+        json(res, 200, { ok: true, message: `Visual for ${mode} updated.`, visual: { mode: row.mode, caption: row.caption, mimeType: row.mime_type } })
+        return true
+      }
+
       /* ------------------------------------------------------ card studio */
       if (url.pathname.startsWith('/dashboard/api/card-studio')) {
         const s = await requireAuth(req, res, 'overview.control', req.method !== 'GET')
@@ -460,11 +553,57 @@ function createDashboard ({ sessions, database, lease, logger }) {
           const fields = input.fields || {}
           const missing = ['name','version','arc','baseDamage','abilities','weapons','coin','zen','percentRating','starRating','rarity'].filter(k => fields[k] == null || fields[k] === '' || (Array.isArray(fields[k]) && !fields[k].length))
           if (!missing.length) { json(res, 200, { ok: true, fields: {} }); return true }
-          // Character completion is search-assisted and does not depend on a paid LLM.
-          // SerpApi is already configured for the Pinterest card-artwork workflow.
-          const apiKey = String(process.env.SERPAPI_API_KEY || '').trim()
-          if (!apiKey) { json(res, 503, { ok:false, error:'SERPAPI_API_KEY is missing. Add the same SerpApi key used by card artwork search in Render.' }); return true }
           if (!String(fields.name || '').trim()) { json(res, 400, { ok:false, error:'Enter the character name first so Axyon can look up the correct character.' }); return true }
+
+          /*
+           * Route 1 — Groq. The operator's own key, read from the server
+           * environment only. It is never sent to the browser and never
+           * appears in a response body.
+           */
+          const groqKey = String(process.env.GROQ_API_KEY || '').trim()
+          if (groqKey) {
+            try {
+              const prompt = [
+                `Character: ${fields.name}`,
+                fields.version ? `Version: ${fields.version}` : '',
+                fields.arc ? `Arc: ${fields.arc}` : '',
+                `Missing fields to fill: ${missing.join(', ')}`,
+                'Return ONLY a JSON object with those keys. abilities is an array of {name,damage}; weapons is an array of strings.',
+                'Use canonical anime knowledge. Damage, ratings and prices are game-balance estimates, not canon claims.'
+              ].filter(Boolean).join('\n')
+              const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json', authorization: `Bearer ${groqKey}` },
+                body: JSON.stringify({
+                  model: String(process.env.GROQ_MODEL || 'openai/gpt-oss-120b').trim(),
+                  messages: [
+                    { role: 'system', content: 'You fill in missing metadata for an anime trading-card game. Reply with JSON only.' },
+                    { role: 'user', content: prompt }
+                  ],
+                  temperature: 0.4,
+                  max_completion_tokens: 700,
+                  response_format: { type: 'json_object' }
+                }),
+                signal: AbortSignal.timeout(20000)
+              })
+              if (r.ok) {
+                const out = await r.json()
+                const text = out?.choices?.[0]?.message?.content || ''
+                const parsed = JSON.parse(String(text).replace(/^```(?:json)?|```$/g, '').trim())
+                const safe = {}
+                for (const key of missing) if (parsed[key] != null && parsed[key] !== '') safe[key] = parsed[key]
+                if (Object.keys(safe).length) {
+                  json(res, 200, { ok: true, fields: safe, source: 'Groq', note: 'Filled by Groq. Damage, ratings and prices are Axyon game-balance estimates.' })
+                  return true
+                }
+              }
+            } catch { /* fall through to the search-assisted route */ }
+          }
+
+          // Route 2 — search-assisted. SerpApi is already configured for the
+          // Pinterest card-artwork workflow, so this needs no extra key.
+          const apiKey = String(process.env.SERPAPI_API_KEY || '').trim()
+          if (!apiKey) { json(res, 503, { ok:false, error:'No AI provider is configured. Set GROQ_API_KEY (preferred) or SERPAPI_API_KEY in the server environment.' }); return true }
           const query = [fields.name, fields.version, fields.arc, 'anime character profile abilities powers techniques'].filter(Boolean).join(' ')
           const params = new URLSearchParams({ engine:'google', q:query, num:'8', api_key:apiKey })
           const lookup = await fetch(`https://serpapi.com/search.json?${params}`, { headers:{Accept:'application/json'}, signal:AbortSignal.timeout(20000) })
@@ -612,7 +751,7 @@ function createDashboard ({ sessions, database, lease, logger }) {
     return out
   }
 
-  return { handle, _test: { safeEqual, maskPhone, formatPairingCode, filterSnapshot, ACTION_PERMISSION } }
+  return { handle, _test: { safeEqual, maskPhone, formatPairingCode, filterSnapshot, ACTION_PERMISSION, imageMime, multipart } }
 }
 
-module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode } }
+module.exports = { createDashboard, _test: { safeEqual, maskPhone, formatPairingCode, imageMime, multipart } }

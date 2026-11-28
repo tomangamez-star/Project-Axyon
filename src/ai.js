@@ -376,7 +376,19 @@ function createAI ({ logger, getConfig } = {}) {
     return clean ? (clean.length > 420 ? clean.slice(0, 417) + '…' : clean) : null
   }
 
-  return { ask, generateMissionStory, buildSystemPrompt, sanitise, config }
+  /** Live counts for the owner's !system health snapshot. */
+  function stats () {
+    return { contexts: cache.size }
+  }
+
+  /** Drop cached system prompts. Progression and battles live elsewhere. */
+  function clean () {
+    const n = cache.size
+    cache.clear()
+    return n
+  }
+
+  return { ask, generateMissionStory, buildSystemPrompt, sanitise, config, stats, clean }
 }
 
 module.exports = { createAI, buildSystemPrompt, authorityBlock, sanitise, GROQ_MODEL }

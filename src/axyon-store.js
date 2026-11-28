@@ -392,6 +392,24 @@ async function ensureSchema () {
       qty INT NOT NULL DEFAULT 0,
       PRIMARY KEY(user_id, item_key));
 
+    /* Armor is owned per player, one row per tier purchased. The equipped flag
+     * is partial-unique (one worn suit per player), and durability reaching 0
+     * means the suit is broken for good. */
+    CREATE TABLE IF NOT EXISTS axyon_armor(
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      tier INT NOT NULL,
+      protection INT NOT NULL,
+      durability INT NOT NULL,
+      max_durability INT NOT NULL,
+      equipped BOOLEAN NOT NULL DEFAULT FALSE,
+      broken BOOLEAN NOT NULL DEFAULT FALSE,
+      bought_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+    CREATE INDEX IF NOT EXISTS axyon_armor_user_idx ON axyon_armor(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS axyon_armor_one_equipped
+      ON axyon_armor(user_id) WHERE equipped = TRUE;
+
     CREATE TABLE IF NOT EXISTS axyon_guilds(
       id BIGSERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -1591,6 +1609,169 @@ async function clearVisual (mode) {
   await db().query('DELETE FROM axyon_visuals WHERE mode=$1', [mode])
 }
 
+/* ----------------------------------------------------------------- armor */
+
+/*
+ * ARMOR
+ * -----
+ * Five tiers, fixed prices and durability. A suit absorbs a flat amount of
+ * incoming damage per hit and loses one durability point per completed battle
+ * it was worn in. At zero durability it is broken permanently — it is not
+ * deleted, so the player can still see what they lost.
+ */
+const ARMOR_TIERS = [
+  { tier: 1, protection: 100, zen: 10000, durability: 10 },
+  { tier: 2, protection: 200, zen: 20000, durability: 15 },
+  { tier: 3, protection: 300, zen: 30000, durability: 20 },
+  { tier: 4, protection: 400, zen: 40000, durability: 25 },
+  { tier: 5, protection: 500, zen: 50000, durability: 30 }
+]
+
+function armorTier (tier) {
+  return ARMOR_TIERS.find(t => Number(t.tier) === Number(tier)) || null
+}
+
+function mapArmor (r) {
+  if (!r) return null
+  return {
+    id: Number(r.id),
+    userId: r.user_id,
+    tier: Number(r.tier),
+    protection: Number(r.protection),
+    durability: Number(r.durability),
+    maxDurability: Number(r.max_durability),
+    equipped: !!r.equipped,
+    broken: !!r.broken,
+    boughtAt: r.bought_at
+  }
+}
+
+/** Every suit a player owns, newest first. */
+async function armorFor (userId) {
+  await ensureSchema()
+  const r = await db().query('SELECT * FROM axyon_armor WHERE user_id=$1 ORDER BY tier DESC, id DESC', [String(userId)])
+  return r.rows.map(mapArmor)
+}
+
+/** The suit currently worn, or null. */
+async function equippedArmor (userId) {
+  await ensureSchema()
+  const r = await db().query('SELECT * FROM axyon_armor WHERE user_id=$1 AND equipped=TRUE AND broken=FALSE LIMIT 1', [String(userId)])
+  return mapArmor(r.rows[0])
+}
+
+/**
+ * Buy a tier. Charges Zen atomically and refuses when the player cannot pay,
+ * so a failed purchase never leaves a suit behind.
+ */
+async function buyArmor (userId, tier) {
+  await ensureSchema()
+  const spec = armorTier(tier)
+  if (!spec) throw new Error('Unknown armor tier.')
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const p = await client.query('SELECT zen FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
+    if (!p.rows.length) throw new Error('Player not found.')
+    const zen = Number(p.rows[0].zen || 0)
+    if (zen < spec.zen) throw new Error(`Not enough Zen. Tier ${spec.tier} costs ${spec.zen.toLocaleString('en-US')} Zen.`)
+    await client.query('UPDATE axyon_players SET zen=zen-$2, updated_at=NOW() WHERE user_id=$1', [String(userId), spec.zen])
+    const r = await client.query(
+      `INSERT INTO axyon_armor(user_id,tier,protection,durability,max_durability)
+       VALUES($1,$2,$3,$4,$4) RETURNING *`,
+      [String(userId), spec.tier, spec.protection, spec.durability]
+    )
+    await client.query('COMMIT')
+    return mapArmor(r.rows[0])
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+/** Wear one suit. Unequips whatever else was on, in one transaction. */
+async function equipArmor (userId, armorId) {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const r = await client.query('SELECT * FROM axyon_armor WHERE id=$1 AND user_id=$2 FOR UPDATE', [Number(armorId), String(userId)])
+    const suit = r.rows[0]
+    if (!suit) throw new Error('You do not own that armor.')
+    if (suit.broken) throw new Error('That armor is broken and cannot be worn.')
+    await client.query('UPDATE axyon_armor SET equipped=FALSE, updated_at=NOW() WHERE user_id=$1 AND equipped=TRUE', [String(userId)])
+    const out = await client.query('UPDATE axyon_armor SET equipped=TRUE, updated_at=NOW() WHERE id=$1 RETURNING *', [Number(armorId)])
+    await client.query('COMMIT')
+    return mapArmor(out.rows[0])
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+async function unequipArmor (userId) {
+  await ensureSchema()
+  const r = await db().query('UPDATE axyon_armor SET equipped=FALSE, updated_at=NOW() WHERE user_id=$1 AND equipped=TRUE RETURNING *', [String(userId)])
+  return mapArmor(r.rows[0])
+}
+
+/**
+ * Repair a suit to full durability. Cost is proportional to the missing
+ * points, so a nearly-new suit is cheap and a nearly-broken one is not.
+ */
+async function repairArmor (userId, armorId) {
+  await ensureSchema()
+  const client = await db().connect()
+  try {
+    await client.query('BEGIN')
+    const r = await client.query('SELECT * FROM axyon_armor WHERE id=$1 AND user_id=$2 FOR UPDATE', [Number(armorId), String(userId)])
+    const suit = r.rows[0]
+    if (!suit) throw new Error('You do not own that armor.')
+    if (suit.broken) throw new Error('That armor is broken beyond repair.')
+    const missing = Number(suit.max_durability) - Number(suit.durability)
+    if (missing <= 0) throw new Error('That armor is already at full durability.')
+    const spec = armorTier(suit.tier)
+    const cost = Math.ceil((spec.zen / spec.durability) * missing)
+    const p = await client.query('SELECT zen FROM axyon_players WHERE user_id=$1 FOR UPDATE', [String(userId)])
+    if (Number(p.rows[0]?.zen || 0) < cost) throw new Error(`Repair costs ${cost.toLocaleString('en-US')} Zen and you do not have it.`)
+    await client.query('UPDATE axyon_players SET zen=zen-$2, updated_at=NOW() WHERE user_id=$1', [String(userId), cost])
+    const out = await client.query('UPDATE axyon_armor SET durability=max_durability, updated_at=NOW() WHERE id=$1 RETURNING *', [Number(armorId)])
+    await client.query('COMMIT')
+    return { armor: mapArmor(out.rows[0]), cost }
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Apply one completed battle's wear to the worn suit.
+ *
+ * Called once per battle, never per hit, so durability cannot be farmed by
+ * taking many small hits in a single fight. Returns the suit after wear, or
+ * null when nothing was equipped.
+ */
+async function wearArmor (userId, points = 1) {
+  await ensureSchema()
+  const r = await db().query(
+    `UPDATE axyon_armor
+        SET durability=GREATEST(0, durability-$2),
+            broken=(GREATEST(0, durability-$2) <= 0),
+            equipped=(GREATEST(0, durability-$2) > 0),
+            updated_at=NOW()
+      WHERE user_id=$1 AND equipped=TRUE AND broken=FALSE
+      RETURNING *`,
+    [String(userId), Math.max(1, Number(points) || 1)]
+  )
+  return mapArmor(r.rows[0])
+}
+
 /* ------------------------------------------------------------------ modes */
 
 async function modes () {
@@ -2524,6 +2705,15 @@ module.exports = {
   setVisual,
   setVisualImage,
   clearVisual,
+  ARMOR_TIERS,
+  armorTier,
+  armorFor,
+  equippedArmor,
+  buyArmor,
+  equipArmor,
+  unequipArmor,
+  repairArmor,
+  wearArmor,
   modes,
   setMode,
   createParty,
