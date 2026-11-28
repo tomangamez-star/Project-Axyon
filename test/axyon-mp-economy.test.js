@@ -14,9 +14,11 @@ test('MP tank unlocks at level 10 and grows by 15 every five levels', () => {
   assert.equal(store.mpCapacityForLevel(20), 130)
 })
 
-test('Zen has no daily earning cap while the daily XP cap remains 5,000', () => {
+test('Zen and battle XP have no daily earning cap; HP follows the level formula', () => {
   assert.equal(store.DEFAULT_SETTINGS.zenDailyLimit, undefined)
-  assert.equal(store.DEFAULT_SETTINGS.xpDailyLimit, 5000)
+  for (let level = 1; level <= 10; level++) assert.equal(store.maxHpForLevel(level), 100)
+  assert.equal(store.maxHpForLevel(11), 110)
+  assert.equal(store.maxHpForLevel(14), 140)
 })
 
 test('MP Refiller costs 500 Zen and restores 50 MP up to the tank maximum', () => {

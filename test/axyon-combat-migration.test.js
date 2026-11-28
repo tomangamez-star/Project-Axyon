@@ -13,11 +13,14 @@ test('new combat stats are added with additive migrations and safe defaults', ()
   assert.ok(source.includes('ADD COLUMN IF NOT EXISTS fatigue_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()'))
 })
 
-test('existing ATK, DEF, SPD, HP and progression are not rewritten by the migration', () => {
+test('the HP migration recalculates max HP and clamps current HP without rewriting other progression', () => {
   const migration = source.slice(source.indexOf('async function ensureSchema'), source.indexOf('function norm'))
   assert.ok(migration.includes('ADD COLUMN IF NOT EXISTS str'))
   assert.ok(migration.includes('ADD COLUMN IF NOT EXISTS vit'))
-  assert.ok(!/UPDATE axyon_players SET[^;]*(?:atk\s*=|def\s*=|spd\s*=|hp\s*=|level\s*=|xp\s*=|rank\s*=)/i.test(migration))
+  const hpMigration = migration.match(/UPDATE axyon_players\s+SET max_hp=CASE[\s\S]*?;/i)?.[0] || ''
+  assert.match(hpMigration, /max_hp=CASE WHEN level<=10 THEN 100 ELSE level\*10 END/i)
+  assert.match(hpMigration, /hp=LEAST\(hp,/i)
+  assert.doesNotMatch(hpMigration, /(?:atk\s*=|def\s*=|spd\s*=|level\s*=|xp\s*=|rank\s*=)/i)
 })
 
 test('player saves persist new stats alongside the original combat progression', () => {

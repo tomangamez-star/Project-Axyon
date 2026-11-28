@@ -40,7 +40,7 @@ function harness () {
   for (const k of ['player', 'group', 'settings', 'log']) saved[k] = store[k]
   store.player = async () => ({ user_id: '2348000000001', name: 'Hunter', level: 1, hp: 100, maxHp: 100 })
   store.group = async () => null
-  store.settings = async () => ({ prefix: '!', selfHealPerCombat: 5, classMovesPerDay: 3, xpDailyLimit: 1e9, zenDailyLimit: 1e9, partyMax: 5, partyMin: 2 })
+  store.settings = async () => ({ prefix: '!', selfHealPerCombat: 5, classMovesPerDay: 3, zenDailyLimit: 1e9, partyMax: 5, partyMin: 2 })
   store.log = async () => {}
   const restore = () => { for (const k of Object.keys(saved)) store[k] = saved[k] }
   return { sock, router: c, restore }

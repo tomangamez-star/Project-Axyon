@@ -32,7 +32,7 @@ function fakeSock () {
   }
 }
 
-function harness ({ player = null, battle = null, floors = [], sendButtons } = {}) {
+function harness ({ player = null, battle = null, floors = [], sendButtons, xpDailyLimit = 5000 } = {}) {
   const a = createAxyon({ sendButtons })
   const c = createCommands({ axyon: a })
   const sock = fakeSock()
@@ -52,7 +52,7 @@ function harness ({ player = null, battle = null, floors = [], sendButtons } = {
   store.setBattle = async (u, b) => { state.battle = b }
   store.savePlayer = async p => { state.player = { ...p } }
   store.log = async () => {}
-  store.settings = async () => ({ prefix: '!', selfHealPerCombat: 5, classMovesPerDay: 3, xpDailyLimit: 1e9, zenDailyLimit: 1e9, partyMax: 5, partyMin: 2 })
+  store.settings = async () => ({ prefix: '!', selfHealPerCombat: 5, classMovesPerDay: 3, xpDailyLimit, zenDailyLimit: 1e9, partyMax: 5, partyMin: 2 })
   store.axyonNumberMode = async () => null
   store.roleOf = async () => null
   store.partnerOf = async () => null
@@ -98,7 +98,7 @@ const basePlayer = () => ({
   userId: 'u1', name: 'Montai', level: 1, rank: 'Rookie', grade: 1,
   class: 'Swordsman', hp: 100, maxHp: 100, powerEnergy: 50, maxPowerEnergy: 50,
   xp: 0, zen: 0, coins: 0, atk: 20, def: 10, spd: 8,
-  stage: 1, wins: 0, losses: 0, xpToday: 0, zenToday: 0,
+  stage: 1, wins: 0, losses: 0, xpToday: 0, zenToday: 0, dayKey: store.dayKey(),
   healUses: 0, classMovesUsed: 0
 })
 
@@ -160,6 +160,24 @@ test('combat: winning awards XP and can level the player up', async () => {
   assert.ok(/VICTORY/i.test(out), `expected a victory, got: ${out.slice(0, 200)}`)
   assert.ok(after.level > 1, `expected a level-up, level is ${after.level}`)
   assert.ok(after.xp > 0 || after.level > 1, 'XP must be awarded')
+})
+
+test('combat: legacy 5,000 daily XP counter no longer blocks battle rewards', async () => {
+  const p = { ...basePlayer(), xpToday: 5000, dayKey: store.dayKey() }
+  const h = harness({
+    player: p,
+    xpDailyLimit: 5000,
+    battle: {
+      mode: 'stage', ordinal: 1, turn: 1, healsLeft: 5, guard: 0, energy: 50,
+      enemyHp: 1, playerHp: 100,
+      enemy: { name: 'Outer Gate', hp: 60, atk: 5, def: 2, xp: 500, zen: 60 }
+    }
+  })
+  await h.send('!attack')
+  const after = h.state.player
+  h.restore()
+  assert.ok(after.level > 1 || after.xp > 0, 'battle XP must still be awarded after the old cap')
+  assert.equal(after.xpToday, 5500, 'the daily counter may exceed the retired cap')
 })
 
 /* ----------------------------------------------------- dungeon combat */

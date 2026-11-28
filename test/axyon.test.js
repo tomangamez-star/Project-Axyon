@@ -114,28 +114,42 @@ test('progression can award Coins alongside XP and Zen', () => {
   assert.strictEqual(r.player.coins, 250)
 })
 
-test('grade-up at level 10 grants +15 HP and +4 ATK', () => {
+test('grade-up at level 10 grants +4 ATK while max HP stays 100', () => {
   const p = freshPlayer({ level: 9 })
   const r = rpg.applyProgress(p, { xp: store.xpNeed(9) })
   assert.strictEqual(r.player.level, 10)
   assert.strictEqual(r.player.grade, 2)
-  assert.strictEqual(r.player.maxHp, 115)
+  assert.strictEqual(r.player.maxHp, 100)
   assert.strictEqual(r.player.atk, 10)
 })
 
 test('grade-up does not repeat while inside the same band', () => {
-  const p = freshPlayer({ level: 10, grade: 2, maxHp: 115, atk: 10 })
+  const p = freshPlayer({ level: 10, grade: 2, maxHp: 100, atk: 10 })
   const r = rpg.applyProgress(p, { xp: 10 })
   assert.strictEqual(r.player.grade, 2)
-  assert.strictEqual(r.player.maxHp, 115)
+  assert.strictEqual(r.player.maxHp, 100)
 })
 
 test('grade 3 arrives at level 20', () => {
-  const p = freshPlayer({ level: 19, grade: 2, maxHp: 115, atk: 10 })
+  const p = freshPlayer({ level: 19, grade: 2, maxHp: 190, atk: 10 })
   const r = rpg.applyProgress(p, { xp: store.xpNeed(19) })
   assert.strictEqual(r.player.level, 20)
   assert.strictEqual(r.player.grade, 3)
-  assert.strictEqual(r.player.maxHp, 130)
+  assert.strictEqual(r.player.maxHp, 200)
+})
+
+test('max HP is 100 through level 10 and level times 10 from level 11', () => {
+  for (let level = 1; level <= 10; level++) assert.equal(store.maxHpForLevel(level), 100)
+  assert.equal(store.maxHpForLevel(11), 110)
+  assert.equal(store.maxHpForLevel(14), 140)
+})
+
+test('level 10 to 11 raises max HP to 110 without free healing', () => {
+  const p = freshPlayer({ level: 10, grade: 2, hp: 63, maxHp: 100 })
+  const r = rpg.applyProgress(p, { xp: store.xpNeed(10) })
+  assert.equal(r.player.level, 11)
+  assert.equal(r.player.maxHp, 110)
+  assert.equal(r.player.hp, 63)
 })
 
 test('rank-up restores Power Energy', () => {

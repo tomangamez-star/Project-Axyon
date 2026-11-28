@@ -36,7 +36,7 @@ function fakeSock () {
 function ctx (over = {}) {
   return {
     userId: '111', jid: 'g@g.us', name: 'Hunter', prefix: '!',
-    settings: { prefix: '!', xpDailyLimit: 5000, selfHealPerCombat: 3, classMovesPerDay: 3 },
+    settings: { prefix: '!', selfHealPerCombat: 3, classMovesPerDay: 3 },
     auth: { axyon: false },
     ...over
   }
@@ -116,6 +116,35 @@ test('armor shop lists every tier with its price', async () => {
   }
 })
 
+test('armor shop clearly states the level-50 unlock', async () => {
+  const a = createAxyon({})
+  const c = createCommands({ axyon: a })
+  const sock = fakeSock()
+  await c.BY_NAME.get('armor').handler(sock, {}, ctx(), ['shop'], {})
+  assert.match(sock.last(), /unlocks at \*Level 50\*/i)
+})
+
+test('armor status explains that existing armor is preserved but inactive below level 50', async () => {
+  const a = createAxyon({})
+  const c = createCommands({ axyon: a })
+  const sock = fakeSock()
+  const originalPlayer = store.player
+  const originalArmorFor = store.armorFor
+  const originalEquipped = store.equippedArmor
+  store.player = async () => ({ level: 49 })
+  store.armorFor = async () => [suit({ id: 77, equipped: true })]
+  store.equippedArmor = async () => null
+  try {
+    await c.BY_NAME.get('armor').handler(sock, {}, ctx(), ['status'], {})
+    assert.match(sock.last(), /inactive until Level 50/i)
+    assert.match(sock.last(), /equipped, inactive/i)
+  } finally {
+    store.player = originalPlayer
+    store.armorFor = originalArmorFor
+    store.equippedArmor = originalEquipped
+  }
+})
+
 test('armor buy without a tier prints usage instead of charging', async () => {
   const a = createAxyon({})
   const c = createCommands({ axyon: a })
@@ -142,12 +171,18 @@ test('armor status with no suits tells the player how to buy one', async () => {
   const sock = fakeSock()
   const original = store.armorFor
   const originalEquipped = store.equippedArmor
+  const originalPlayer = store.player
   store.armorFor = async () => []
   store.equippedArmor = async () => null
+  store.player = async () => ({ level: 1 })
   try {
     await c.BY_NAME.get('armor').handler(sock, {}, ctx(), ['status'], {})
     assert.match(sock.last(), /armor shop/)
-  } finally { store.armorFor = original; store.equippedArmor = originalEquipped }
+  } finally {
+    store.armorFor = original
+    store.equippedArmor = originalEquipped
+    store.player = originalPlayer
+  }
 })
 
 /* ------------------------------------------------------------- !end confirm */
